@@ -1,0 +1,30 @@
+services:
+  altstore-manager:
+    build: .
+    container_name: altstore-source-manager
+    ports:
+      - 7000:5000
+    volumes:
+      # Mount only the data directory, not the entire /app
+      - ./data:/app/data
+      - ./data/ipas:/app/data/ipas
+      - ./data/icons:/app/data/icons
+    environment:
+      - FLASK_ENV=production
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4096m
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -f
+        - http://localhost:5000/source.json
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+networks: {}
