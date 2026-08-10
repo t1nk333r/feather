@@ -18,12 +18,27 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 app = Flask(__name__)
 
 # Configuration
-SOURCE_FILE = "/app/data/source.json"
-UPLOAD_FOLDER = "/app/data/uploads"
-IPA_FOLDER = "/app/data/ipas"
-ICON_FOLDER = "/app/data/icons"
+DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
+SOURCE_FILE = os.path.join(DATA_DIR, "source.json")
+UPLOAD_FOLDER = os.path.join(DATA_DIR, "uploads")
+IPA_FOLDER = os.path.join(DATA_DIR, "ipas")
+ICON_FOLDER = os.path.join(DATA_DIR, "icons")
 ALLOWED_EXTENSIONS = {'ipa'}
 ALLOWED_ICON_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp', 'gif'}
+
+# Environment-driven configuration
+SECRET_KEY = os.environ.get("SECRET_KEY")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL")
+PORT = int(os.environ.get("PORT", "5000"))
+MAX_CONTENT_LENGTH = int(os.environ.get("MAX_CONTENT_LENGTH", 2 * 1024 * 1024 * 1024))
+
+app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
+if SECRET_KEY:
+    app.secret_key = SECRET_KEY
+else:
+    app.secret_key = os.urandom(32)
+    logging.warning("SECRET_KEY not set — using a random key; sessions will not survive restart")
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -48,7 +63,7 @@ class SourceManager:
     
     def ensure_data_directory(self):
         """Ensure data and upload directories exist"""
-        os.makedirs("/app/data", exist_ok=True)
+        os.makedirs(DATA_DIR, exist_ok=True)
         os.makedirs(UPLOAD_FOLDER, exist_ok=True)
         os.makedirs(IPA_FOLDER, exist_ok=True)
         os.makedirs(ICON_FOLDER, exist_ok=True)
@@ -2528,4 +2543,4 @@ def internal_error(error):
 
 if __name__ == '__main__':
     logging.info("Starting AltStore Source Manager...")
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='0.0.0.0', port=PORT, debug=False)
