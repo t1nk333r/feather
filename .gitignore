@@ -5,6 +5,9 @@ data/
 # Secrets — contains the admin password.
 .env
 
+# Agent worktrees / local tooling state
+.claude/
+
 # Python
 __pycache__/
 *.pyc

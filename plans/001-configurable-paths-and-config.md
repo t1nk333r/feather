@@ -174,7 +174,9 @@ ICON_FOLDER = os.path.join(DATA_DIR, "icons")
 
 At `app.py:51`, replace the hardcoded `os.makedirs("/app/data", exist_ok=True)` with `os.makedirs(DATA_DIR, exist_ok=True)`.
 
-**Verify**: `grep -c '"/app/data"' app.py` → `0`
+**Verify**: `grep -c 'os.makedirs("/app/data"' app.py` → `0`
+
+Note: `grep -c '"/app/data"' app.py` will still return `1` — the literal survives as the `DATA_DIR` default on line 21, which is deliberate and load-bearing. Do **not** remove it to make a grep return zero.
 
 ### Step 3: Read the remaining `.env` keys
 
@@ -268,7 +270,9 @@ Expected: `8`
 ALL must hold:
 
 - [ ] `python3 -m py_compile app.py` exits 0
-- [ ] `grep -c '"/app/data"' app.py` returns `0`
+- [ ] `grep -c 'os.makedirs("/app/data"' app.py` returns `0`
+- [ ] `grep -n '"/app/data"' app.py` returns exactly one hit, on the `DATA_DIR` line
+- [ ] With `DATA_DIR` unset, `SOURCE_FILE` still resolves to `/app/data/source.json` (container behaviour unchanged)
 - [ ] `DATA_DIR=/tmp/feather-test python3 -c "import app"` exits 0 and creates `/tmp/feather-test/`
 - [ ] `/app` does not exist on the host
 - [ ] `docker compose config` exits 0 and resolves `.env`

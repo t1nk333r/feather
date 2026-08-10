@@ -20,6 +20,7 @@
 - **Effort**: S (one line of change; most of this plan is the verification)
 - **Risk**: LOW
 - **Depends on**: none. **Run this before Plan 003**, which deletes the file the pins are harvested from.
+- **Confidence upgraded to HIGH (2026-08-10)**: during Plan 001's review, `pip install -r requirements.txt` completed cleanly into a fresh venv and `import PIL` then raised `ModuleNotFoundError`. Pillow is confirmed absent and is not pulled in transitively. Step 1's container checks are still worth running to observe the actual `/qr` status code, but the missing dependency is no longer in question.
 - **Category**: bug
 - **Planned at**: no VCS — `requirements.txt` md5 `529118e6cac74383205ed8be97c2fec0`, 2026-08-10
 

@@ -18,8 +18,8 @@ Three facts shape every plan here:
 
 | Plan | Title | Priority | Effort | Risk | Depends on | Status |
 |------|-------|----------|--------|------|------------|--------|
-| [001](001-configurable-paths-and-config.md) | Make data paths and configuration environment-driven | P1 | S | LOW | — | TODO |
-| [002](002-version-control.md) | Put the repository under version control | P1 | S | LOW | — | TODO |
+| [001](001-configurable-paths-and-config.md) | Make data paths and configuration environment-driven | P1 | S | LOW | — | **DONE** — `bdcf5da`, branch `worktree-agent-a57b134552d88f7fe`, unmerged |
+| [002](002-version-control.md) | Put the repository under version control | P1 | S | LOW | — | **DONE** — `2fe1d2c` on `main`, pushed to `d7eeem/feather` (private) |
 | [003](003-delete-dead-copies.md) | Delete the two dead copies of the application | P1 | S | LOW | 002, 004 | TODO |
 | [004](004-restore-pillow-qr.md) | Restore Pillow so the QR endpoint works | P1 | S | LOW | — | TODO |
 | [005](005-smoke-test-suite.md) | Establish a one-command smoke-test suite | P1 | S | LOW | 001 | TODO |
@@ -58,6 +58,15 @@ Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (with a one-line reas
 Plan 005 establishes the suite. The host runs Python 3.14 and the container runs 3.11, and `Flask==2.3.3` may not install on 3.14. Plan 005 Step 1 tries a host virtualenv first and falls back to running inside the container. **Whoever executes 005 must record which path worked here**, because every later plan says "run the tests":
 
 > Test command: _(to be filled in by the executor of Plan 005)_
+
+**Known-good environment setup**, established during Plan 001's review — `requirements.txt` installs cleanly on the host's Python 3.14, contrary to the concern above:
+>
+> ```
+> python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+> ```
+> `flask`, `qrcode`, `requests`, `altparse` all import successfully. So Plan 005 should take the host-venv path, not the container fallback. Note `python3 -m venv -q` is **not** a valid flag — omit it.
+
+**Pre-existing `SyntaxWarning`** (noted during Plan 001 review, not a regression): `app.py` line ~1614 emits `SyntaxWarning: "\/" is an invalid escape sequence` from a JavaScript regex inside `HTML_TEMPLATE`. It is present in the baseline commit too. Plan 009 moves this code into `templates/index.html`, where Python will stop parsing it and the warning disappears on its own. Don't "fix" it in `app.py`.
 
 ## Findings considered and rejected
 
