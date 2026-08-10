@@ -12,6 +12,8 @@ services:
     environment:
       - FLASK_ENV=production
       - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
     restart: unless-stopped
     deploy:
       resources:
