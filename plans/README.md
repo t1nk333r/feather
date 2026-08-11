@@ -22,7 +22,7 @@ Three facts shape every plan here:
 | [002](002-version-control.md) | Put the repository under version control | P1 | S | LOW | — | **DONE** — `2fe1d2c` on `main`, pushed to `d7eeem/feather` (private) |
 | [003](003-delete-dead-copies.md) | Delete the two dead copies of the application | P1 | S | LOW | 002, 004 | TODO |
 | [004](004-restore-pillow-qr.md) | Restore Pillow so the QR endpoint works | P1 | S | LOW | — | **DONE** — `cec6ae4`, merged as `facf9c1`. Pinned `pillow==11.3.0`, **not** the harvested `10.1.0` (no cp314 wheel — see the plan). Verified on both interpreters; see "Plan 004 verification" below. |
-| [005](005-smoke-test-suite.md) | Establish a one-command smoke-test suite | P1 | S | LOW | 001 | TODO |
+| [005](005-smoke-test-suite.md) | Establish a one-command smoke-test suite | P1 | S | LOW | 001 | **DONE** — host venv path; 21 tests, all 13 routes covered, `pytest tests/ -q` passes in ~0.17s |
 | [006](006-atomic-catalog-writes.md) | Make catalog writes atomic and serialized | P1 | S | LOW | 005 | TODO |
 | [007](007-fail-loudly.md) | Report failures instead of silently reporting success | P1 | S–M | LOW–MED | 005 (006 recommended) | TODO |
 | [008](008-public-base-url.md) | Derive published URLs from configuration, not the `Host` header | P2 | S | LOW | 001, 005 | TODO |
@@ -57,7 +57,7 @@ Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (with a one-line reas
 
 Plan 005 establishes the suite. The host runs Python 3.14 and the container runs 3.11, and `Flask==2.3.3` may not install on 3.14. Plan 005 Step 1 tries a host virtualenv first and falls back to running inside the container. **Whoever executes 005 must record which path worked here**, because every later plan says "run the tests":
 
-> Test command: _(to be filled in by the executor of Plan 005)_
+> Test command: `.venv/bin/python -m pytest tests/ -q` (host venv path — confirmed working, 21 tests pass in ~0.17s; no container fallback needed)
 
 **Known-good environment setup**, established during Plan 001's review — `requirements.txt` installs cleanly on the host's Python 3.14, contrary to the concern above:
 >
