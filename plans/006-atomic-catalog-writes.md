@@ -9,12 +9,16 @@
 > **Drift check (run first)**:
 > ```
 > cd /home/t1nk33r/Documents/feather
-> sed -n '238,246p' app.py
-> grep -c "def save_source" app.py
+> git rev-parse --short HEAD      # plan refreshed against 480e02e
+> md5sum app.py                   # expect 046fe485b4dde6fc6bc9cfa5899d56db
+> sed -n '308,317p' app.py
+> grep -c "def save_source" app.py   # expect 1
+> .venv/bin/python -m pytest tests/ -q   # expect 29 passed
 > ```
-> The excerpt must match "Current state" below and the count must be `1`.
-> Also confirm Plan 005 landed: `test -d tests && .venv/bin/python -m pytest tests/ -q`
-> must pass before you change anything.
+> The excerpt must match "Current state" below. **All line numbers were
+> re-verified on 2026-08-11** after Plans 001, 004, 005 and 007 landed;
+> `app.py` is 2644 lines. On a mismatch, match the code excerpts — they are
+> authoritative, the line numbers are a convenience.
 
 ## Status
 
@@ -23,7 +27,7 @@
 - **Risk**: LOW
 - **Depends on**: `plans/005-smoke-test-suite.md` (mandatory — you need a regression net)
 - **Category**: bug
-- **Planned at**: no VCS at authoring time — `app.py` md5 `2d17cee45698fa4f062cd9b4114e20d0`, 2026-08-10
+- **Planned at**: 2026-08-10. **Refreshed 2026-08-11** against `480e02e`; `app.py` md5 `046fe485b4dde6fc6bc9cfa5899d56db`. Plan 007 landed in between and moved every line number in this plan by roughly +70; it also introduced two `os.replace` calls, which changes one done criterion (see below).
 
 ## Why this matters
 
@@ -39,7 +43,7 @@ Separately, **eight** methods do read → mutate → write with no lock, under F
 
 ## Current state
 
-**`app.py:229-246`** — the load/save pair:
+**`app.py:299-316`** — the load/save pair:
 
 ```python
     def load_source(self):
@@ -62,7 +66,7 @@ Separately, **eight** methods do read → mutate → write with no lock, under F
             return False
 ```
 
-**`app.py:44-47`** — the constructor you will add the lock to:
+**`app.py:65-68`** — the constructor you will add the lock to:
 
 ```python
     def __init__(self, source_file):
@@ -75,16 +79,20 @@ Separately, **eight** methods do read → mutate → write with no lock, under F
 
 | Method | Defined at | `save_source` call at |
 |---|---|---|
-| `add_app_manual` | 256 | 326 |
-| `add_app_from_github` | 328 | 370 |
-| `add_app_from_altsource` | 376 | 468 |
-| `delete_app` | 484 | 509 |
-| `update_app` | 525 | 572 |
-| `add_version` | 575 | 632 |
-| `update_version` | 635 | 702 |
-| `update_source_info` | 705 | 715 |
+| `add_app_manual` | 326 | 410 |
+| `add_app_from_github` | 414 | 459 |
+| `add_app_from_altsource` | 465 | 557 |
+| `delete_app` | 573 | 599 |
+| `update_app` | 615 | 666 |
+| `add_version` | 669 | 734 |
+| `update_version` | 737 | 810 |
+| `update_source_info` | 813 | 823 |
 
-Representative shape — `app.py:705-716`, the smallest of the eight:
+**There is a ninth `save_source` call, at `app.py:296`, inside `initialize_source()`.** It runs once at construction time to write the default catalog. **Do not lock it and do not count it** — `grep -n "self.save_source(" app.py` returns nine lines and only the eight above get wrapped. `save_source` itself never takes the lock, so there is no deadlock risk from this call.
+
+**Verified today: none of the eight calls any other of the eight.** `grep -n "self\.\(add_app_manual\|add_app_from_github\|add_app_from_altsource\|delete_app\|update_app\|add_version\|update_version\|update_source_info\)(" app.py` returns nothing. The non-reentrancy STOP condition below is therefore not expected to fire — but re-run that grep yourself before Step 4 rather than trusting this line.
+
+Representative shape — `app.py:813-824`, the smallest of the eight:
 
 ```python
     def update_source_info(self, data):
@@ -101,7 +109,7 @@ Representative shape — `app.py:705-716`, the smallest of the eight:
         return success, "Source information updated successfully" if success else "Failed to update source information"
 ```
 
-**Already-available imports** — `app.py:1-13` already imports `os`, `json`, `tempfile`, `shutil`, `logging`, and `datetime`. `tempfile` is imported at line 8 and currently **unused**, so you need it for nothing new. You will need to add `threading`.
+**Already-available imports** — `app.py:1-12` imports `json`, `os`, `logging`, `qrcode`, `io`, `requests`, `tempfile`, `hashlib` and `datetime`. `tempfile` is at line 8 and is currently **unused**, so Step 2 needs no new dependency. You must add `threading`. Note `shutil` is **no longer imported** — Plan 007 removed it when it replaced `copyfileobj`; do not reintroduce it.
 
 **`data/backups/`** exists and is empty. It was clearly intended for exactly this.
 
@@ -116,12 +124,14 @@ Representative shape — `app.py:705-716`, the smallest of the eight:
 | Catalog validity | `python3 -c "import json; print(len(json.load(open('data/source.json'))['apps']))"` | `8` |
 | Container | `docker compose up --build -d` | exit 0 |
 
-(If Plan 005 recorded that tests run inside the container rather than a host venv, use that command instead — check `plans/README.md`.)
+Plan 005 recorded the working command: **`.venv/bin/python -m pytest tests/ -q`**, host venv, 29 tests. Set it up with `python3 -m venv .venv` (note: `-q` is **not** a valid flag on the `venv` line) then `.venv/bin/pip install -q -r requirements.txt -r requirements-dev.txt`.
+
+**If you are working in a git worktree**, `data/` and `.env` are gitignored and therefore absent, so the `docker compose` and live-`curl` checks in Step 6 cannot run and the catalog-validity command has no file to read. Do not fabricate a `.env` or copy `data/` in. Run the pytest half, do the Step 6 backup/temp-file checks against a `tmp_path` data dir via the test suite instead, and **say plainly in your report which checks you could not run**.
 
 ## Scope
 
 **In scope** (the only file you may modify, plus tests):
-- `app.py` — `SourceManager.__init__` (44–47), `save_source` (238–246), and the eight mutating methods listed above
+- `app.py` — `SourceManager.__init__` (65–68), `save_source` (308–316), and the eight mutating methods listed above
 - `tests/test_routes.py` — add the cases in "Test plan"
 - `requirements.txt` — remove the unused `atomicwrites` pin (Step 5)
 
@@ -155,7 +165,7 @@ Add `import threading` to the imports at the top of `app.py`, then add a lock to
 
 ### Step 2: Rewrite `save_source` to write atomically
 
-Replace the body of `save_source` (`app.py:238-246`). The pattern:
+Replace the body of `save_source` (`app.py:308-316`). The pattern:
 
 1. Write the JSON to a temporary file **in the same directory as `self.source_file`**. This is not optional — `os.replace` is only atomic within a single filesystem, and `data/` is a bind mount, so a temp file in `/tmp` would be on a different device.
 2. `flush()` and `os.fsync()` the temp file before closing, so the bytes are actually on disk before the rename.
@@ -205,7 +215,7 @@ Add a `_backup_source` method to `SourceManager`. It copies the *current* `sourc
 - Use `datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")` for the timestamp (`datetime` is already imported).
 - If `source.json` does not exist yet (first run), do nothing and return quietly.
 - Backup failure must **never** block the save — wrap it so an error is logged and swallowed. A failed backup is a nuisance; a failed save is data loss.
-- Create `data/backups/` if missing. Add it alongside the other `os.makedirs` calls in `ensure_data_directory` (`app.py:49-55`) so it exists from startup.
+- Create `data/backups/` if missing. Add it alongside the other `os.makedirs` calls in `ensure_data_directory` (`app.py:70-76`) so it exists from startup. Define the directory next to the other path constants near `app.py:21-27`, following the `os.path.join(DATA_DIR, ...)` pattern Plan 001 established — do not hardcode `data/backups`.
 
 **Verify**: `grep -c "backups" app.py` → at least `2` (it was `0` before)
 
@@ -292,10 +302,10 @@ ALL must hold:
 
 - [ ] `python3 -m py_compile app.py` exits 0
 - [ ] `grep -c "with self._lock:" app.py` returns `8`
-- [ ] `grep -c "os.replace" app.py` returns `1`
+- [ ] `grep -c "os.replace" app.py` returns **`3`**, not `1`. Plan 007 already introduced two `os.replace` calls in `update_version`'s staged-IPA swap (`app.py:779` and `792`); this plan adds the third, in `save_source`. Check the new one specifically: `grep -n "os.replace" app.py` must show a line inside `save_source`. **Leave the other two alone** — they are the guarantee that a failed IPA fetch cannot destroy a hosted binary.
 - [ ] `grep -c "atomicwrites" requirements.txt app.py` returns `0` for both
 - [ ] `grep -c "open(self.source_file, 'w')" app.py` returns `0`
-- [ ] `.venv/bin/python -m pytest tests/ -q` exits 0 with 5 new tests passing
+- [ ] `.venv/bin/python -m pytest tests/ -q` exits 0 with **34 tests** (29 existing + 5 new), and the 29 existing tests are unmodified
 - [ ] The concurrency test fails when the `with self._lock:` wrappers are temporarily removed (prove the test is real)
 - [ ] After a live mutation, `data/backups/` contains a timestamped file and `data/source.json` lists 8 apps
 - [ ] No `.source-*.tmp` files remain in `data/`
