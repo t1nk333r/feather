@@ -75,6 +75,21 @@ def get_file_size(filepath):
         logging.warning(f"Could not determine size of {filepath}: {e}")
         return None
 
+def resolve_base_url():
+    """The externally-reachable base URL for links written into source.json.
+
+    Prefers PUBLIC_BASE_URL. Falls back to the request's Host header, which
+    is client-controlled — so an admin browsing by LAN IP would otherwise
+    bake that IP permanently into the catalog.
+    """
+    if PUBLIC_BASE_URL:
+        return PUBLIC_BASE_URL.rstrip('/')
+    logging.warning(
+        "PUBLIC_BASE_URL is not set — falling back to the request Host header. "
+        "URLs written to source.json will reflect however this request reached the server."
+    )
+    return request.url_root.rstrip('/')
+
 
 def _require_garage_config():
     """Refuse to start with STORAGE_BACKEND=garage and any required Garage
@@ -2715,7 +2730,7 @@ def serve_icon(bundle_id, ext):
 def generate_qr():
     try:
         # Use feather:// URL scheme for QR code
-        source_url = request.url_root + 'source.json'
+        source_url = resolve_base_url() + '/source.json'
         feather_url = source_url.replace('https://', 'feather://').replace('http://', 'feather://')
         
         qr = qrcode.QRCode(version=1, box_size=10, border=5)
@@ -2746,7 +2761,7 @@ def get_apps():
 @app.route('/api/add-app', methods=['POST'])
 def add_app():
     try:
-        base_url = request.url_root.rstrip('/')
+        base_url = resolve_base_url()
         # Check if request is form-data (file upload) or JSON
         if request.content_type and 'multipart/form-data' in request.content_type:
             # Form data request
@@ -2816,7 +2831,7 @@ def get_app(bundle_identifier):
 @app.route('/api/update-app', methods=['POST'])
 def update_app():
     try:
-        base_url = request.url_root.rstrip('/')
+        base_url = resolve_base_url()
         # Check if request is form-data (file upload) or JSON
         if request.content_type and 'multipart/form-data' in request.content_type:
             # Form data request
@@ -2860,7 +2875,7 @@ def update_app():
 @app.route('/api/add-version', methods=['POST'])
 def add_version():
     try:
-        base_url = request.url_root.rstrip('/')
+        base_url = resolve_base_url()
         # Check if request is form-data (file upload) or JSON
         if request.content_type and 'multipart/form-data' in request.content_type:
             # Form data request
@@ -2902,7 +2917,7 @@ def add_version():
 @app.route('/api/update-version', methods=['POST'])
 def update_version():
     try:
-        base_url = request.url_root.rstrip('/')
+        base_url = resolve_base_url()
         # Check if request is form-data (file upload) or JSON
         if request.content_type and 'multipart/form-data' in request.content_type:
             # Form data request
