@@ -9,11 +9,16 @@
 > **Drift check (run first)**:
 > ```
 > cd /home/t1nk33r/Documents/feather
+> git rev-parse --short HEAD      # plan refreshed against 0584fa7
+> md5sum app.py                   # expect a5756489489e116821a9c3a1f775f567
 > grep -n "request.url_root" app.py
+> grep -c "PUBLIC_BASE_URL" app.py       # expect 1 — plan 001 landed
+> .venv/bin/python -m pytest tests/ -q   # expect 34 passed
 > ```
-> Expected: exactly 5 hits — lines 2283, 2314, 2379, 2423, 2465.
-> Also confirm Plan 001 landed (`grep -c "PUBLIC_BASE_URL" app.py` → `1`) and
-> Plan 005's suite is green.
+> Expected: exactly 5 `url_root` hits — lines **2469, 2500, 2570, 2614, 2656**.
+> **All line numbers re-verified 2026-08-11** after plans 001/004/005/006/007
+> landed; `app.py` is 2722 lines. On a mismatch, match the code excerpts —
+> they are authoritative, the line numbers are a convenience.
 
 ## Status
 
@@ -22,7 +27,7 @@
 - **Risk**: LOW
 - **Depends on**: `plans/001-configurable-paths-and-config.md`, `plans/005-smoke-test-suite.md`
 - **Category**: bug (with a security dimension)
-- **Planned at**: no VCS at authoring time — `app.py` md5 `2d17cee45698fa4f062cd9b4114e20d0`, 2026-08-10
+- **Planned at**: 2026-08-10. **Refreshed 2026-08-11** against `0584fa7`; `app.py` md5 `a5756489489e116821a9c3a1f775f567`. Plans 004/005/006/007 landed in between and shifted the route block by roughly +190 lines. Two done criteria were also arithmetically wrong and have been corrected — see "Done criteria".
 
 ## Why this matters
 
@@ -38,7 +43,7 @@ The security dimension is the same mechanism with intent: a request carrying a f
 
 **The five `request.url_root` sites.**
 
-`app.py:2279-2284` — the QR endpoint:
+`app.py:2465-2470` — the QR endpoint:
 
 ```python
 @app.route('/qr')
@@ -49,7 +54,7 @@ def generate_qr():
         feather_url = source_url.replace('https://', 'feather://').replace('http://', 'feather://')
 ```
 
-`app.py:2314`, `2379`, `2423`, `2465` — identical in all four mutating routes:
+`app.py:2500`, `2570`, `2614`, `2656` — identical in all four mutating routes:
 
 ```python
         base_url = request.url_root.rstrip('/')
@@ -57,7 +62,7 @@ def generate_qr():
 
 That `base_url` is threaded down into `SourceManager` and consumed by two methods.
 
-`app.py:116-122`:
+`app.py:181-187`:
 
 ```python
     def get_local_ipa_url(self, bundle_id, version, base_url=None):
@@ -69,7 +74,7 @@ That `base_url` is threaded down into `SourceManager` and consumed by two method
         return path
 ```
 
-`app.py:197-209`:
+`app.py:277-289`:
 
 ```python
     def get_local_icon_url(self, bundle_id, base_url=None):
@@ -106,6 +111,30 @@ So `http://feather.example.com` is the canonical base in use today. Confirm with
 
 **Repo conventions**: module-level constants for config; `logging.warning(f"...")` for degraded-but-working conditions.
 
+## Canonical base URL — already decided, do not re-litigate
+
+The operator's canonical base is **`http://feather.example.com`** (no trailing slash, plain HTTP). Verified against the live catalog on 2026-08-11:
+
+```
+ 5  http://feather.example.com      <- this app, canonical
+ 5  https://filebin.example.com     <- external file host, leave alone
+ 1  https://github.com               <- external, leave alone
+ 1  https://michael-128.github.io    <- external, leave alone
+ 1  http://<nas-ip>:7000           <- THE BUG: com.zhiliaoapp.musically 43.4.0_AC
+```
+
+So yes, two distinct *local* hosts exist — that is the bug this plan fixes, not a reason to stop. `filebin.example.com` shares a domain but is a different service; it is external hosting and must not be rewritten.
+
+## Worktree caveat — Steps 3 and 4 are NOT the executor's work
+
+The executor runs in a git worktree containing only committed files. `.env` and `data/` are gitignored and therefore **absent**. That means:
+
+- **Step 3 (set `PUBLIC_BASE_URL` in `.env`)** — operator task, in the main checkout. `.env` must never be committed. The executor only confirms the valueless key already exists in `.env.example`.
+- **Step 4 (repair catalog entries)** — operator task. There is exactly one entry to fix: `com.zhiliaoapp.musically` version `43.4.0_AC`, whose `downloadURL` is `http://<nas-ip>:7000/ipas/...` and should become `http://feather.example.com/ipas/...`. One hand edit. **Never script it** — a regex would clobber the four legitimate external URLs.
+- **Step 5's `docker compose` / live-`curl` checks** — operator task, same reason.
+
+Executor: do Steps 1, 2 and the test plan. Run the pytest half of Step 5. Say plainly in your report which steps you skipped and why. Do not fabricate a `.env` or copy `data/` in.
+
 ## Commands you will need
 
 | Purpose | Command | Expected on success |
@@ -118,7 +147,7 @@ So `http://feather.example.com` is the canonical base in use today. Confirm with
 ## Scope
 
 **In scope**:
-- `app.py` — `generate_qr` (2279–2298), and the `base_url = request.url_root.rstrip('/')` line in the four mutating routes (2314, 2379, 2423, 2465)
+- `app.py` — `generate_qr` (2465–2484), and the `base_url = request.url_root.rstrip('/')` line in the four mutating routes (2500, 2570, 2614, 2656)
 - `.env` — add `PUBLIC_BASE_URL` (Step 3)
 - `.env.example` — add the key if Plan 002 has not already
 - `tests/test_routes.py`
@@ -139,7 +168,7 @@ So `http://feather.example.com` is the canonical base in use today. Confirm with
 
 ### Step 1: Add a helper that resolves the base URL
 
-Add a module-level function near the other helpers (after `get_file_size` at `app.py:34-39` is a good spot):
+Add a module-level function near the other helpers (just after `get_file_size`, which is now at `app.py:49-59`, is a good spot):
 
 ```python
 def resolve_base_url():
@@ -164,9 +193,9 @@ The warning matters: it is what tells an operator why their catalog has a LAN IP
 
 ### Step 2: Use it at all five sites
 
-Replace `base_url = request.url_root.rstrip('/')` with `base_url = resolve_base_url()` at lines 2314, 2379, 2423, and 2465.
+Replace `base_url = request.url_root.rstrip('/')` with `base_url = resolve_base_url()` at lines **2500, 2570, 2614 and 2656**.
 
-For `/qr` (`app.py:2283`), build the source URL from the same helper:
+For `/qr` (`app.py:2469`), build the source URL from the same helper:
 
 ```python
         source_url = resolve_base_url() + '/source.json'
@@ -175,7 +204,7 @@ For `/qr` (`app.py:2283`), build the source URL from the same helper:
 
 Note the original concatenated `request.url_root + 'source.json'` — `url_root` ends with `/`, whereas `resolve_base_url()` strips it. **Adding the `/` back is required**, or the QR encodes `feather://hostsource.json`. Get this right and assert it in a test.
 
-**Verify**: `grep -c "request.url_root" app.py` → `2` (only inside `resolve_base_url`, plus none elsewhere — if it returns anything higher, a site was missed)
+**Verify**: `grep -c "request.url_root" app.py` → **`1`** — the single remaining occurrence is the fallback inside `resolve_base_url`. (An earlier version of this plan said `2`; that was wrong. Anything higher means a site was missed.)
 
 ### Step 3: Configure the value
 
@@ -270,14 +299,12 @@ Verification: `.venv/bin/python -m pytest tests/ -q` → all pass, 5 new tests.
 ALL must hold:
 
 - [ ] `python3 -m py_compile app.py` exits 0
-- [ ] `grep -c "request.url_root" app.py` returns `2` (both inside `resolve_base_url`)
-- [ ] `grep -c "resolve_base_url()" app.py` returns `5`
+- [ ] `grep -c "request.url_root" app.py` returns **`1`** (the fallback inside `resolve_base_url`)
+- [ ] `grep -c "resolve_base_url()" app.py` returns **`6`**, not `5` — the substring also matches the `def resolve_base_url():` line. The five *call sites* are what matter: `grep -n "= resolve_base_url()\|resolve_base_url() +" app.py` must show 5.
 - [ ] `.venv/bin/python -m pytest tests/ -q` exits 0 with 5 new tests
-- [ ] `PUBLIC_BASE_URL` is set in `.env` with no trailing slash, and present (valueless) in `.env.example`
-- [ ] `docker compose config` shows the variable reaching the container
-- [ ] A POST with a spoofed `Host` header does not put that host into `data/source.json`
-- [ ] `data/source.json` parses, lists 8 apps, and every `downloadURL` is either the configured base or a deliberate external host
-- [ ] `git status --short` shows only `app.py`, `tests/test_routes.py`, `.env.example`
+- [ ] `.env.example` already contains a valueless `PUBLIC_BASE_URL=` at line 14 — confirm, do not duplicate it. Setting the real value in `.env` is an **operator task, out of scope for the executor** (see "Worktree caveat").
+- [ ] A POST with a spoofed `Host` header does not put that host into the catalog — proven by the test suite, not by touching live data
+- [ ] `git status --short` shows only `app.py` and `tests/test_routes.py`
 - [ ] `plans/README.md` status row updated
 
 ## STOP conditions
@@ -286,7 +313,7 @@ Stop and report back (do not improvise) if:
 
 - `grep -n "request.url_root"` finds sites outside the five listed. The plan's assumptions are stale — report the full list.
 - The operator cannot confirm the canonical base URL. Do **not** guess: an incorrect `PUBLIC_BASE_URL` breaks every subsequent download in a way that is invisible until a user tries to install something.
-- `data/source.json` contains download URLs on more than one distinct local host. That suggests entries were added from different network paths over time and needs a human decision about which is canonical.
+- ~~`data/source.json` contains download URLs on more than one distinct local host.~~ **Already resolved — do not stop for this.** It does, and the decision is made: see "Canonical base URL" below.
 - Setting `PUBLIC_BASE_URL` breaks `/` or any route. It should not — this touches only URL *construction*. Report rather than working around it.
 - You are about to run `sed`, `python -c`, or any script that rewrites URLs in `data/source.json` in bulk. Explicitly forbidden — 13 versions, edit by hand.
 
