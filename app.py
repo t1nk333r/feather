@@ -78,34 +78,55 @@ class SourceManager:
         filename = f"{secure_filename(version)}.ipa"
         return os.path.join(bundle_folder, filename)
     
-    def save_ipa_file(self, file, bundle_id, version):
-        """Save uploaded IPA file"""
+    def save_ipa_file(self, file, bundle_id, version, dest_path=None):
+        """Save uploaded IPA file.
+
+        If dest_path is given, save there instead of the bundle's normal
+        final path -- callers that are replacing an existing file use this
+        to write to a temporary path first (see update_version).
+        """
+        filepath = None
         try:
-            filepath = self.get_ipa_path(bundle_id, version)
+            filepath = dest_path or self.get_ipa_path(bundle_id, version)
             file.save(filepath)
             file_size = get_file_size(filepath)
             logging.info(f"Saved IPA file: {filepath} ({file_size} bytes)")
             return filepath, file_size
         except Exception as e:
             logging.error(f"Error saving IPA file: {str(e)}")
+            if filepath and os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
             return None, 0
-    
-    def download_ipa_from_url(self, url, bundle_id, version):
-        """Download IPA file from URL and save it locally"""
+
+    def download_ipa_from_url(self, url, bundle_id, version, dest_path=None):
+        """Download IPA file from URL and save it locally.
+
+        If dest_path is given, save there instead of the bundle's normal
+        final path (see save_ipa_file's docstring for why).
+        """
+        filepath = None
         try:
             logging.info(f"Downloading IPA from: {url}")
             response = requests.get(url, stream=True, timeout=300)
             response.raise_for_status()
-            
-            filepath = self.get_ipa_path(bundle_id, version)
+
+            filepath = dest_path or self.get_ipa_path(bundle_id, version)
             with open(filepath, 'wb') as f:
                 shutil.copyfileobj(response.raw, f)
-            
+
             file_size = get_file_size(filepath)
             logging.info(f"Downloaded IPA file: {filepath} ({file_size} bytes)")
             return filepath, file_size
         except Exception as e:
             logging.error(f"Error downloading IPA file: {str(e)}")
+            if filepath and os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
             return None, 0
     
     def delete_ipa_file(self, bundle_id, version):
@@ -704,33 +725,39 @@ class SourceManager:
         # Update version fields
         version_obj = app['versions'][version_index]
         
-        # Handle IPA file update - upload, download, or use URL
+        # Handle IPA file update - upload, download, or use URL.
+        #
+        # Fetch the replacement to a temporary path first, and only ever
+        # touch the original file via an atomic os.replace() once that
+        # fetch has fully succeeded. A failed fetch must never destroy a
+        # binary that is still being served -- deleting the original
+        # before the replacement was confirmed was the old (and
+        # dangerous) behaviour.
         if ipa_file and allowed_file(ipa_file.filename):
-            # Upload new file - delete old one first
-            old_filepath = self.get_ipa_path(bundle_identifier, version)
-            if os.path.exists(old_filepath):
-                try:
-                    os.remove(old_filepath)
-                except:
-                    pass
-            
-            filepath, file_size = self.save_ipa_file(ipa_file, bundle_identifier, version)
+            final_path = self.get_ipa_path(bundle_identifier, version)
+            tmp_path = final_path + ".new"
+            filepath, file_size = self.save_ipa_file(ipa_file, bundle_identifier, version, dest_path=tmp_path)
             if filepath:
+                os.replace(filepath, final_path)
+                if file_size is None:
+                    # Same "unknown size" rationale as add_app_manual above.
+                    file_size = 0
                 version_obj['downloadURL'] = self.get_local_ipa_url(bundle_identifier, version, base_url)
                 version_obj['size'] = file_size
+            else:
+                return False, f"Failed to save uploaded IPA for {bundle_identifier} {version}; original file untouched"
         elif download_from_url and version_data.get('downloadURL'):
-            # Download from URL - delete old one first
-            old_filepath = self.get_ipa_path(bundle_identifier, version)
-            if os.path.exists(old_filepath):
-                try:
-                    os.remove(old_filepath)
-                except:
-                    pass
-            
-            filepath, file_size = self.download_ipa_from_url(version_data['downloadURL'], bundle_identifier, version)
+            final_path = self.get_ipa_path(bundle_identifier, version)
+            tmp_path = final_path + ".new"
+            filepath, file_size = self.download_ipa_from_url(version_data['downloadURL'], bundle_identifier, version, dest_path=tmp_path)
             if filepath:
+                os.replace(filepath, final_path)
+                if file_size is None:
+                    file_size = 0
                 version_obj['downloadURL'] = self.get_local_ipa_url(bundle_identifier, version, base_url)
                 version_obj['size'] = file_size
+            else:
+                return False, f"Failed to download IPA from {version_data['downloadURL']}; original file untouched"
         else:
             # Just update URL and other fields
             updatable_fields = ['downloadURL', 'minOSVersion']

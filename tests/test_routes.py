@@ -431,3 +431,38 @@ def test_add_app_missing_bundle_id_400(client):
     body = json.loads(resp.data)
     assert body["success"] is False
     assert body["error"] == "Bundle identifier is required"
+
+
+def test_update_version_preserves_original_on_failed_fetch(client, tmp_path):
+    """Defect 2, the critical one: update_version must fetch the
+    replacement IPA before touching the original file. Before the fix,
+    the old file was deleted first ("delete old one first"), so a
+    transient network error permanently destroyed a hosted binary while
+    /source.json kept advertising it as available and the route reported
+    {"success": true}. This test fails before the fix and passes after.
+
+    Uses an unreachable loopback port rather than a real network host --
+    same pattern as the plan's own curl repro -- so no real network call
+    is attempted.
+    """
+    ipa_dir = tmp_path / "ipas" / "com.example.app"
+    ipa_dir.mkdir(parents=True)
+    original_bytes = b"original ipa bytes -- must survive a failed re-fetch"
+    (ipa_dir / "1.0.0.ipa").write_bytes(original_bytes)
+
+    resp = client.post(
+        "/api/update-version",
+        data={
+            "bundleIdentifier": "com.example.app",
+            "version": "1.0.0",
+            "downloadURL": "http://127.0.0.1:9/nope.ipa",
+            "downloadFromUrl": "true",
+        },
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 400
+    body = json.loads(resp.data)
+    assert body["success"] is False
+
+    assert (ipa_dir / "1.0.0.ipa").exists()
+    assert (ipa_dir / "1.0.0.ipa").read_bytes() == original_bytes
