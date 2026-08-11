@@ -19,6 +19,43 @@
 - **Category**: tech-debt
 - **Planned at**: no VCS at authoring time — 2026-08-10
 
+
+## Refreshed 2026-08-11 — read before deleting
+
+Verified against `5886b5f`. Both targets still present: `deepseek-app.py` (78 KB) and `backup.old/` (5 files). Together **3,737 lines**. Nothing references either — `grep -rn "deepseek-app\|backup\.old"` across `*.py`, `Dockerfile`, `*.yml`, `*.txt` returns nothing outside `plans/`.
+
+Dependencies are satisfied: Plan 002 (git) and Plan 004 (pin harvest) are both DONE, and the pins are already in `requirements.txt` (`qrcode[pil]==7.4.2`, `pillow==11.3.0`), so `backup.old/requirements.txt` no longer holds anything unique.
+
+### One file is NOT revertible — do not try to delete it
+
+`backup.old/data/source.json` is **untracked**. `.gitignore:3` (`data/`) matches it at any depth:
+
+```
+$ git check-ignore -v backup.old/data/source.json
+.gitignore:3:data/	backup.old/data/source.json
+
+$ git ls-files backup.old/
+backup.old/Dockerfile
+backup.old/app.py
+backup.old/compose.yml
+backup.old/requirements.txt          <- note: no data/source.json
+```
+
+So this plan's stated safety net — "Plan 002 makes the deletion revertible" — **does not cover that file**. Deleting it is permanent.
+
+It is also the only surviving record of two historical bundle-ID renames:
+
+| Old ID (only in backup.old) | Name | Version | Current ID |
+|---|---|---|---|
+| `com.burbn.instagram.igformat` | Instagram IGformat | `v405.1.0_IGFormat_v1.87` | `com.instagram.ifgram` |
+| `com.burbn.instagram.theta` | Instagram+Theta | `405.1.0v4.0` | `com.instagram.theta` |
+
+Both old IDs still have directories under `data/ipas/`, which is why `data/ipas/` has more directories than the catalog has apps. This file is their provenance.
+
+**What this means for the executor:** you work in a git worktree, where `backup.old/data/` does not exist at all (gitignored files are absent). You therefore *cannot* delete it, and you must not try. `git rm -r backup.old` removes only the four tracked files. After the merge, the operator's working tree will still contain `backup.old/data/source.json` and the now-otherwise-empty `backup.old/` directory around it. **That is the intended outcome, not an incomplete job** — do not add a step to clean it up, and do not flag it as a failure.
+
+Adjust the plan's "Done when" accordingly: `ls` will still show a `backup.old/` entry in the operator's checkout. The machine-checkable criterion is `git ls-files | grep -c "^backup\.old/\|^deepseek-app\.py$"` → `0`.
+
 ## Why this matters
 
 This repository contains three copies of the same application:
