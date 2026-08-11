@@ -616,3 +616,127 @@ def test_get_ipa_path_does_not_create_directories(client, tmp_path):
 
     assert not bundle_folder.exists()
     assert not os.path.exists(os.path.dirname(path))
+
+
+# ---------------------------------------------------------------------------
+# Plan 006: atomic, serialized catalog writes
+# ---------------------------------------------------------------------------
+
+
+def test_save_source_is_atomic_on_failure(client, tmp_path, monkeypatch):
+    """Core regression test. Before this plan, save_source opened
+    source.json with mode 'w', which truncates the file to zero bytes
+    before writing anything -- any exception during json.dump left a
+    truncated, unparseable file on disk. Now save_source writes to a temp
+    file in the same directory and only os.replace()s it into position on
+    success, so a failure mid-write must leave the live catalog completely
+    untouched.
+    """
+    original_bytes = (tmp_path / "source.json").read_bytes()
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated failure mid-write")
+
+    # json.dump is only called from SourceManager.save_source (verified via
+    # grep), so this patch only affects the write path under test -- it
+    # does not touch json.dumps/loads used by Flask's jsonify or by this
+    # test file itself.
+    monkeypatch.setattr(client.app_module.json, "dump", boom)
+
+    resp = client.post("/api/update-source", json={"name": "Should Not Persist"})
+    assert resp.status_code == 400
+    body = json.loads(resp.data)
+    assert body["success"] is False
+
+    # The file on disk must be byte-for-byte identical to before the
+    # failed write -- not truncated, not partially written.
+    assert (tmp_path / "source.json").read_bytes() == original_bytes
+    reloaded = json.loads((tmp_path / "source.json").read_text())
+    assert reloaded["name"] == "Test Source"
+    assert reloaded["apps"][0]["bundleIdentifier"] == "com.example.app"
+
+
+def test_backup_written_before_save(client, tmp_path):
+    """update-source must back up the previous catalog to data/backups/
+    before replacing it, so the pre-change state is recoverable."""
+    backups_dir = tmp_path / "backups"
+
+    resp = client.post("/api/update-source", json={"name": "Renamed Source"})
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["success"] is True
+
+    backup_files = sorted(backups_dir.glob("source-*.json"))
+    assert len(backup_files) == 1
+
+    backup_content = json.loads(backup_files[0].read_text())
+    # The backup holds the catalog as it was BEFORE this save, not after.
+    assert backup_content["name"] == "Test Source"
+
+    current_content = json.loads((tmp_path / "source.json").read_text())
+    assert current_content["name"] == "Renamed Source"
+
+
+def test_no_temp_files_left_behind(client, tmp_path):
+    """After a successful mutation, the temp file save_source writes to
+    (prefix '.source-', suffix '.json.tmp') must have been renamed away,
+    not left sitting in the data directory."""
+    resp = client.post("/api/update-source", json={"name": "Cleanup Check"})
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["success"] is True
+
+    leftover = list(tmp_path.glob(".source-*.json.tmp"))
+    assert leftover == []
+
+
+def test_concurrent_add_version_all_land(client, tmp_path):
+    """Direct proof that SourceManager._lock serializes the read-modify-
+    write cycle in add_version. 20 threads each add a distinct version to
+    the same app concurrently; without the lock, two threads can both
+    load_source() before either save_source()s, and the second save
+    silently clobbers the first thread's write. Calls source_manager
+    directly (not the test client, which is not thread-safe).
+    """
+    import threading as _threading
+
+    source_manager = client.app_module.source_manager
+    n = 20
+    results = [None] * n
+
+    def worker(i):
+        results[i] = source_manager.add_version(
+            "com.example.app",
+            {
+                "version": f"9.{i}.0",
+                "downloadURL": f"http://example.test/ipas/com.example.app/9.{i}.0.ipa",
+            },
+        )
+
+    threads = [_threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert all(success for success, _ in results)
+
+    final = source_manager.load_source()
+    versions = {v["version"] for v in final["apps"][0]["versions"]}
+    expected = {f"9.{i}.0" for i in range(n)} | {"1.0.0"}
+    assert versions == expected
+
+
+def test_backups_pruned_to_20(client, tmp_path):
+    """data/backups/ must be pruned to the most recent 20 entries so it
+    does not grow without bound."""
+    backups_dir = tmp_path / "backups"
+
+    for i in range(25):
+        resp = client.post("/api/update-source", json={"name": f"Name {i}"})
+        assert resp.status_code == 200
+        body = json.loads(resp.data)
+        assert body["success"] is True
+
+    backup_files = list(backups_dir.glob("source-*.json"))
+    assert len(backup_files) == 20
