@@ -1,0 +1,372 @@
+"""Tests for the IPA storage abstraction (Plan 011): LocalIpaStorage,
+GarageIpaStorage, and their wiring through serve_ipa and update_version.
+
+No test in this file makes a real network call. Garage-backend tests
+inject a hand-rolled fake S3 client (FakeS3Client below) into
+GarageIpaStorage instead of exercising boto3/Garage for real -- the
+existing suite runs in ~1s with no network and that property is worth
+protecting (see plans/011-garage-s3-ipa-storage.md's test plan).
+
+Reuses the `client` fixture pattern from tests/test_routes.py:54-80.
+"""
+
+import http.server
+import importlib
+import json
+import os
+import threading
+
+import pytest
+from botocore.exceptions import ClientError
+
+
+# ---------------------------------------------------------------------------
+# Fake S3 client -- records calls, keeps objects in memory, never touches
+# the network. Good enough to exercise GarageIpaStorage's put / exists /
+# delete / post-upload-verify logic exactly the way real boto3 calls would.
+# ---------------------------------------------------------------------------
+
+
+class FakeS3Client:
+    def __init__(self):
+        self.objects = {}  # (bucket, key) -> size in bytes
+        self.calls = []
+        self.fail_uploads = False
+
+    def _upload_error(self):
+        return ClientError(
+            {
+                "Error": {"Code": "InternalError", "Message": "simulated upload failure"},
+                "ResponseMetadata": {"HTTPStatusCode": 500},
+            },
+            "PutObject",
+        )
+
+    def upload_file(self, path, bucket, key, ExtraArgs=None):
+        self.calls.append(("upload_file", path, bucket, key, ExtraArgs))
+        if self.fail_uploads:
+            raise self._upload_error()
+        self.objects[(bucket, key)] = os.path.getsize(path)
+
+    def upload_fileobj(self, fileobj, bucket, key, ExtraArgs=None):
+        self.calls.append(("upload_fileobj", bucket, key, ExtraArgs))
+        if self.fail_uploads:
+            raise self._upload_error()
+        data = fileobj.read()
+        self.objects[(bucket, key)] = len(data)
+
+    def head_object(self, Bucket, Key):
+        size = self.objects.get((Bucket, Key))
+        if size is None:
+            raise ClientError(
+                {
+                    "Error": {"Code": "404", "Message": "Not Found"},
+                    "ResponseMetadata": {"HTTPStatusCode": 404},
+                },
+                "HeadObject",
+            )
+        return {"ContentLength": size}
+
+    def delete_object(self, Bucket, Key):
+        self.calls.append(("delete_object", Bucket, Key))
+        self.objects.pop((Bucket, Key), None)
+        return {}
+
+
+@pytest.fixture(scope="function")
+def client(tmp_path):
+    """Local-backend app instance rooted at an isolated temp data dir.
+
+    Same pattern as tests/test_routes.py:54-80 (not imported from there
+    since pytest fixtures aren't shared across test files without a
+    conftest.py, and this suite intentionally doesn't add one).
+    """
+    os.environ["DATA_DIR"] = str(tmp_path)
+
+    import app as app_module
+    importlib.reload(app_module)
+
+    (tmp_path / "source.json").write_text(json.dumps(seed_source_with_app()))
+
+    app_module.app.config["TESTING"] = True
+    with app_module.app.test_client() as c:
+        c.app_module = app_module
+        yield c
+
+
+GARAGE_ENV = {
+    "STORAGE_BACKEND": "garage",
+    "GARAGE_S3_ENDPOINT": "https://garage.example.invalid",
+    "GARAGE_S3_REGION": "garage",
+    "GARAGE_S3_ACCESS_KEY_ID": "test-key-id",
+    "GARAGE_S3_SECRET_ACCESS_KEY": "test-secret",
+    "GARAGE_BUCKET": "test-bucket",
+    "GARAGE_PUBLIC_BASE_URL": "https://garage-web.example.invalid",
+}
+
+
+@pytest.fixture
+def garage_client(tmp_path, monkeypatch):
+    """Like test_routes.py's `client` fixture, but reloads the app with
+    STORAGE_BACKEND=garage and a fake S3 client injected into ipa_storage.
+    Uses monkeypatch.setenv so every env var set here is automatically
+    reverted at teardown -- a later test's plain `client` fixture (from
+    test_routes.py) must see STORAGE_BACKEND back to unset/local.
+    """
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    for key, value in GARAGE_ENV.items():
+        monkeypatch.setenv(key, value)
+
+    import app as app_module
+    importlib.reload(app_module)
+
+    fake_client = FakeS3Client()
+    app_module.ipa_storage._client = fake_client
+
+    app_module.app.config["TESTING"] = True
+    with app_module.app.test_client() as c:
+        c.app_module = app_module
+        c.fake_client = fake_client
+        yield c
+
+
+def seed_source_with_app():
+    """Minimal catalog with one app/version, matching test_routes.py's
+    seed_source() fixture shape closely enough for update-version tests.
+    """
+    return {
+        "name": "Test Source",
+        "subtitle": "",
+        "description": "",
+        "iconURL": "",
+        "headerURL": "",
+        "website": "",
+        "tintColor": "#4185A9",
+        "featuredApps": [],
+        "apps": [
+            {
+                "name": "Example App",
+                "bundleIdentifier": "com.example.app",
+                "developerName": "Example Dev",
+                "localizedDescription": "",
+                "iconURL": "",
+                "addedDate": "2026-01-01",
+                "versions": [
+                    {
+                        "version": "1.0.0",
+                        "date": "2026-01-01T00:00:00Z",
+                        "downloadURL": "http://example.test/ipas/com.example.app/1.0.0.ipa",
+                        "minOSVersion": "14.0",
+                        "size": 999,
+                    }
+                ],
+            }
+        ],
+        "news": [],
+    }
+
+
+class _PlainIpaHandler(http.server.BaseHTTPRequestHandler):
+    """Serves a fixed, plausible-looking IPA payload -- used to give
+    update_version a replacement download that succeeds all the way
+    through the local-capture step, so a subsequent storage-backend
+    failure can be isolated and tested on its own.
+    """
+
+    payload = b"PK\x03\x04 replacement ipa bytes " * 10
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(self.payload)))
+        self.end_headers()
+        self.wfile.write(self.payload)
+
+    def log_message(self, format, *args):
+        pass
+
+
+@pytest.fixture
+def plain_ipa_server():
+    server = http.server.HTTPServer(("127.0.0.1", 0), _PlainIpaHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/replacement.ipa"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# LocalIpaStorage
+# ---------------------------------------------------------------------------
+
+
+def test_local_storage_roundtrip(client, tmp_path):
+    storage = client.app_module.ipa_storage
+    assert isinstance(storage, client.app_module.LocalIpaStorage)
+
+    payload = b"local roundtrip bytes"
+    src = tmp_path / "src.ipa"
+    src.write_bytes(payload)
+
+    assert storage.exists("com.example.round", "1.0.0") is False
+
+    size = storage.put(str(src), "com.example.round", "1.0.0")
+    assert size == len(payload)
+    assert storage.exists("com.example.round", "1.0.0") is True
+
+    final_path = os.path.join(str(tmp_path), "ipas", "com.example.round", "1.0.0.ipa")
+    assert os.path.exists(final_path)
+    assert not src.exists()  # put() commits via an atomic rename
+
+    assert storage.delete("com.example.round", "1.0.0") is True
+    assert storage.exists("com.example.round", "1.0.0") is False
+    # Deleting again is a clean False, not an exception.
+    assert storage.delete("com.example.round", "1.0.0") is False
+
+
+def test_local_storage_public_url_is_none(client):
+    storage = client.app_module.ipa_storage
+    assert storage.public_url("com.example.app", "1.0.0") is None
+
+
+# ---------------------------------------------------------------------------
+# GarageIpaStorage
+# ---------------------------------------------------------------------------
+
+
+def test_garage_key_layout(garage_client, tmp_path):
+    """put() for bundle com.example.app version 1.0.0 must land at key
+    ipas/com.example.app/1.0.0.ipa. Pinned: scripts/migrate_ipas_to_garage.py
+    depends on this exact contract to write to the keys serve_ipa expects.
+    """
+    storage = garage_client.app_module.ipa_storage
+    payload = b"garage key layout bytes"
+    src = tmp_path / "src.ipa"
+    src.write_bytes(payload)
+
+    size = storage.put(str(src), "com.example.app", "1.0.0")
+    assert size == len(payload)
+    assert ("test-bucket", "ipas/com.example.app/1.0.0.ipa") in garage_client.fake_client.objects
+
+
+def test_garage_public_url(garage_client, monkeypatch):
+    storage = garage_client.app_module.ipa_storage
+    url = storage.public_url("com.example.app", "1.0.0")
+    assert url == "https://garage-web.example.invalid/ipas/com.example.app/1.0.0.ipa"
+
+    # No double slash when GARAGE_PUBLIC_BASE_URL has a trailing slash.
+    monkeypatch.setattr(
+        garage_client.app_module, "GARAGE_PUBLIC_BASE_URL",
+        "https://garage-web.example.invalid/",
+    )
+    url2 = storage.public_url("com.example.app", "1.0.0")
+    assert url2 == "https://garage-web.example.invalid/ipas/com.example.app/1.0.0.ipa"
+
+
+def test_garage_backend_refuses_to_start_unconfigured(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("STORAGE_BACKEND", "garage")
+    # Some vars set (and must never be echoed back)...
+    monkeypatch.setenv("GARAGE_S3_ACCESS_KEY_ID", "AKIA_TEST_KEY_ID_DO_NOT_LEAK")
+    monkeypatch.setenv("GARAGE_S3_SECRET_ACCESS_KEY", "shhh-do-not-print-me")
+    # ...others deliberately left unset.
+    for key in ("GARAGE_S3_ENDPOINT", "GARAGE_BUCKET", "GARAGE_PUBLIC_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
+
+    import app as app_module
+
+    with pytest.raises(RuntimeError) as exc_info:
+        importlib.reload(app_module)
+
+    message = str(exc_info.value)
+    # Names the variables that are actually missing...
+    assert "GARAGE_S3_ENDPOINT" in message
+    assert "GARAGE_BUCKET" in message
+    assert "GARAGE_PUBLIC_BASE_URL" in message
+    # ...but never leaks the secret material of variables that ARE set.
+    assert "AKIA_TEST_KEY_ID_DO_NOT_LEAK" not in message
+    assert "shhh-do-not-print-me" not in message
+
+
+# ---------------------------------------------------------------------------
+# serve_ipa
+# ---------------------------------------------------------------------------
+
+
+def test_serve_ipa_redirects_when_backend_is_garage(garage_client):
+    garage_client.fake_client.objects[("test-bucket", "ipas/com.example.app/1.0.0.ipa")] = 1234
+
+    resp = garage_client.get("/ipas/com.example.app/1.0.0.ipa")
+    assert resp.status_code == 302
+    assert resp.headers["Location"] == "https://garage-web.example.invalid/ipas/com.example.app/1.0.0.ipa"
+
+
+def test_serve_ipa_404_when_object_missing(garage_client):
+    resp = garage_client.get("/ipas/com.example.app/does-not-exist.ipa")
+    assert resp.status_code == 404
+
+
+def test_serve_ipa_uses_send_file_when_backend_is_local(client, tmp_path):
+    ipa_dir = tmp_path / "ipas" / "com.example.app"
+    ipa_dir.mkdir(parents=True)
+    payload = b"local send_file body"
+    (ipa_dir / "1.0.0.ipa").write_bytes(payload)
+
+    resp = client.get("/ipas/com.example.app/1.0.0.ipa")
+    assert resp.status_code == 200
+    assert resp.data == payload
+    assert "Location" not in resp.headers
+
+
+# ---------------------------------------------------------------------------
+# update_version + Garage: the "never destroy the original" guarantee
+# ---------------------------------------------------------------------------
+
+
+def test_update_version_preserves_original_on_failed_upload(garage_client, plain_ipa_server):
+    """Garage analogue of Plan 007's most important test. update_version
+    fully captures the replacement to a local temp file first (a real,
+    reachable local HTTP stub -- plain_ipa_server -- so that step
+    succeeds), and only then calls ipa_storage.put(), which for Garage
+    uploads straight to the final key. If that upload itself fails, the
+    previously-hosted object must be left exactly as it was and the route
+    must report failure, not silently succeed.
+    """
+    app_module = garage_client.app_module
+    key = "ipas/com.example.app/1.0.0.ipa"
+
+    # Seed a catalog with this version already present.
+    source_path = os.path.join(app_module.DATA_DIR, "source.json")
+    with open(source_path, "w") as f:
+        json.dump(seed_source_with_app(), f)
+
+    # Seed the "existing hosted object" directly in the fake backend.
+    original_size = 999
+    garage_client.fake_client.objects[("test-bucket", key)] = original_size
+
+    garage_client.fake_client.fail_uploads = True
+
+    resp = garage_client.post(
+        "/api/update-version",
+        data={
+            "bundleIdentifier": "com.example.app",
+            "version": "1.0.0",
+            "downloadURL": plain_ipa_server,
+            "downloadFromUrl": "true",
+        },
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 400
+    body = json.loads(resp.data)
+    assert body["success"] is False
+
+    # The original object must be untouched -- same size, still there.
+    assert garage_client.fake_client.objects[("test-bucket", key)] == original_size
+
+    # No leftover local staging file under data/ipas/.
+    ipa_dir = os.path.join(app_module.IPA_FOLDER, "com.example.app")
+    leftover = [f for f in os.listdir(ipa_dir) if f != "1.0.0.ipa"] if os.path.isdir(ipa_dir) else []
+    assert leftover == []
