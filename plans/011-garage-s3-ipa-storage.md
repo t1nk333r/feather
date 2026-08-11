@@ -9,10 +9,10 @@
 > **Drift check (run first)**:
 > ```
 > cd /home/t1nk33r/Documents/feather
-> git rev-parse --short HEAD          # plan written against 36f27ce
-> md5sum app.py                       # expect 046fe485b4dde6fc6bc9cfa5899d56db
-> wc -l < app.py                      # expect 2644
-> .venv/bin/python -m pytest tests/ -q   # expect 29 passed
+> git rev-parse --short HEAD          # plan refreshed against 309f882
+> md5sum app.py                       # expect 2e939fe19fffc9726805ec298a3c3f8d
+> wc -l < app.py                      # expect 2737
+> .venv/bin/python -m pytest tests/ -q   # expect 39 passed
 > ```
 > On a mismatch, match the "Current state" excerpts against the live file
 > before proceeding; the excerpts are authoritative, the line numbers are a
@@ -25,7 +25,7 @@
 - **Risk**: MED — this changes where the product's 1.3 GB of payload lives. Mitigated by a default-off config flag and by never deleting local files.
 - **Depends on**: 005 (test suite — landed). Interacts with **008**; see "Interaction with Plan 008".
 - **Category**: architecture
-- **Planned at**: 2026-08-11, `36f27ce`, `app.py` md5 `046fe485b4dde6fc6bc9cfa5899d56db`
+- **Planned at**: 2026-08-11, `36f27ce`. **Refreshed 2026-08-11** against `309f882` after Plans 006 and 008 landed (+93 lines); `app.py` md5 `2e939fe19fffc9726805ec298a3c3f8d`, 2737 lines.
 
 ## Why this matters
 
@@ -66,7 +66,7 @@ Three points that shape Step 5:
 - **Two `ORPHAN` files** are on disk but unreachable from the catalog. `com.Michael-128.qbitControl` is the case-collision twin of the catalogued `com.michael-128.qBitControl` (whose entry points at an external GitHub URL). Migrate orphans, but report them — do not silently drop 46 MB.
 - Bundle IDs differing only in case exist on disk. S3 keys are case-sensitive too, so this survives migration unchanged. **Do not normalise case here** — that is a data migration with its own rename step and is explicitly deferred (see `plans/README.md`).
 
-**`app.py:78-86`** — path computation (read-only since Plan 007):
+**`app.py:103-111`** — path computation (read-only since Plan 007):
 
 ```python
     def get_ipa_path(self, bundle_id, version):
@@ -80,7 +80,7 @@ Three points that shape Step 5:
         return os.path.join(bundle_folder, filename)
 ```
 
-**`app.py:171-177`** — the URL written into the catalog:
+**`app.py:196-202`** — the URL written into the catalog:
 
 ```python
     def get_local_ipa_url(self, bundle_id, version, base_url=None):
@@ -92,7 +92,7 @@ Three points that shape Step 5:
         return path
 ```
 
-**`app.py:2338-2354`** — the serving route:
+**`app.py:2431-2447`** — the serving route:
 
 ```python
 @app.route('/ipas/<bundle_id>/<filename>')
@@ -114,7 +114,7 @@ def serve_ipa(bundle_id, filename):
         return jsonify({"error": str(e)}), 500
 ```
 
-**The four write/delete sites** you will route through the new abstraction — `save_ipa_file` (`app.py:88-110`), `download_ipa_from_url` (`app.py:112-149`), `delete_ipa_file` (`app.py:151-169`), and `update_version`'s temp-path swap (`app.py:~725-760`, the `dest_path=` / `os.replace` block Plan 007 introduced).
+**The four write/delete sites** you will route through the new abstraction — `save_ipa_file` (`app.py:113-135`), `download_ipa_from_url` (`app.py:137-174`), `delete_ipa_file` (`app.py:176-194`), and `update_version`'s temp-path swap (the `dest_path=` / `os.replace` block Plan 007 introduced, whose two `os.replace` calls are now at `app.py:871` and `884`).
 
 **Repo conventions**: `(bool, message)` tuples from `SourceManager` methods; `logging.error(f"...: {str(e)}")`; plain user-facing sentences for messages; 4-space indent; no type annotations. `requirements.txt` uses exact `==` pins, one per line, no comments. Match all of it.
 
@@ -165,7 +165,23 @@ GARAGE_PUBLIC_BASE_URL=
 GARAGE_KEY_PREFIX=
 ```
 
-Read them in the config block near `app.py:21-45`, following the pattern Plan 001 established:
+Read them in the config block at `app.py:21-42`, following the pattern Plan 001 established. That block now reads:
+
+```python
+DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
+SOURCE_FILE = os.path.join(DATA_DIR, "source.json")
+UPLOAD_FOLDER = os.path.join(DATA_DIR, "uploads")
+IPA_FOLDER = os.path.join(DATA_DIR, "ipas")
+ICON_FOLDER = os.path.join(DATA_DIR, "icons")
+BACKUP_FOLDER = os.path.join(DATA_DIR, "backups")
+...
+SECRET_KEY = os.environ.get("SECRET_KEY")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL")
+PORT = int(os.environ.get("PORT", "5000"))
+MAX_CONTENT_LENGTH = int(os.environ.get("MAX_CONTENT_LENGTH", 2 * 1024 * 1024 * 1024))
+```
+
 
 | Variable | Default | Value for this deployment |
 |---|---|---|
@@ -204,18 +220,21 @@ Read them in the config block near `app.py:21-45`, following the pattern Plan 00
 - **Deleting anything from `data/ipas/`.** Not in this plan, not "just the corrupt ones", not as cleanup. Local disk is the rollback.
 - **Repairing the three corrupt catalog entries.** Step 5 *reports* them; fixing them is a hand edit of `data/source.json` plus re-uploading real binaries, which is a data task, not a code change.
 - **Bundle-ID case normalisation.** Deferred migration; never add `.lower()`.
-- **`save_source` / `load_source` and locking** — Plan 006 owns those.
+- **`save_source` / `load_source` and the `_lock` / `_backup_source` machinery** — Plan 006 owns those and has landed. Do not touch them, and do not take `self._lock` from inside the storage classes.
+- **`resolve_base_url` and `get_local_ipa_url`** — Plan 008 owns those and has landed.
 - **Rewriting existing `downloadURL` values.** The whole point of the redirect design is that you don't have to. If you find yourself writing a catalog-rewrite loop, stop — you have taken a wrong turn.
 - **Garage cluster configuration** (layout, replication, zones). The cluster is running; this plan consumes it.
 
 ## Interaction with Plan 008
 
-Plan 008 changes `get_local_ipa_url` to derive its base from `PUBLIC_BASE_URL` instead of the `Host` header. That is a *different* URL from this plan's `GARAGE_PUBLIC_BASE_URL`:
+**Plan 008 has now landed** (`309f882`). It added a module-level `resolve_base_url()` helper at `app.py:64-77` and switched five call sites to it; `get_local_ipa_url` itself was deliberately left unchanged. So: **leave `get_local_ipa_url` and `resolve_base_url` entirely alone.** This plan does not touch either.
+
+The two base URLs are different and both are needed:
 
 - `PUBLIC_BASE_URL` → the app's own origin, what goes **into the catalog** (`http://feather.example.com`)
 - `GARAGE_PUBLIC_BASE_URL` → the object store's origin, what `serve_ipa` **redirects to** (`https://feather-repo.web.example.com`)
 
-They are independent and both are needed. Whichever plan lands second must not collapse them into one variable. If Plan 008 has already landed, leave `get_local_ipa_url` alone entirely — this plan does not touch it.
+They are independent. **Do not collapse them into one variable**, and do not route the Garage URL through `resolve_base_url()` — that helper answers "where is this app?", not "where is the object store?".
 
 ## Git workflow
 
@@ -258,7 +277,7 @@ The second must fail loudly, and its message must contain the missing **variable
 
 ### Step 3: Write the storage abstraction with the local backend
 
-Add both classes near `SourceManager`, and instantiate the selected one once at module scope alongside `source_manager` (`app.py:~734`).
+Add both classes near `SourceManager`, and instantiate the selected one once at module scope alongside `source_manager`, which is now at `app.py:920`.
 
 `LocalIpaStorage` must reproduce today's behaviour exactly, including Plan 007's guarantees: create the bundle directory only on write, clean up a partial file if the write raises, and return `None` (not `0`) when the size cannot be determined. Its `public_url()` returns `None`.
 
@@ -396,7 +415,8 @@ ALL must hold:
 - [ ] `boto3` pin verified to have both cp311 and cp314 wheels (paste both `pip download` exit codes)
 - [ ] `grep -c "STORAGE_BACKEND" .env.example` returns `1`; `.env.example` contains **no values**
 - [ ] `git ls-files | grep -c "^\.env$"` returns `0` — the real `.env` is still untracked
-- [ ] With `STORAGE_BACKEND` unset: `.venv/bin/python -m pytest tests/ -q` passes, and the 29 pre-existing tests are unmodified
+- [ ] `grep -c "resolve_base_url" app.py` is unchanged from baseline (`6`) — Plan 008's helper was not touched
+- [ ] With `STORAGE_BACKEND` unset: `.venv/bin/python -m pytest tests/ -q` passes, and the **39** pre-existing tests are unmodified
 - [ ] With `STORAGE_BACKEND=garage` and config missing: import raises, naming the missing variables, leaking no secret
 - [ ] Migration dry run reports 8 uploadable, 3 corrupt-skipped, 2 orphans, and writes nothing
 - [ ] After `--apply`: `curl` of the Garage web URL for `com.google.ios.youtube/20.49.5.ipa` returns `200` and exactly `124889851` bytes
