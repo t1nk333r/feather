@@ -1,5 +1,0 @@
-flask==3.0.0
-altparse==0.3.0
-qrcode[pil]==7.4.2
-pillow==10.1.0
-requests==2.31.0
