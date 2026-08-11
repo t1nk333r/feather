@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, request, jsonify, send_file
+from flask import Flask, render_template_string, request, jsonify, send_file, redirect
 import json
 import os
 import logging
@@ -8,6 +8,8 @@ import requests
 import tempfile
 import hashlib
 import threading
+import boto3
+from botocore.exceptions import ClientError
 from datetime import datetime
 from werkzeug.utils import secure_filename
 from altparse import AltSourceManager, Parser, AltSource
@@ -33,6 +35,18 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL")
 PORT = int(os.environ.get("PORT", "5000"))
 MAX_CONTENT_LENGTH = int(os.environ.get("MAX_CONTENT_LENGTH", 2 * 1024 * 1024 * 1024))
+
+# IPA storage backend (Plan 011). Defaults to "local" -- today's behaviour,
+# unchanged -- so merging this is a no-op until the flag is deliberately
+# flipped. See GarageIpaStorage below for the "refuse to start" validation.
+STORAGE_BACKEND = os.environ.get("STORAGE_BACKEND", "local")
+GARAGE_S3_ENDPOINT = os.environ.get("GARAGE_S3_ENDPOINT")
+GARAGE_S3_REGION = os.environ.get("GARAGE_S3_REGION", "garage")
+GARAGE_S3_ACCESS_KEY_ID = os.environ.get("GARAGE_S3_ACCESS_KEY_ID")
+GARAGE_S3_SECRET_ACCESS_KEY = os.environ.get("GARAGE_S3_SECRET_ACCESS_KEY")
+GARAGE_BUCKET = os.environ.get("GARAGE_BUCKET")
+GARAGE_PUBLIC_BASE_URL = os.environ.get("GARAGE_PUBLIC_BASE_URL")
+GARAGE_KEY_PREFIX = os.environ.get("GARAGE_KEY_PREFIX", "ipas")
 
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
 if SECRET_KEY:
@@ -60,6 +74,189 @@ def get_file_size(filepath):
     except OSError as e:
         logging.warning(f"Could not determine size of {filepath}: {e}")
         return None
+
+
+def _require_garage_config():
+    """Refuse to start with STORAGE_BACKEND=garage and any required Garage
+    variable unset. Logs which *names* are missing -- never values -- and
+    raises. A half-configured object store that silently fell back to
+    local disk is how a catalog ends up pointing at files nobody wrote.
+    """
+    required = {
+        "GARAGE_S3_ENDPOINT": GARAGE_S3_ENDPOINT,
+        "GARAGE_S3_ACCESS_KEY_ID": GARAGE_S3_ACCESS_KEY_ID,
+        "GARAGE_S3_SECRET_ACCESS_KEY": GARAGE_S3_SECRET_ACCESS_KEY,
+        "GARAGE_BUCKET": GARAGE_BUCKET,
+        "GARAGE_PUBLIC_BASE_URL": GARAGE_PUBLIC_BASE_URL,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        message = (
+            "STORAGE_BACKEND=garage requires the following environment "
+            f"variable(s), which are not set: {', '.join(missing)}"
+        )
+        logging.error(message)
+        raise RuntimeError(message)
+
+
+class LocalIpaStorage:
+    """IPA storage on local disk -- today's behaviour, unchanged.
+
+    Reproduces Plan 007's guarantees exactly: the bundle directory is
+    created only on write, a partial file is cleaned up if the write
+    raises, and the size returned is None (not 0) when it cannot be
+    determined. public_url() always returns None, which is what tells
+    serve_ipa to fall back to send_file instead of redirecting.
+    """
+
+    def _path(self, bundle_id, version):
+        bundle_folder = os.path.join(IPA_FOLDER, secure_filename(bundle_id))
+        filename = f"{secure_filename(version)}.ipa"
+        return os.path.join(bundle_folder, filename)
+
+    def put(self, src, bundle_id, version):
+        """Write src -- a path, or a file-like object with .save() (a
+        Werkzeug FileStorage) -- to the final local path.
+
+        A plain path is assumed to already be fully and successfully
+        written (the "local temp file" staging step callers do before
+        calling put()), so it is moved into place with os.replace(),
+        which is atomic on the same filesystem: the destination either
+        keeps its old content or gets the complete new content, never a
+        partial write. A FileStorage is saved directly, since there is
+        nothing at the destination yet to protect from a partial write in
+        the common "add a new version" case.
+
+        Returns the resulting size, or None on failure.
+        """
+        filepath = self._path(bundle_id, version)
+        try:
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            if hasattr(src, "save"):
+                src.save(filepath)
+            else:
+                os.replace(src, filepath)
+            file_size = get_file_size(filepath)
+            logging.info(f"Saved IPA file: {filepath} ({file_size} bytes)")
+            return file_size
+        except Exception as e:
+            logging.error(f"Error saving IPA file: {str(e)}")
+            if hasattr(src, "save") and os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
+            return None
+
+    def delete(self, bundle_id, version):
+        filepath = self._path(bundle_id, version)
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+                logging.info(f"Deleted IPA file: {filepath}")
+                # Try to remove bundle folder if empty
+                bundle_folder = os.path.dirname(filepath)
+                try:
+                    if not os.listdir(bundle_folder):
+                        os.rmdir(bundle_folder)
+                except OSError as e:
+                    logging.warning(f"Could not remove empty bundle folder {bundle_folder}: {e}")
+                return True
+            return False
+        except Exception as e:
+            logging.error(f"Error deleting IPA file: {str(e)}")
+            return False
+
+    def exists(self, bundle_id, version):
+        return os.path.exists(self._path(bundle_id, version))
+
+    def public_url(self, bundle_id, version):
+        return None
+
+
+class GarageIpaStorage:
+    """IPA storage on the self-hosted Garage S3-compatible object store.
+
+    public_url() returns the object's Garage web-endpoint URL, which is
+    what lets serve_ipa redirect (302) instead of proxying bytes through
+    Flask -- see plans/011-garage-s3-ipa-storage.md for the design.
+    """
+
+    def __init__(self):
+        _require_garage_config()
+        self._client = boto3.client(
+            "s3",
+            endpoint_url=GARAGE_S3_ENDPOINT,
+            region_name=GARAGE_S3_REGION,
+            aws_access_key_id=GARAGE_S3_ACCESS_KEY_ID,
+            aws_secret_access_key=GARAGE_S3_SECRET_ACCESS_KEY,
+        )
+
+    def _key(self, bundle_id, version):
+        return f"{GARAGE_KEY_PREFIX}/{secure_filename(bundle_id)}/{secure_filename(version)}.ipa"
+
+    def put(self, src, bundle_id, version):
+        """Upload src -- a path, or a file-like object with .save() (a
+        Werkzeug FileStorage) -- to the object's final key.
+
+        Uses upload_file/upload_fileobj (not put_object) so large objects
+        multipart automatically instead of being buffered whole. Returns
+        the uploaded size (from a post-upload head_object), or None on
+        failure. Never logs the secret key or response headers.
+        """
+        key = self._key(bundle_id, version)
+        extra_args = {"ContentType": "application/octet-stream"}
+        try:
+            if hasattr(src, "save"):
+                self._client.upload_fileobj(src, GARAGE_BUCKET, key, ExtraArgs=extra_args)
+            else:
+                self._client.upload_file(src, GARAGE_BUCKET, key, ExtraArgs=extra_args)
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "unknown")
+            logging.error(f"Error uploading IPA to Garage ({key}): {code}")
+            return None
+        except Exception as e:
+            logging.error(f"Error uploading IPA to Garage ({key}): {str(e)}")
+            return None
+
+        try:
+            head = self._client.head_object(Bucket=GARAGE_BUCKET, Key=key)
+            return head.get("ContentLength")
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "unknown")
+            logging.error(f"Uploaded IPA but could not verify it ({key}): {code}")
+            return None
+
+    def delete(self, bundle_id, version):
+        key = self._key(bundle_id, version)
+        existed = self.exists(bundle_id, version)
+        try:
+            self._client.delete_object(Bucket=GARAGE_BUCKET, Key=key)
+            if existed:
+                logging.info(f"Deleted IPA object: {key}")
+            return existed
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "unknown")
+            logging.error(f"Error deleting IPA object ({key}): {code}")
+            return False
+
+    def exists(self, bundle_id, version):
+        key = self._key(bundle_id, version)
+        try:
+            self._client.head_object(Bucket=GARAGE_BUCKET, Key=key)
+            return True
+        except ClientError as e:
+            status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            code = e.response.get("Error", {}).get("Code", "unknown")
+            if status == 404 or code in ("404", "NoSuchKey"):
+                return False
+            logging.error(f"Error checking IPA existence ({key}): {code}")
+            return False
+
+    def public_url(self, bundle_id, version):
+        key = self._key(bundle_id, version)
+        return f"{GARAGE_PUBLIC_BASE_URL.rstrip('/')}/{key}"
+
 
 class SourceManager:
     """Manages the AltSource data and file operations"""
@@ -96,20 +293,34 @@ class SourceManager:
         return os.path.join(bundle_folder, filename)
     
     def save_ipa_file(self, file, bundle_id, version, dest_path=None):
-        """Save uploaded IPA file.
+        """Save uploaded IPA file via the configured storage backend
+        (ipa_storage -- Plan 011).
 
-        If dest_path is given, save there instead of the bundle's normal
-        final path -- callers that are replacing an existing file use this
-        to write to a temporary path first (see update_version).
+        If dest_path is given, save there instead -- a local staging path
+        used by update_version to fully capture the replacement IPA on
+        local disk before it is committed to the storage backend (see
+        update_version's docstring for why: the existing hosted object
+        must never be touched until the replacement is known-complete).
+        This staging write always happens on local disk, regardless of
+        backend.
+
+        Returns (truthy-on-success, size) to match the existing call
+        sites, which only check truthiness of the first element.
         """
         filepath = None
         try:
-            filepath = dest_path or self.get_ipa_path(bundle_id, version)
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            file.save(filepath)
-            file_size = get_file_size(filepath)
-            logging.info(f"Saved IPA file: {filepath} ({file_size} bytes)")
-            return filepath, file_size
+            if dest_path:
+                filepath = dest_path
+                os.makedirs(os.path.dirname(filepath), exist_ok=True)
+                file.save(filepath)
+                file_size = get_file_size(filepath)
+                logging.info(f"Staged IPA file: {filepath} ({file_size} bytes)")
+                return filepath, file_size
+
+            file_size = ipa_storage.put(file, bundle_id, version)
+            if file_size is None:
+                return None, 0
+            return True, file_size
         except Exception as e:
             logging.error(f"Error saving IPA file: {str(e)}")
             if filepath and os.path.exists(filepath):
@@ -120,19 +331,32 @@ class SourceManager:
             return None, 0
 
     def download_ipa_from_url(self, url, bundle_id, version, dest_path=None):
-        """Download IPA file from URL and save it locally.
+        """Download IPA file from URL and commit it via the configured
+        storage backend (ipa_storage -- Plan 011).
 
-        If dest_path is given, save there instead of the bundle's normal
-        final path (see save_ipa_file's docstring for why).
+        The bytes always land on local disk first -- that is where the
+        size-limit enforcement and content-decoding below happen, and it
+        doubles as the "local temp file" staging step Plan 011 stages
+        through before committing to the backend. If dest_path is given,
+        that local file *is* the destination (see save_ipa_file's
+        docstring); otherwise it is a throwaway temp file that is removed
+        once ipa_storage.put() has committed it (or failed).
         """
         filepath = None
+        is_staging_write = dest_path is not None
         try:
             logging.info(f"Downloading IPA from: {url}")
             response = requests.get(url, stream=True, timeout=300)
             response.raise_for_status()
 
-            filepath = dest_path or self.get_ipa_path(bundle_id, version)
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            if dest_path:
+                filepath = dest_path
+                os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            else:
+                os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+                fd, filepath = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix=".ipa")
+                os.close(fd)
+
             total = 0
             limit = app.config.get("MAX_CONTENT_LENGTH") or (2 * 1024 * 1024 * 1024)
             with open(filepath, 'wb') as f:
@@ -146,9 +370,20 @@ class SourceManager:
                         raise ValueError(f"Download exceeded size limit of {limit} bytes")
                     f.write(chunk)
 
-            file_size = get_file_size(filepath)
-            logging.info(f"Downloaded IPA file: {filepath} ({file_size} bytes)")
-            return filepath, file_size
+            if is_staging_write:
+                file_size = get_file_size(filepath)
+                logging.info(f"Downloaded IPA file: {filepath} ({file_size} bytes)")
+                return filepath, file_size
+
+            file_size = ipa_storage.put(filepath, bundle_id, version)
+            if os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
+            if file_size is None:
+                return None, 0
+            return True, file_size
         except Exception as e:
             logging.error(f"Error downloading IPA file: {str(e)}")
             if filepath and os.path.exists(filepath):
@@ -157,26 +392,11 @@ class SourceManager:
                 except OSError:
                     pass
             return None, 0
-    
+
     def delete_ipa_file(self, bundle_id, version):
-        """Delete IPA file for a version"""
-        try:
-            filepath = self.get_ipa_path(bundle_id, version)
-            if os.path.exists(filepath):
-                os.remove(filepath)
-                logging.info(f"Deleted IPA file: {filepath}")
-                # Try to remove bundle folder if empty
-                bundle_folder = os.path.dirname(filepath)
-                try:
-                    if not os.listdir(bundle_folder):
-                        os.rmdir(bundle_folder)
-                except OSError as e:
-                    logging.warning(f"Could not remove empty bundle folder {bundle_folder}: {e}")
-                return True
-            return False
-        except Exception as e:
-            logging.error(f"Error deleting IPA file: {str(e)}")
-            return False
+        """Delete IPA file for a version via the configured storage
+        backend (ipa_storage -- Plan 011)."""
+        return ipa_storage.delete(bundle_id, version)
     
     def get_local_ipa_url(self, bundle_id, version, base_url=None):
         """Get the URL path for serving a local IPA file"""
@@ -842,33 +1062,43 @@ class SourceManager:
         
             # Handle IPA file update - upload, download, or use URL.
             #
-            # Fetch the replacement to a temporary path first, and only ever
-            # touch the original file via an atomic os.replace() once that
-            # fetch has fully succeeded. A failed fetch must never destroy a
-            # binary that is still being served -- deleting the original
-            # before the replacement was confirmed was the old (and
-            # dangerous) behaviour.
+            # Plan 011: fully and successfully capture the replacement to a
+            # local temp file first, and only ever commit it to the storage
+            # backend (ipa_storage.put(), which for the local backend is an
+            # atomic os.replace() and for Garage is an upload straight to
+            # the final key) once that capture has fully succeeded. A
+            # failed fetch must never destroy a binary that is still being
+            # served -- deleting the original before the replacement was
+            # confirmed was the old (and dangerous) behaviour, and staging
+            # locally first preserves that guarantee for either backend.
             if ipa_file and allowed_file(ipa_file.filename):
-                final_path = self.get_ipa_path(bundle_identifier, version)
-                tmp_path = final_path + ".new"
-                filepath, file_size = self.save_ipa_file(ipa_file, bundle_identifier, version, dest_path=tmp_path)
+                tmp_path = self.get_ipa_path(bundle_identifier, version) + ".new"
+                filepath, _ = self.save_ipa_file(ipa_file, bundle_identifier, version, dest_path=tmp_path)
                 if filepath:
-                    os.replace(filepath, final_path)
+                    file_size = ipa_storage.put(filepath, bundle_identifier, version)
+                    if os.path.exists(filepath):
+                        try:
+                            os.remove(filepath)
+                        except OSError:
+                            pass
                     if file_size is None:
-                        # Same "unknown size" rationale as add_app_manual above.
-                        file_size = 0
+                        return False, f"Failed to save uploaded IPA for {bundle_identifier} {version}; original file untouched"
                     version_obj['downloadURL'] = self.get_local_ipa_url(bundle_identifier, version, base_url)
                     version_obj['size'] = file_size
                 else:
                     return False, f"Failed to save uploaded IPA for {bundle_identifier} {version}; original file untouched"
             elif download_from_url and version_data.get('downloadURL'):
-                final_path = self.get_ipa_path(bundle_identifier, version)
-                tmp_path = final_path + ".new"
-                filepath, file_size = self.download_ipa_from_url(version_data['downloadURL'], bundle_identifier, version, dest_path=tmp_path)
+                tmp_path = self.get_ipa_path(bundle_identifier, version) + ".new"
+                filepath, _ = self.download_ipa_from_url(version_data['downloadURL'], bundle_identifier, version, dest_path=tmp_path)
                 if filepath:
-                    os.replace(filepath, final_path)
+                    file_size = ipa_storage.put(filepath, bundle_identifier, version)
+                    if os.path.exists(filepath):
+                        try:
+                            os.remove(filepath)
+                        except OSError:
+                            pass
                     if file_size is None:
-                        file_size = 0
+                        return False, f"Failed to download IPA from {version_data['downloadURL']}; original file untouched"
                     version_obj['downloadURL'] = self.get_local_ipa_url(bundle_identifier, version, base_url)
                     version_obj['size'] = file_size
                 else:
@@ -903,6 +1133,14 @@ class SourceManager:
 
 # Initialize source manager
 source_manager = SourceManager(SOURCE_FILE)
+
+# Initialize IPA storage backend. STORAGE_BACKEND defaults to "local", so
+# merging this is a no-op until the flag is deliberately flipped to
+# "garage" -- see _require_garage_config for the refuse-to-start check.
+if STORAGE_BACKEND == "garage":
+    ipa_storage = GarageIpaStorage()
+else:
+    ipa_storage = LocalIpaStorage()
 
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
@@ -2415,17 +2653,28 @@ def serve_source():
 
 @app.route('/ipas/<bundle_id>/<filename>')
 def serve_ipa(bundle_id, filename):
-    """Serve IPA files"""
+    """Serve IPA files.
+
+    Plan 011: the catalog URL is permanent regardless of storage backend.
+    ipa_storage.public_url() returns None for the local backend (send_file
+    below, unchanged) or a Garage web-endpoint URL for the garage backend
+    (302 redirect). exists() is checked first so a missing object still
+    gives a clean 404 rather than a redirect into a Garage NoSuchKey page.
+    """
     try:
-        # Security: ensure filename is safe
+        # Security: ensure both URL segments are safe
         safe_bundle_id = secure_filename(bundle_id)
         safe_filename = secure_filename(filename)
-        
-        filepath = os.path.join(IPA_FOLDER, safe_bundle_id, safe_filename)
-        
-        if not os.path.exists(filepath):
+        version = safe_filename[:-4] if safe_filename.lower().endswith('.ipa') else safe_filename
+
+        if not ipa_storage.exists(safe_bundle_id, version):
             return jsonify({"error": "IPA file not found"}), 404
-        
+
+        url = ipa_storage.public_url(safe_bundle_id, version)
+        if url:
+            return redirect(url, code=302)
+
+        filepath = os.path.join(IPA_FOLDER, safe_bundle_id, safe_filename)
         return send_file(filepath, mimetype='application/octet-stream', as_attachment=True, download_name=filename)
     except Exception as e:
         logging.error(f"Error serving IPA: {str(e)}")
