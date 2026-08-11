@@ -23,7 +23,7 @@ Three facts shape every plan here:
 | [003](003-delete-dead-copies.md) | Delete the two dead copies of the application | P1 | S | LOW | 002, 004 | TODO |
 | [004](004-restore-pillow-qr.md) | Restore Pillow so the QR endpoint works | P1 | S | LOW | — | **DONE** — `cec6ae4`, merged as `facf9c1`. Pinned `pillow==11.3.0`, **not** the harvested `10.1.0` (no cp314 wheel — see the plan). Verified on both interpreters; see "Plan 004 verification" below. |
 | [005](005-smoke-test-suite.md) | Establish a one-command smoke-test suite | P1 | S | LOW | 001 | **DONE** — `901699e`, merged as `41c417a`. Host venv path; 21 tests, all 13 routes covered. |
-| [006](006-atomic-catalog-writes.md) | Make catalog writes atomic and serialized | P1 | S | LOW | 005 | TODO — **now the highest-value remaining item**; `save_source` still truncates the live catalog before writing it |
+| [006](006-atomic-catalog-writes.md) | Make catalog writes atomic and serialized | P1 | S | LOW | 005 | **DONE** — `65dccfb`, merged as `a65c6bc`. 29→34 tests. Both guarantees proven by breaking them; see "Plan 006 verification" below. |
 | [007](007-fail-loudly.md) | Report failures instead of silently reporting success | P1 | S–M | LOW–MED | 005 (006 recommended) | **DONE** — `7b36d0a`..`d6d32bc` (5 defects, one commit each), merged as `4de7fed`. 21→29 tests. Container checks run during review; see "Plan 007 verification" below. |
 | [008](008-public-base-url.md) | Derive published URLs from configuration, not the `Host` header | P2 | S | LOW | 001, 005 | TODO |
 | [009](009-extract-html-template.md) | Extract the embedded HTML template to `templates/index.html` | P2 | S | LOW–MED | 005 | TODO |
@@ -147,6 +147,30 @@ Two **orphans** sit on disk unreferenced by any catalog entry: `com.ryan.anymex/
 | Web (bucket `feather-repo`) | `https://feather-repo.web.example.com` | a missing key returns `NoSuchKey` (**not** `AccessDenied`) → website access enabled, anonymous reads work |
 
 Both are TLS-terminated by the same openresty on `<proxy-ip>` that fronts the app, so device reachability is not in question. This is why Plan 011 uses a plain `302` to the web endpoint rather than presigned URLs or a proxy-stream fallback.
+
+## Plan 006 verification (2026-08-11)
+
+The two new guarantees were each proven to discriminate, by breaking them one at a time in the worktree:
+
+**Lock** — replaced `threading.Lock()` with `contextlib.nullcontext()`, everything else identical:
+```
+FAILED tests/test_routes.py::test_concurrent_add_version_all_land
+1 failed, 4 passed
+```
+Restored → `5 passed`. So the concurrency test is real, not decorative.
+
+**Atomic write** — reverted `save_source` to the old truncating `open(self.source_file, 'w')`:
+```
+assert (tmp_path / "source.json").read_bytes() == original_bytes
+E       assert b'' == b'{"name": "T..., "news": []}'
+```
+The live catalog is **zero bytes** after a failed write — the exact failure this plan removes. Restored → `34 passed`.
+
+The lock is placed correctly in all eight methods: immediately before `load_source()` and spanning through the `return`, so it covers the whole read-modify-write rather than only the save. A wrapper around just `save_source` would have looked correct in a diff and fixed nothing.
+
+**Correction to the plan**: the `grep -c "os.replace"` criterion was wrong twice (`1`, then `3`). The baseline already returns `3` — Plan 007's two real calls plus a comment containing the string — so the correct post-change count is `4`. The executor caught this and did not improvise around it. Criterion fixed, and reworded to check the substance rather than a count.
+
+**Not verified**: the Docker and live-`curl` half of Step 6. The worktree has no `data/` or `.env`. The equivalent behaviour is covered by the backup/temp-file tests against a `tmp_path` data dir. On the next `docker compose up --build -d`, confirm `data/backups/` starts filling and that no `.source-*.tmp` files accumulate in `data/`.
 
 ## Findings considered and rejected
 
