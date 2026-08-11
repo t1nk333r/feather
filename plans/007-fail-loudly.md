@@ -9,22 +9,25 @@
 > **Drift check (run first)**:
 > ```
 > cd /home/t1nk33r/Documents/feather
-> sed -n '664,690p' app.py
-> grep -c "delete_icon_file" app.py
+> md5sum app.py                       # expect 4e087dfa7451be26efbef3323c3c2dbd
+> sed -n '679,705p' app.py
+> grep -c "delete_icon_file" app.py   # expect 1 — definition only, no call sites
+> .venv/bin/python -m pytest tests/ -q   # expect 21 passed
 > ```
-> The excerpt must match "Current state / Defect 2" below, and the count must
-> be `1` (definition only, no call sites). Confirm Plan 005 landed and its
-> suite is green before changing anything.
+> The excerpt must match "Current state / Defect 2" below. **All line numbers in
+> this plan were re-checked against `main` at `41c417a` on 2026-08-11**, after
+> Plans 001, 004 and 005 landed; `app.py` is 2546 lines. If the md5 differs,
+> match on the code excerpts rather than the line numbers.
 
 ## Status
 
 - **Priority**: P1
-- **Effort**: S–M (four related defects in one code region)
+- **Effort**: S–M (five related defects in one code region)
 - **Risk**: LOW–MED — some requests that currently return 200 will start returning 400. That is the point, but it is user-visible.
 - **Depends on**: `plans/005-smoke-test-suite.md` (mandatory)
 - **Recommended after**: `plans/006-atomic-catalog-writes.md` — both touch `SourceManager`; doing 006 first avoids conflicts
 - **Category**: bug
-- **Planned at**: no VCS at authoring time — `app.py` md5 `2d17cee45698fa4f062cd9b4114e20d0`, 2026-08-10
+- **Planned at**: 2026-08-10. **Line numbers refreshed 2026-08-11** against `main` at `41c417a`; `app.py` md5 `4e087dfa7451be26efbef3323c3c2dbd`.
 
 ## Why this matters
 
@@ -42,13 +45,13 @@ The file-handling helpers return `(None, 0)` on any exception. Their callers tes
 
 `"size": 0` for an app whose real binary is 4,321,496 bytes. The download failed, `get_file_size` returned `0`, nobody was told, and the wrong number was published to every client.
 
-Four distinct defects live in this one code region. The most dangerous is #2: `update_version` deletes the existing IPA **before** fetching its replacement, so a transient network error permanently destroys a hosted binary while the catalog keeps advertising it — and returns `{"success": true}`.
+Five distinct defects live in this one code region — the fifth was found while writing the Plan 005 test suite. The most dangerous is #2: `update_version` deletes the existing IPA **before** fetching its replacement, so a transient network error permanently destroys a hosted binary while the catalog keeps advertising it — and returns `{"success": true}`.
 
 ## Current state
 
 ### Defect 1 — silent success
 
-`app.py:66-76` — the helper's failure mode:
+`app.py:81-91` — the helper's failure mode:
 
 ```python
     def save_ipa_file(self, file, bundle_id, version):
@@ -64,7 +67,7 @@ Four distinct defects live in this one code region. The most dangerous is #2: `u
             return None, 0
 ```
 
-`app.py:268-291` — the caller, with no `else` on either branch:
+`app.py:283-306` — the caller, with no `else` on either branch:
 
 ```python
         # Handle IPA file - upload, download, or use URL
@@ -93,19 +96,19 @@ Four distinct defects live in this one code region. The most dangerous is #2: `u
                 icon_url = self.get_local_icon_url(bundle_id, base_url)
 ```
 
-`app.py:326` — and the return, which conflates the save result with a hardcoded success message:
+`app.py:341` — and the return, which conflates the save result with a hardcoded success message:
 
 ```python
         return self.save_source(source_data), "App added successfully"
 ```
 
-When `save_source` returns `False`, the route at `app.py:2338-2339` emits **HTTP 400 with `{"error": "App added successfully"}`**.
+When `save_source` returns `False`, the route at `app.py:2353-2354` emits **HTTP 400 with `{"error": "App added successfully"}`**.
 
-The same `if filepath:`-with-no-`else` shape also appears in `update_app` at `app.py:552-570`.
+The same `if filepath:`-with-no-`else` shape also appears in `update_app` at `app.py:567-585`.
 
 ### Defect 2 — destructive ordering
 
-`app.py:664-690` — the old file is removed *before* the replacement is fetched:
+`app.py:679-705` — the old file is removed *before* the replacement is fetched:
 
 ```python
         # Handle IPA file update - upload, download, or use URL
@@ -137,11 +140,11 @@ The same `if filepath:`-with-no-`else` shape also appears in `update_app` at `ap
                 version_obj['size'] = file_size
 ```
 
-If the fetch fails: the file is gone, `filepath` is `None`, the `if filepath:` body is skipped, `version_obj['downloadURL']` still points at `/ipas/<bundle>/<version>.ipa`, and `app.py:702-703` returns success.
+If the fetch fails: the file is gone, `filepath` is `None`, the `if filepath:` body is skipped, `version_obj['downloadURL']` still points at `/ipas/<bundle>/<version>.ipa`, and `app.py:717-718` returns success.
 
 ### Defect 3 — skipped content decoding
 
-`app.py:78-94`:
+`app.py:93-109`:
 
 ```python
     def download_ipa_from_url(self, url, bundle_id, version):
@@ -157,13 +160,13 @@ If the fetch fails: the file is gone, `filepath` is `None`, the `if filepath:` b
             ...
 ```
 
-`response.raw` is the **undecoded** urllib3 stream. If the origin serves `Content-Encoding: gzip` — many CDNs and object stores do, negotiated per request — the `.ipa` written to disk is a gzip stream, not an archive. `get_file_size` records the compressed size and publishes it. No exception is raised. The identical pattern is at `app.py:167-168` for icons.
+`response.raw` is the **undecoded** urllib3 stream. If the origin serves `Content-Encoding: gzip` — many CDNs and object stores do, negotiated per request — the `.ipa` written to disk is a gzip stream, not an archive. `get_file_size` records the compressed size and publishes it. No exception is raised. The identical pattern is at `app.py:182-183` for icons.
 
 ### Defect 4 — bare `except:` clauses
 
-Six sites: `app.py:38` (`get_file_size`), `108` and `188` (directory cleanup), `364` (date parsing), `671` and `684` (the `os.remove` calls above).
+Six sites, confirmed by `grep -nE "^\s+except:\s*$" app.py`: **53** (`get_file_size`), **123** and **203** (directory cleanup), **379** (date parsing), **686** and **699** (the `os.remove` calls above).
 
-`app.py:34-39` is the one that reaches the catalog:
+`app.py:49-54` is the one that reaches the catalog:
 
 ```python
 def get_file_size(filepath):
@@ -174,12 +177,12 @@ def get_file_size(filepath):
         return 0
 ```
 
-A permission error, a missing file, and a genuinely empty file are indistinguishable — and that `0` is written straight into the version record at `app.py:305`.
+A permission error, a missing file, and a genuinely empty file are indistinguishable — and that `0` is written straight into the version record at `app.py:320`.
 
 ### Two adjacent one-line bugs
 
-- **`delete_icon_file` is never called.** It is defined at `app.py:176` and `grep -c "delete_icon_file" app.py` returns `1` — the definition only. `delete_app` (`app.py:503-510`) loops versions calling `delete_ipa_file` but never touches icons, so every deleted app leaves its icon behind forever. On disk today: `data/icons/com.ryan.anymex` belongs to no catalogued app.
-- **`get_ipa_path` creates directories as a side effect of computing a path.** `app.py:57-64`:
+- **`delete_icon_file` is never called.** It is defined at `app.py:191` and `grep -c "delete_icon_file" app.py` returns `1` — the definition only. `delete_app` (`app.py:518-525`) loops versions calling `delete_ipa_file` but never touches icons, so every deleted app leaves its icon behind forever. On disk today: `data/icons/com.ryan.anymex` belongs to no catalogued app.
+- **`get_ipa_path` creates directories as a side effect of computing a path.** `app.py:72-79`:
 
 ```python
     def get_ipa_path(self, bundle_id, version):
@@ -191,9 +194,37 @@ A permission error, a missing file, and a genuinely empty file are indistinguish
         return os.path.join(bundle_folder, filename)
 ```
 
-  It is called from read-only paths (including `delete_ipa_file` and the `os.path.exists` checks above), which is why `data/ipas/` contains three empty directories. `get_icon_path` at `app.py:124-129` has the same problem.
+  It is called from read-only paths (including `delete_ipa_file` and the `os.path.exists` checks above), which is why `data/ipas/` contains three empty directories. `get_icon_path` at `app.py:139-144` has the same problem.
+
+### Defect 5 — `/api/add-app` leaks a raw `KeyError` as its error message
+
+Found while writing the Plan 005 suite, and **verified by hand**:
+
+```
+$ curl -X POST .../api/add-app -H 'Content-Type: application/json' \
+       -d '{"name":"X","developerName":"Y","version":"1.0"}'
+400 {"error":"'bundleIdentifier'","success":false}
+```
+
+Unlike `/api/delete-app`, `/api/update-app`, `/api/add-version` and `/api/update-version` — which all begin with an explicit `if not bundle_id: return jsonify(...), 400` guard — `/api/add-app` (`app.py:2326-2358`) has no such check. A missing `bundleIdentifier` reaches `data['bundleIdentifier']` inside `add_app_manual` (`app.py:278`), raises `KeyError`, is caught by the route's outer `except Exception as e`, and `str(e)` — the bare repr `'bundleIdentifier'` — is handed to the client as the error message.
+
+The status code happens to be right; the message is a Python internal. This is the same family of defect as the rest of this plan: the failure is real but the report is useless. Fix it with an explicit guard matching the four sibling routes, so the client gets `"Bundle identifier is required"`.
+
+(The broader "`str(e)` returned to clients at 10 handlers" issue is a separate deferred finding — see `plans/README.md`. Fix only this one guard here; do not sweep the other handlers.)
 
 **Repo conventions**: `(bool, message)` tuples from `SourceManager` methods; `logging.error(f"...: {str(e)}")`; messages are plain user-facing sentences. Keep all three.
+
+## What the Plan 005 suite already pins
+
+The suite (21 tests, `tests/test_routes.py`) is green today and asserts **current** behaviour, including bugs this plan fixes. Two tests carry markers, and they are **not** symmetrical — read both before changing either:
+
+1. **`test_add_version_downloadurl_never_fetched_without_download_flag`** (marked `NOTE (plans/007)`) pins that a bogus `downloadURL` is stored verbatim, unvalidated, and reported as success when `downloadFromUrl` is not set.
+
+   **This plan does not change that behaviour, and you must not make it.** Validating that a `downloadURL` resolves means making an outbound request to a caller-supplied URL — which is the deferred SSRF finding, explicitly out of scope below. This plan only adds `else` branches for fetches that were *attempted and failed*. So: **keep the assertion as-is** and reword its comment from a `plans/007` NOTE to a plain statement of intended behaviour, since 007 is no longer the plan that would change it. This test also doubles as the suite's guard that no test makes a real network call — do not weaken it.
+
+2. **`test_delete_app_nonexistent_bundle_id_400`** mentions "Plan 007" only to record that `delete_app` is *correct* — it genuinely reports failure for an unknown bundle id. **Leave this test and its docstring alone.**
+
+Consequently the old done-criterion `grep -c "Plan 007" tests/test_routes.py` → `0` is wrong twice over: it would be satisfied by editing the one test that should not change, and it misses the actual marker, which is spelled `plans/007`. The corrected criteria are in "Done criteria" below.
 
 ## Commands you will need
 
@@ -207,7 +238,7 @@ A permission error, a missing file, and a genuinely empty file are indistinguish
 ## Scope
 
 **In scope**:
-- `app.py` — `get_file_size` (34–39), `get_ipa_path` (57–64), `save_ipa_file` (66–76), `download_ipa_from_url` (78–94), `delete_ipa_file` (96–114), `get_icon_path` (124–129), `save_icon_file` (131–143), `download_icon_from_url` (145–174), `delete_icon_file` (176–195), `add_app_manual` (256–326), `delete_app` (484–512), `update_app` (525–573), `add_version` (575–633), `update_version` (635–703)
+- `app.py` — `get_file_size` (49–54), `get_ipa_path` (72–79), `save_ipa_file` (81–91), `download_ipa_from_url` (93–109), `delete_ipa_file` (111–129), `get_icon_path` (139–144), `save_icon_file` (146–158), `download_icon_from_url` (160–189), `delete_icon_file` (191–210), `add_app_manual` (271–341), `delete_app` (499–527), `update_app` (540–588), `add_version` (590–648), `update_version` (650–718)
 - `tests/test_routes.py`
 
 **Out of scope** (do NOT touch):
@@ -226,7 +257,7 @@ A permission error, a missing file, and a genuinely empty file are indistinguish
 
 ### Step 1: Make helper failures distinguishable, and propagate them
 
-Give every `if filepath:` in `add_app_manual` (268–291) and `update_app` (552–570) an `else` that returns a specific failure:
+Give every `if filepath:` in `add_app_manual` (283–306) and `update_app` (567–585) an `else` that returns a specific failure:
 
 ```python
         if ipa_file and allowed_file(ipa_file.filename):
@@ -245,7 +276,7 @@ Give every `if filepath:` in `add_app_manual` (268–291) and `update_app` (552�
 
 Apply the same treatment to the icon branches. Icon failures are less severe than IPA failures — an app with a missing icon is still installable — but they must still be reported, not swallowed.
 
-Also fix `app.py:326` so a failed save does not return a success string as its error:
+Also fix `app.py:341` so a failed save does not return a success string as its error:
 
 ```python
         if self.save_source(source_data):
@@ -253,11 +284,26 @@ Also fix `app.py:326` so a failed save does not return a success string as its e
         return False, "Failed to save source data"
 ```
 
-**Verify**: `python3 -m py_compile app.py` → exit 0, and `.venv/bin/python -m pytest tests/ -q` → the Plan 005 tests carrying `NOTE: ... Plan 007` comments now fail. **That is expected** — update those assertions to the new correct behaviour as part of this step.
+**Verify**: `python3 -m py_compile app.py` → exit 0, and `.venv/bin/python -m pytest tests/ -q` → **all 21 existing tests still pass.** None of them exercise a *failing* upload or download, so none should break here. If one does, trace it before continuing — see "What the Plan 005 suite already pins" above for the two marked tests and why neither should be inverted.
+
+### Step 1b: Add the missing `bundleIdentifier` guard to `/api/add-app`
+
+Defect 5. In the `/api/add-app` route (`app.py:2326-2358`), after the body is parsed into `data` and before `source_manager.add_app_manual(...)` is called, add the same guard the four sibling mutating routes already have:
+
+```python
+        if not data.get('bundleIdentifier'):
+            return jsonify({"success": False, "error": "Bundle identifier is required"}), 400
+```
+
+Match the sibling routes' wording exactly — compare against `/api/delete-app` (`app.py:2361`) and copy its message string.
+
+Note the route branches on `request.content_type`, so place the guard after both the multipart and JSON branches have populated `data`, not inside one of them.
+
+**Verify**: add `test_add_app_missing_bundle_id_400` asserting status `400` and that the error message is `"Bundle identifier is required"` — specifically **not** `"'bundleIdentifier'"`, which is what it returns today.
 
 ### Step 2: Fix the destructive ordering in `update_version`
 
-Restructure `app.py:664-690` so the replacement is fully in place before the original is removed. Never delete first.
+Restructure `app.py:679-705` (the block quoted under Defect 2) so the replacement is fully in place before the original is removed. Never delete first.
 
 The shape:
 1. Fetch or save the new file to a **temporary path** (e.g. `<final>.new`).
@@ -271,7 +317,7 @@ This needs a way to write to a caller-chosen path. Either add an optional `dest_
 
 ### Step 3: Decode downloaded content correctly
 
-Replace both `shutil.copyfileobj(response.raw, f)` calls (`app.py:87` and `app.py:168`) with a chunked loop over `response.iter_content()`, which applies content decoding:
+Replace both `shutil.copyfileobj(response.raw, f)` calls (`app.py:102` for IPAs and `app.py:183` for icons) with a chunked loop over `response.iter_content()`, which applies content decoding:
 
 ```python
             total = 0
@@ -298,8 +344,8 @@ If `shutil` ends up unused in `app.py` afterwards, remove the import. Check firs
 
 Two small fixes:
 
-1. In `delete_app` (`app.py:503-510`), call `self.delete_icon_file(bundle_identifier)` alongside the existing `delete_ipa_file` loop.
-2. Remove the `os.makedirs(...)` side effect from `get_ipa_path` (`app.py:61`) and `get_icon_path` (`app.py:127`). Move directory creation into the functions that actually *write*: `save_ipa_file`, `download_ipa_from_url`, `save_icon_file`, `download_icon_from_url`. Those already call `os.makedirs(os.path.dirname(filepath), exist_ok=True)` in the icon cases (`app.py:137`, `165`); mirror that for the IPA cases.
+1. In `delete_app` (`app.py:518-525`), call `self.delete_icon_file(bundle_identifier)` alongside the existing `delete_ipa_file` loop.
+2. Remove the `os.makedirs(...)` side effect from `get_ipa_path` (`app.py:76`) and `get_icon_path` (`app.py:142`). Move directory creation into the functions that actually *write*: `save_ipa_file`, `download_ipa_from_url`, `save_icon_file`, `download_icon_from_url`. Those already call `os.makedirs(os.path.dirname(filepath), exist_ok=True)` in the icon cases (`app.py:152` and `app.py:180`); mirror that for the IPA cases. Note `ensure_data_directory` (`app.py:66-69`) still creates the four top-level directories at startup — leave that alone; it is the per-bundle subdirectory creation at `76` and `142` that is misplaced.
 
 **Verify**: `grep -c "delete_icon_file" app.py` → `2` (definition + one call site)
 
@@ -307,14 +353,24 @@ Two small fixes:
 
 Replace all six with specific exception types and a log line:
 
-- `get_file_size` (38): catch `OSError`, and return `None` rather than `0` so "unknown" is distinguishable from "empty". **Then check every caller** — `app.py:305` and `app.py:625` write this value into the version record as `size`. Decide explicitly what a `None` size means there (omitting the key, or keeping `0`, are both defensible — pick one and comment it). Do not let `None` reach the JSON silently.
-- Directory cleanup (108, 188): `except OSError as e:` + `logging.warning(...)`.
-- Date parsing (364): `except (ValueError, TypeError) as e:` + `logging.warning(...)`. Note this branch silently rewrites an unparseable date to "now", which reorders versions for clients that sort by date — the warning makes it visible.
-- The two `os.remove` calls (671, 684) disappear entirely in Step 2.
+- `get_file_size` (53): catch `OSError`, and return `None` rather than `0` so "unknown" is distinguishable from "empty". **Then check every caller.** There are **four** sites that write this value into a version record as `size`, not two: `app.py:320` (`add_app_manual`), `app.py:640` (`add_version`), and `app.py:692` and `705` (both in `update_version`). The last two are inside the block Step 2 restructures, so handle them there. Decide explicitly what a `None` size means (omitting the key, or keeping `0`, are both defensible — pick one and comment it). Do not let `None` reach the JSON silently.
+
+  `get_file_size` itself is called from only two places — `app.py:86` (`save_ipa_file`) and `app.py:104` (`download_ipa_from_url`) — so the `None` originates in exactly two spots and fans out to the four writes above.
+- Directory cleanup (123, 203): `except OSError as e:` + `logging.warning(...)`.
+- Date parsing (379): `except (ValueError, TypeError) as e:` + `logging.warning(...)`. Note this branch silently rewrites an unparseable date to "now", which reorders versions for clients that sort by date — the warning makes it visible.
+- The two `os.remove` calls (686, 699) disappear entirely in Step 2.
 
 **Verify**: `grep -cE "^\s+except:\s*$" app.py` → `0`
 
 ### Step 6: End-to-end confirmation
+
+**If you are working in a git worktree** — the usual case for an executor — `data/` and `.env` are gitignored and therefore **absent**, so `docker compose up` fails on the missing env file and there is no `data/source.json` to count. Do **not** improvise a `.env` or copy the real `data/` in. Instead:
+
+- Run the pytest suite (which is the substantive check — tests 1, 2 and 5 below cover the behaviour change directly).
+- Reproduce the failing-download case in-process rather than over HTTP, using the `client` fixture with an unreachable `downloadURL` and `downloadFromUrl` true.
+- Then **state clearly in your report** that the Docker and live-`curl` checks were not run and why. The reviewer runs them against the real deployment.
+
+**If you are in the main checkout**, run the full sequence:
 
 ```
 .venv/bin/python -m pytest tests/ -q
@@ -345,10 +401,13 @@ Add to `tests/test_routes.py`:
 5. **`test_download_over_size_limit_is_rejected`** — set a small `MAX_CONTENT_LENGTH`, feed a larger body, assert failure and that no partial file remains.
 6. **`test_delete_app_removes_icon`** — seed an icon, delete the app, assert the icon directory is gone.
 7. **`test_get_ipa_path_does_not_create_directories`** — call `get_ipa_path` for a novel bundle id, assert no directory was created.
+8. **`test_add_app_missing_bundle_id_400`** — Defect 5; assert the message is `"Bundle identifier is required"`, not the raw `KeyError` string.
 
-Also **update the Plan 005 assertions carrying `NOTE: ... Plan 007` comments** — they currently assert the buggy behaviour and must be inverted. Removing those NOTE comments is part of finishing this plan.
+Reuse the existing `client` fixture and its `tmp_path` rooting. Do not add a new fixture pattern, and do not let any new test make a real network call — see the STOP condition on the gzip test.
 
-Verification: `.venv/bin/python -m pytest tests/ -q` → all pass, 7 new tests, zero remaining `Plan 007` NOTE comments.
+Also **reword the `NOTE (plans/007)` comment** on `test_add_version_downloadurl_never_fetched_without_download_flag` to a plain statement of intended behaviour. **Do not change its assertions**, and do not touch `test_delete_app_nonexistent_bundle_id_400` at all. Both are explained in "What the Plan 005 suite already pins" above.
+
+Verification: `.venv/bin/python -m pytest tests/ -q` → all pass; 21 existing + 8 new = **29 tests**; `grep -c "plans/007" tests/test_routes.py` → `0`.
 
 ## Done criteria
 
@@ -359,10 +418,13 @@ ALL must hold:
 - [ ] `grep -c "copyfileobj" app.py` returns `0`
 - [ ] `grep -c "delete_icon_file" app.py` returns `2`
 - [ ] `grep -c "delete old one first" app.py` returns `0`
-- [ ] `grep -c "Plan 007" tests/test_routes.py` returns `0`
-- [ ] `.venv/bin/python -m pytest tests/ -q` exits 0 with 7 new tests
+- [ ] `grep -c "plans/007" tests/test_routes.py` returns `0` (the marker is lowercase `plans/007`, not `Plan 007`)
+- [ ] `grep -c "test_delete_app_nonexistent_bundle_id_400" tests/test_routes.py` returns `1` and that test is **unchanged** (`git diff` shows no edit to its body)
+- [ ] `test_add_version_downloadurl_never_fetched_without_download_flag` still exists and its **assertions are unchanged** — only its comment was reworded
+- [ ] `.venv/bin/python -m pytest tests/ -q` exits 0 with **29 tests** (21 existing + 8 new)
+- [ ] `POST /api/add-app` with no `bundleIdentifier` returns 400 with `"Bundle identifier is required"`, not `"'bundleIdentifier'"`
 - [ ] The live failing-download `curl` returns 400 with a specific message
-- [ ] `data/source.json` still lists 8 apps and parses
+- [ ] `data/source.json` still lists 8 apps and parses (this needs the real checkout — see the note under Step 6)
 - [ ] `git status --short` shows only `app.py` and `tests/test_routes.py`
 - [ ] `plans/README.md` status row updated
 
@@ -370,7 +432,7 @@ ALL must hold:
 
 Stop and report back (do not improvise) if:
 
-- The `get_file_size` → `None` change (Step 5) turns out to reach more than the two call sites at `app.py:305` and `625`. Report the full list before proceeding — a `None` leaking into `source.json` as a version `size` would break clients.
+- The `get_file_size` → `None` change (Step 5) turns out to reach any `size` write beyond the four already identified (`app.py:320`, `640`, `692`, `705`). Report the full list before proceeding — a `None` leaking into `source.json` as a version `size` would break clients.
 - Restructuring `update_version` requires changing a route handler's signature. It should not; report.
 - Any test in the Plan 005 suite fails for a reason you cannot trace to an intended behaviour change from this plan.
 - You cannot construct the gzip test without a real network call. Skip that one test, mark it clearly, and report — do **not** add a real outbound request to the suite.
