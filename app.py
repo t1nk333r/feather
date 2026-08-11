@@ -287,24 +287,38 @@ class SourceManager:
             filepath, file_size = self.save_ipa_file(ipa_file, bundle_id, version)
             if filepath:
                 download_url = self.get_local_ipa_url(bundle_id, version, base_url)
+            else:
+                return False, f"Failed to save uploaded IPA for {bundle_id} {version}"
         elif download_from_url and download_url:
             # Download from URL
             filepath, file_size = self.download_ipa_from_url(download_url, bundle_id, version)
             if filepath:
                 download_url = self.get_local_ipa_url(bundle_id, version, base_url)
-        
+            else:
+                return False, f"Failed to download IPA from {download_url}"
+
+        if file_size is None:
+            # get_file_size could not stat the file even though the save/
+            # download itself reported success. Record 0 rather than
+            # publishing `null` into source.json -- clients expect an int.
+            file_size = 0
+
         # Handle icon file - upload, download, or use URL
         if icon_file and allowed_icon_file(icon_file.filename):
             # Upload icon file
             filepath = self.save_icon_file(icon_file, bundle_id)
             if filepath:
                 icon_url = self.get_local_icon_url(bundle_id, base_url)
+            else:
+                return False, f"Failed to save uploaded icon for {bundle_id}"
         elif download_icon_from_url and icon_url:
             # Download icon from URL
             filepath = self.download_icon_from_url(icon_url, bundle_id)
             if filepath:
                 icon_url = self.get_local_icon_url(bundle_id, base_url)
-        
+            else:
+                return False, f"Failed to download icon from {icon_url}"
+
         new_app = {
             "name": data['name'],
             "bundleIdentifier": bundle_id,
@@ -338,8 +352,10 @@ class SourceManager:
             source_data['apps'].append(new_app)
             logging.info(f"Added new app: {data['name']}")
         
-        return self.save_source(source_data), "App added successfully"
-    
+        if self.save_source(source_data):
+            return True, "App added successfully"
+        return False, "Failed to save source data"
+
     def add_app_from_github(self, data):
         """Add app from GitHub repository"""
         source_data = self.load_source()
@@ -571,6 +587,8 @@ class SourceManager:
                 icon_url = self.get_local_icon_url(bundle_identifier, base_url)
                 app['iconURL'] = icon_url
                 icon_updated = True
+            else:
+                return False, f"Failed to save uploaded icon for {bundle_identifier}"
         elif download_icon_from_url and icon_url:
             # Download icon from URL
             filepath = self.download_icon_from_url(icon_url, bundle_identifier)
@@ -578,6 +596,8 @@ class SourceManager:
                 icon_url = self.get_local_icon_url(bundle_identifier, base_url)
                 app['iconURL'] = icon_url
                 icon_updated = True
+            else:
+                return False, f"Failed to download icon from {icon_url}"
         elif icon_url and icon_url.strip():
             # Just update URL (only if not empty)
             app['iconURL'] = icon_url
@@ -626,12 +646,20 @@ class SourceManager:
             filepath, file_size = self.save_ipa_file(ipa_file, bundle_identifier, version)
             if filepath:
                 download_url = self.get_local_ipa_url(bundle_identifier, version, base_url)
+            else:
+                return False, f"Failed to save uploaded IPA for {bundle_identifier} {version}"
         elif download_from_url and download_url:
             # Download from URL
             filepath, file_size = self.download_ipa_from_url(download_url, bundle_identifier, version)
             if filepath:
                 download_url = self.get_local_ipa_url(bundle_identifier, version, base_url)
-        
+            else:
+                return False, f"Failed to download IPA from {download_url}"
+
+        if file_size is None:
+            # Same "unknown size" rationale as add_app_manual above.
+            file_size = 0
+
         new_version = {
             "version": version,
             "date": dates['version_date'],

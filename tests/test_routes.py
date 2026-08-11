@@ -308,9 +308,10 @@ def test_update_version_missing_bundle_id_400(client):
 
 
 # ---------------------------------------------------------------------------
-# Known-bug documentation (see plans/007) — deliberately asserting current
-# behaviour, not the "correct" behaviour. These are NOT failures of this
-# test suite; they are regression pins on the bug itself.
+# Known-bug documentation — deliberately asserting current behaviour, not
+# the "correct" behaviour, for the cases that remain intentional by design.
+# These are NOT failures of this test suite; they are regression pins on
+# the documented behaviour itself.
 # ---------------------------------------------------------------------------
 
 
@@ -328,13 +329,16 @@ def test_delete_app_nonexistent_bundle_id_400(client):
 
 
 def test_add_version_downloadurl_never_fetched_without_download_flag(client, tmp_path):
-    """NOTE (plans/007): add_version's success path never validates that
+    """Intended behaviour: add_version's success path never validates that
     downloadURL is reachable, and the route only requires ONE of
     ipaFile/downloadURL/downloadFromUrl (app.py:2463-2464). Passing a
     bogus, unreachable downloadURL without downloadFromUrl=True is
     accepted verbatim and stored as-is -- no HTTP request is made because
     add_version() in SourceManager only calls download_ipa_from_url when
-    download_from_url is truthy (app.py:629-633). This test is also the
+    download_from_url is truthy. Validating that a caller-supplied
+    downloadURL resolves would require an outbound request to a
+    caller-controlled address, which is a deliberately deferred SSRF
+    finding, kept out of scope here. This test is also the
     guard that our own suite makes no real network calls: the URL below
     is deliberately unroutable.
     """
@@ -356,3 +360,59 @@ def test_add_version_downloadurl_never_fetched_without_download_flag(client, tmp
     version = next(v for v in body["versions"] if v["version"] == "9.9.9")
     # Stored verbatim -- no fetch, no validation that it resolves.
     assert version["downloadURL"] == bogus_url
+
+
+# ---------------------------------------------------------------------------
+# Fail loudly instead of silently reporting success
+# ---------------------------------------------------------------------------
+
+
+def test_failed_download_reports_error(client):
+    """Defect 1: a failed IPA download must surface as a specific error,
+    not fall through to 'App added successfully'. Points at an unreachable
+    loopback port (the same pattern the plan's own curl repro uses)
+    rather than a real network host, so no outbound connection is ever
+    actually reachable and no real network call is attempted.
+    """
+    resp = client.post(
+        "/api/add-app",
+        data={
+            "name": "Broken",
+            "bundleIdentifier": "com.test.broken",
+            "developerName": "T",
+            "version": "1.0",
+            "downloadURL": "http://127.0.0.1:9/nope.ipa",
+            "downloadFromUrl": "true",
+        },
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 400
+    body = json.loads(resp.data)
+    assert body["success"] is False
+    assert body["error"] != "App added successfully"
+
+    resp = client.get("/source.json")
+    body = json.loads(resp.data)
+    bundle_ids = [a["bundleIdentifier"] for a in body["apps"]]
+    assert "com.test.broken" not in bundle_ids
+
+
+def test_failed_save_does_not_return_success_message(client, monkeypatch):
+    """Defect 1: when save_source itself fails, add_app_manual must not
+    report 'App added successfully' as its error message (app.py:341,
+    pre-fix)."""
+    monkeypatch.setattr(client.app_module.source_manager, "save_source", lambda data: False)
+
+    resp = client.post(
+        "/api/add-app",
+        json={
+            "name": "X",
+            "bundleIdentifier": "com.example.savefail",
+            "developerName": "Y",
+            "version": "1.0",
+        },
+    )
+    assert resp.status_code == 400
+    body = json.loads(resp.data)
+    assert body["success"] is False
+    assert body["error"] != "App added successfully"
