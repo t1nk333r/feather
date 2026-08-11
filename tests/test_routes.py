@@ -7,9 +7,12 @@ and no test makes real network requests.
 See plans/005-smoke-test-suite.md for the design rationale.
 """
 
+import gzip
+import http.server
 import json
 import os
 import importlib
+import threading
 
 import pytest
 
@@ -75,6 +78,64 @@ def client(tmp_path):
     with app_module.app.test_client() as c:
         c.app_module = app_module  # stash for tests that need module access
         yield c
+
+
+# ---------------------------------------------------------------------------
+# Local-loopback HTTP stubs for the download tests below. These bind to
+# 127.0.0.1 on an ephemeral port and only ever talk to the test process
+# itself -- no real network call leaves the machine.
+# ---------------------------------------------------------------------------
+
+
+class _GzipIpaHandler(http.server.BaseHTTPRequestHandler):
+    payload = b"PK\x03\x04 fake but plausible ipa bytes " * 50
+
+    def do_GET(self):
+        compressed = gzip.compress(self.payload)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Encoding", "gzip")
+        self.send_header("Content-Length", str(len(compressed)))
+        self.end_headers()
+        self.wfile.write(compressed)
+
+    def log_message(self, format, *args):
+        pass  # keep test output quiet
+
+
+class _LargeIpaHandler(http.server.BaseHTTPRequestHandler):
+    payload = b"X" * (256 * 1024)  # 256 KiB -- bigger than the test's cap
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(self.payload)))
+        self.end_headers()
+        self.wfile.write(self.payload)
+
+    def log_message(self, format, *args):
+        pass
+
+
+def _local_stub_server(handler_cls):
+    server = http.server.HTTPServer(("127.0.0.1", 0), handler_cls)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/app.ipa"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+@pytest.fixture
+def gzip_ipa_server():
+    yield from _local_stub_server(_GzipIpaHandler)
+
+
+@pytest.fixture
+def large_ipa_server():
+    yield from _local_stub_server(_LargeIpaHandler)
 
 
 # ---------------------------------------------------------------------------
@@ -308,9 +369,10 @@ def test_update_version_missing_bundle_id_400(client):
 
 
 # ---------------------------------------------------------------------------
-# Known-bug documentation (see plans/007) — deliberately asserting current
-# behaviour, not the "correct" behaviour. These are NOT failures of this
-# test suite; they are regression pins on the bug itself.
+# Known-bug documentation — deliberately asserting current behaviour, not
+# the "correct" behaviour, for the cases that remain intentional by design.
+# These are NOT failures of this test suite; they are regression pins on
+# the documented behaviour itself.
 # ---------------------------------------------------------------------------
 
 
@@ -328,13 +390,16 @@ def test_delete_app_nonexistent_bundle_id_400(client):
 
 
 def test_add_version_downloadurl_never_fetched_without_download_flag(client, tmp_path):
-    """NOTE (plans/007): add_version's success path never validates that
+    """Intended behaviour: add_version's success path never validates that
     downloadURL is reachable, and the route only requires ONE of
     ipaFile/downloadURL/downloadFromUrl (app.py:2463-2464). Passing a
     bogus, unreachable downloadURL without downloadFromUrl=True is
     accepted verbatim and stored as-is -- no HTTP request is made because
     add_version() in SourceManager only calls download_ipa_from_url when
-    download_from_url is truthy (app.py:629-633). This test is also the
+    download_from_url is truthy. Validating that a caller-supplied
+    downloadURL resolves would require an outbound request to a
+    caller-controlled address, which is a deliberately deferred SSRF
+    finding, kept out of scope here. This test is also the
     guard that our own suite makes no real network calls: the URL below
     is deliberately unroutable.
     """
@@ -356,3 +421,198 @@ def test_add_version_downloadurl_never_fetched_without_download_flag(client, tmp
     version = next(v for v in body["versions"] if v["version"] == "9.9.9")
     # Stored verbatim -- no fetch, no validation that it resolves.
     assert version["downloadURL"] == bogus_url
+
+
+# ---------------------------------------------------------------------------
+# Fail loudly instead of silently reporting success
+# ---------------------------------------------------------------------------
+
+
+def test_failed_download_reports_error(client):
+    """Defect 1: a failed IPA download must surface as a specific error,
+    not fall through to 'App added successfully'. Points at an unreachable
+    loopback port (the same pattern the plan's own curl repro uses)
+    rather than a real network host, so no outbound connection is ever
+    actually reachable and no real network call is attempted.
+    """
+    resp = client.post(
+        "/api/add-app",
+        data={
+            "name": "Broken",
+            "bundleIdentifier": "com.test.broken",
+            "developerName": "T",
+            "version": "1.0",
+            "downloadURL": "http://127.0.0.1:9/nope.ipa",
+            "downloadFromUrl": "true",
+        },
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 400
+    body = json.loads(resp.data)
+    assert body["success"] is False
+    assert body["error"] != "App added successfully"
+
+    resp = client.get("/source.json")
+    body = json.loads(resp.data)
+    bundle_ids = [a["bundleIdentifier"] for a in body["apps"]]
+    assert "com.test.broken" not in bundle_ids
+
+
+def test_failed_save_does_not_return_success_message(client, monkeypatch):
+    """Defect 1: when save_source itself fails, add_app_manual must not
+    report 'App added successfully' as its error message (app.py:341,
+    pre-fix)."""
+    monkeypatch.setattr(client.app_module.source_manager, "save_source", lambda data: False)
+
+    resp = client.post(
+        "/api/add-app",
+        json={
+            "name": "X",
+            "bundleIdentifier": "com.example.savefail",
+            "developerName": "Y",
+            "version": "1.0",
+        },
+    )
+    assert resp.status_code == 400
+    body = json.loads(resp.data)
+    assert body["success"] is False
+    assert body["error"] != "App added successfully"
+
+
+def test_add_app_missing_bundle_id_400(client):
+    """Defect 5: /api/add-app lacked the bundleIdentifier guard its sibling
+    mutating routes all have, so a missing bundleIdentifier fell through
+    to a KeyError whose raw repr ("'bundleIdentifier'") was returned as
+    the error message."""
+    resp = client.post(
+        "/api/add-app",
+        json={"name": "X", "developerName": "Y", "version": "1.0"},
+    )
+    assert resp.status_code == 400
+    body = json.loads(resp.data)
+    assert body["success"] is False
+    assert body["error"] == "Bundle identifier is required"
+
+
+def test_update_version_preserves_original_on_failed_fetch(client, tmp_path):
+    """Defect 2, the critical one: update_version must fetch the
+    replacement IPA before touching the original file. Before the fix,
+    the old file was deleted first ("delete old one first"), so a
+    transient network error permanently destroyed a hosted binary while
+    /source.json kept advertising it as available and the route reported
+    {"success": true}. This test fails before the fix and passes after.
+
+    Uses an unreachable loopback port rather than a real network host --
+    same pattern as the plan's own curl repro -- so no real network call
+    is attempted.
+    """
+    ipa_dir = tmp_path / "ipas" / "com.example.app"
+    ipa_dir.mkdir(parents=True)
+    original_bytes = b"original ipa bytes -- must survive a failed re-fetch"
+    (ipa_dir / "1.0.0.ipa").write_bytes(original_bytes)
+
+    resp = client.post(
+        "/api/update-version",
+        data={
+            "bundleIdentifier": "com.example.app",
+            "version": "1.0.0",
+            "downloadURL": "http://127.0.0.1:9/nope.ipa",
+            "downloadFromUrl": "true",
+        },
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 400
+    body = json.loads(resp.data)
+    assert body["success"] is False
+
+    assert (ipa_dir / "1.0.0.ipa").exists()
+    assert (ipa_dir / "1.0.0.ipa").read_bytes() == original_bytes
+
+
+def test_gzip_encoded_download_is_decoded(client, tmp_path, gzip_ipa_server):
+    """Defect 3: response.raw (used with shutil.copyfileobj) is the
+    undecoded urllib3 stream, so a gzip-encoded origin wrote a gzip
+    stream to disk instead of the real .ipa. iter_content() applies
+    content decoding, so the bytes landing on disk must be the original,
+    decompressed payload.
+    """
+    resp = client.post(
+        "/api/add-app",
+        data={
+            "name": "Gzipped",
+            "bundleIdentifier": "com.test.gzipped",
+            "developerName": "T",
+            "version": "1.0",
+            "downloadURL": gzip_ipa_server,
+            "downloadFromUrl": "true",
+        },
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["success"] is True
+
+    saved = tmp_path / "ipas" / "com.test.gzipped" / "1.0.ipa"
+    assert saved.exists()
+    assert saved.read_bytes() == _GzipIpaHandler.payload
+
+
+def test_download_over_size_limit_is_rejected(client, tmp_path, large_ipa_server):
+    """Defect 3: outbound downloads had no size ceiling at all (Flask's
+    MAX_CONTENT_LENGTH only bounds inbound uploads). A download that
+    exceeds the configured limit must be rejected and leave no partial
+    file behind.
+    """
+    client.app_module.app.config["MAX_CONTENT_LENGTH"] = 1024  # 1 KiB cap
+
+    resp = client.post(
+        "/api/add-app",
+        data={
+            "name": "TooBig",
+            "bundleIdentifier": "com.test.toobig",
+            "developerName": "T",
+            "version": "1.0",
+            "downloadURL": large_ipa_server,
+            "downloadFromUrl": "true",
+        },
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 400
+    body = json.loads(resp.data)
+    assert body["success"] is False
+
+    # No partial file left behind.
+    bundle_dir = tmp_path / "ipas" / "com.test.toobig"
+    assert not bundle_dir.exists() or list(bundle_dir.iterdir()) == []
+
+
+def test_delete_app_removes_icon(client, tmp_path):
+    """delete_icon_file was defined but never called from delete_app, so
+    every deleted app left its icon directory behind forever. delete_app
+    must now also remove the icon.
+    """
+    icon_dir = tmp_path / "icons" / "com.example.app"
+    icon_dir.mkdir(parents=True)
+    (icon_dir / "icon.png").write_bytes(b"\x89PNG\r\n\x1a\nfakeicon")
+
+    resp = client.post("/api/delete-app", json={"bundleIdentifier": "com.example.app"})
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["success"] is True
+
+    assert not icon_dir.exists()
+
+
+def test_get_ipa_path_does_not_create_directories(client, tmp_path):
+    """get_ipa_path is a read-only path computation and must not create
+    the bundle subdirectory as a side effect -- that left empty
+    directories under data/ipas/ for bundle ids that were only ever
+    looked up, never written.
+    """
+    source_manager = client.app_module.source_manager
+    bundle_folder = tmp_path / "ipas" / "com.example.novel"
+
+    path = source_manager.get_ipa_path("com.example.novel", "1.0.0")
+
+    assert not bundle_folder.exists()
+    assert not os.path.exists(os.path.dirname(path))

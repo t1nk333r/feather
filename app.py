@@ -7,7 +7,6 @@ import io
 import requests
 import tempfile
 import hashlib
-import shutil
 from datetime import datetime
 from werkzeug.utils import secure_filename
 from altparse import AltSourceManager, Parser, AltSource
@@ -47,11 +46,18 @@ def allowed_icon_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_ICON_EXTENSIONS
 
 def get_file_size(filepath):
-    """Get file size in bytes"""
+    """Get file size in bytes.
+
+    Returns None (not 0) if the size cannot be determined, so "unknown"
+    is distinguishable from "genuinely empty file". Callers that write
+    this into a version's "size" field must normalize None themselves --
+    a `null` size must never reach source.json.
+    """
     try:
         return os.path.getsize(filepath)
-    except:
-        return 0
+    except OSError as e:
+        logging.warning(f"Could not determine size of {filepath}: {e}")
+        return None
 
 class SourceManager:
     """Manages the AltSource data and file operations"""
@@ -70,42 +76,76 @@ class SourceManager:
         logging.info("Data directories verified")
     
     def get_ipa_path(self, bundle_id, version):
-        """Get the file path for an IPA file"""
-        # Create subdirectory for bundle ID
+        """Get the file path for an IPA file.
+
+        Read-only: does not create the bundle subdirectory. Callers that
+        write to this path are responsible for creating it first.
+        """
         bundle_folder = os.path.join(IPA_FOLDER, secure_filename(bundle_id))
-        os.makedirs(bundle_folder, exist_ok=True)
-        # Use version in filename
         filename = f"{secure_filename(version)}.ipa"
         return os.path.join(bundle_folder, filename)
     
-    def save_ipa_file(self, file, bundle_id, version):
-        """Save uploaded IPA file"""
+    def save_ipa_file(self, file, bundle_id, version, dest_path=None):
+        """Save uploaded IPA file.
+
+        If dest_path is given, save there instead of the bundle's normal
+        final path -- callers that are replacing an existing file use this
+        to write to a temporary path first (see update_version).
+        """
+        filepath = None
         try:
-            filepath = self.get_ipa_path(bundle_id, version)
+            filepath = dest_path or self.get_ipa_path(bundle_id, version)
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
             file.save(filepath)
             file_size = get_file_size(filepath)
             logging.info(f"Saved IPA file: {filepath} ({file_size} bytes)")
             return filepath, file_size
         except Exception as e:
             logging.error(f"Error saving IPA file: {str(e)}")
+            if filepath and os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
             return None, 0
-    
-    def download_ipa_from_url(self, url, bundle_id, version):
-        """Download IPA file from URL and save it locally"""
+
+    def download_ipa_from_url(self, url, bundle_id, version, dest_path=None):
+        """Download IPA file from URL and save it locally.
+
+        If dest_path is given, save there instead of the bundle's normal
+        final path (see save_ipa_file's docstring for why).
+        """
+        filepath = None
         try:
             logging.info(f"Downloading IPA from: {url}")
             response = requests.get(url, stream=True, timeout=300)
             response.raise_for_status()
-            
-            filepath = self.get_ipa_path(bundle_id, version)
+
+            filepath = dest_path or self.get_ipa_path(bundle_id, version)
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            total = 0
+            limit = app.config.get("MAX_CONTENT_LENGTH") or (2 * 1024 * 1024 * 1024)
             with open(filepath, 'wb') as f:
-                shutil.copyfileobj(response.raw, f)
-            
+                for chunk in response.iter_content(chunk_size=1 << 20):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > limit:
+                        f.close()
+                        os.remove(filepath)
+                        raise ValueError(f"Download exceeded size limit of {limit} bytes")
+                    f.write(chunk)
+
             file_size = get_file_size(filepath)
             logging.info(f"Downloaded IPA file: {filepath} ({file_size} bytes)")
             return filepath, file_size
         except Exception as e:
             logging.error(f"Error downloading IPA file: {str(e)}")
+            if filepath and os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
             return None, 0
     
     def delete_ipa_file(self, bundle_id, version):
@@ -120,8 +160,8 @@ class SourceManager:
                 try:
                     if not os.listdir(bundle_folder):
                         os.rmdir(bundle_folder)
-                except:
-                    pass
+                except OSError as e:
+                    logging.warning(f"Could not remove empty bundle folder {bundle_folder}: {e}")
                 return True
             return False
         except Exception as e:
@@ -137,9 +177,14 @@ class SourceManager:
         return path
     
     def get_icon_path(self, bundle_id):
-        """Get the file path for an icon file"""
+        """Get the file path for an icon file.
+
+        Read-only: does not create the bundle subdirectory (see
+        get_ipa_path's docstring for why). Not currently called by
+        save_icon_file/download_icon_from_url, which construct their own
+        paths and already create their own directories.
+        """
         bundle_folder = os.path.join(ICON_FOLDER, secure_filename(bundle_id))
-        os.makedirs(bundle_folder, exist_ok=True)
         # Try to find existing icon or use default name
         return os.path.join(bundle_folder, "icon.png")
     
@@ -178,10 +223,20 @@ class SourceManager:
             
             filepath = os.path.join(ICON_FOLDER, secure_filename(bundle_id), f"icon.{ext}")
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            
+
+            total = 0
+            limit = app.config.get("MAX_CONTENT_LENGTH") or (2 * 1024 * 1024 * 1024)
             with open(filepath, 'wb') as f:
-                shutil.copyfileobj(response.raw, f)
-            
+                for chunk in response.iter_content(chunk_size=1 << 20):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > limit:
+                        f.close()
+                        os.remove(filepath)
+                        raise ValueError(f"Download exceeded size limit of {limit} bytes")
+                    f.write(chunk)
+
             logging.info(f"Downloaded icon file: {filepath}")
             return filepath
         except Exception as e:
@@ -200,8 +255,8 @@ class SourceManager:
                 try:
                     if not os.listdir(bundle_folder):
                         os.rmdir(bundle_folder)
-                except:
-                    pass
+                except OSError as e:
+                    logging.warning(f"Could not remove empty bundle folder {bundle_folder}: {e}")
                 logging.info(f"Deleted icon file for: {bundle_id}")
                 return True
             return False
@@ -287,24 +342,38 @@ class SourceManager:
             filepath, file_size = self.save_ipa_file(ipa_file, bundle_id, version)
             if filepath:
                 download_url = self.get_local_ipa_url(bundle_id, version, base_url)
+            else:
+                return False, f"Failed to save uploaded IPA for {bundle_id} {version}"
         elif download_from_url and download_url:
             # Download from URL
             filepath, file_size = self.download_ipa_from_url(download_url, bundle_id, version)
             if filepath:
                 download_url = self.get_local_ipa_url(bundle_id, version, base_url)
-        
+            else:
+                return False, f"Failed to download IPA from {download_url}"
+
+        if file_size is None:
+            # get_file_size could not stat the file even though the save/
+            # download itself reported success. Record 0 rather than
+            # publishing `null` into source.json -- clients expect an int.
+            file_size = 0
+
         # Handle icon file - upload, download, or use URL
         if icon_file and allowed_icon_file(icon_file.filename):
             # Upload icon file
             filepath = self.save_icon_file(icon_file, bundle_id)
             if filepath:
                 icon_url = self.get_local_icon_url(bundle_id, base_url)
+            else:
+                return False, f"Failed to save uploaded icon for {bundle_id}"
         elif download_icon_from_url and icon_url:
             # Download icon from URL
             filepath = self.download_icon_from_url(icon_url, bundle_id)
             if filepath:
                 icon_url = self.get_local_icon_url(bundle_id, base_url)
-        
+            else:
+                return False, f"Failed to download icon from {icon_url}"
+
         new_app = {
             "name": data['name'],
             "bundleIdentifier": bundle_id,
@@ -338,8 +407,10 @@ class SourceManager:
             source_data['apps'].append(new_app)
             logging.info(f"Added new app: {data['name']}")
         
-        return self.save_source(source_data), "App added successfully"
-    
+        if self.save_source(source_data):
+            return True, "App added successfully"
+        return False, "Failed to save source data"
+
     def add_app_from_github(self, data):
         """Add app from GitHub repository"""
         source_data = self.load_source()
@@ -376,8 +447,11 @@ class SourceManager:
                             # Try to parse and reformat existing date
                             parsed_date = datetime.fromisoformat(version['date'].replace('Z', '+00:00'))
                             version['date'] = parsed_date.strftime("%Y-%m-%dT%H:%M:%SZ")
-                        except:
-                            # If parsing fails, use current date
+                        except (ValueError, TypeError) as e:
+                            # If parsing fails, use current date -- this
+                            # reorders versions for clients that sort by
+                            # date, so make the fallback visible.
+                            logging.warning(f"Could not parse date '{version['date']}' for version {version.get('version')}: {e}; using current date")
                             version['date'] = dates['version_date']
                     else:
                         version['date'] = dates['version_date']
@@ -516,11 +590,12 @@ class SourceManager:
         ]
         
         if len(source_data['apps']) < initial_count:
-            # Delete all IPA files for this app
+            # Delete all IPA files and the icon for this app
             if app_to_delete:
                 for version in app_to_delete.get('versions', []):
                     self.delete_ipa_file(bundle_identifier, version.get('version', ''))
-            
+                self.delete_icon_file(bundle_identifier)
+
             success = self.save_source(source_data)
             return success, "App deleted successfully" if success else "Failed to save source after deletion"
         else:
@@ -571,6 +646,8 @@ class SourceManager:
                 icon_url = self.get_local_icon_url(bundle_identifier, base_url)
                 app['iconURL'] = icon_url
                 icon_updated = True
+            else:
+                return False, f"Failed to save uploaded icon for {bundle_identifier}"
         elif download_icon_from_url and icon_url:
             # Download icon from URL
             filepath = self.download_icon_from_url(icon_url, bundle_identifier)
@@ -578,6 +655,8 @@ class SourceManager:
                 icon_url = self.get_local_icon_url(bundle_identifier, base_url)
                 app['iconURL'] = icon_url
                 icon_updated = True
+            else:
+                return False, f"Failed to download icon from {icon_url}"
         elif icon_url and icon_url.strip():
             # Just update URL (only if not empty)
             app['iconURL'] = icon_url
@@ -626,12 +705,20 @@ class SourceManager:
             filepath, file_size = self.save_ipa_file(ipa_file, bundle_identifier, version)
             if filepath:
                 download_url = self.get_local_ipa_url(bundle_identifier, version, base_url)
+            else:
+                return False, f"Failed to save uploaded IPA for {bundle_identifier} {version}"
         elif download_from_url and download_url:
             # Download from URL
             filepath, file_size = self.download_ipa_from_url(download_url, bundle_identifier, version)
             if filepath:
                 download_url = self.get_local_ipa_url(bundle_identifier, version, base_url)
-        
+            else:
+                return False, f"Failed to download IPA from {download_url}"
+
+        if file_size is None:
+            # Same "unknown size" rationale as add_app_manual above.
+            file_size = 0
+
         new_version = {
             "version": version,
             "date": dates['version_date'],
@@ -676,33 +763,39 @@ class SourceManager:
         # Update version fields
         version_obj = app['versions'][version_index]
         
-        # Handle IPA file update - upload, download, or use URL
+        # Handle IPA file update - upload, download, or use URL.
+        #
+        # Fetch the replacement to a temporary path first, and only ever
+        # touch the original file via an atomic os.replace() once that
+        # fetch has fully succeeded. A failed fetch must never destroy a
+        # binary that is still being served -- deleting the original
+        # before the replacement was confirmed was the old (and
+        # dangerous) behaviour.
         if ipa_file and allowed_file(ipa_file.filename):
-            # Upload new file - delete old one first
-            old_filepath = self.get_ipa_path(bundle_identifier, version)
-            if os.path.exists(old_filepath):
-                try:
-                    os.remove(old_filepath)
-                except:
-                    pass
-            
-            filepath, file_size = self.save_ipa_file(ipa_file, bundle_identifier, version)
+            final_path = self.get_ipa_path(bundle_identifier, version)
+            tmp_path = final_path + ".new"
+            filepath, file_size = self.save_ipa_file(ipa_file, bundle_identifier, version, dest_path=tmp_path)
             if filepath:
+                os.replace(filepath, final_path)
+                if file_size is None:
+                    # Same "unknown size" rationale as add_app_manual above.
+                    file_size = 0
                 version_obj['downloadURL'] = self.get_local_ipa_url(bundle_identifier, version, base_url)
                 version_obj['size'] = file_size
+            else:
+                return False, f"Failed to save uploaded IPA for {bundle_identifier} {version}; original file untouched"
         elif download_from_url and version_data.get('downloadURL'):
-            # Download from URL - delete old one first
-            old_filepath = self.get_ipa_path(bundle_identifier, version)
-            if os.path.exists(old_filepath):
-                try:
-                    os.remove(old_filepath)
-                except:
-                    pass
-            
-            filepath, file_size = self.download_ipa_from_url(version_data['downloadURL'], bundle_identifier, version)
+            final_path = self.get_ipa_path(bundle_identifier, version)
+            tmp_path = final_path + ".new"
+            filepath, file_size = self.download_ipa_from_url(version_data['downloadURL'], bundle_identifier, version, dest_path=tmp_path)
             if filepath:
+                os.replace(filepath, final_path)
+                if file_size is None:
+                    file_size = 0
                 version_obj['downloadURL'] = self.get_local_ipa_url(bundle_identifier, version, base_url)
                 version_obj['size'] = file_size
+            else:
+                return False, f"Failed to download IPA from {version_data['downloadURL']}; original file untouched"
         else:
             # Just update URL and other fields
             updatable_fields = ['downloadURL', 'minOSVersion']
@@ -2342,12 +2435,17 @@ def add_app():
                 'downloadURL': request.form.get('downloadURL', ''),
                 'minOSVersion': request.form.get('minOSVersion', '14.0')
             }
-            success, message = source_manager.add_app_manual(data, ipa_file=ipa_file if ipa_file and ipa_file.filename else None, download_from_url=download_from_url, base_url=base_url)
         else:
             # JSON request (backward compatibility)
             data = request.get_json() if request.is_json else {}
-            success, message = source_manager.add_app_manual(data, base_url=base_url)
-        
+            ipa_file = None
+            download_from_url = False
+
+        if not data.get('bundleIdentifier'):
+            return jsonify({"success": False, "error": "Bundle identifier is required"}), 400
+
+        success, message = source_manager.add_app_manual(data, ipa_file=ipa_file if ipa_file and ipa_file.filename else None, download_from_url=download_from_url, base_url=base_url)
+
         if success:
             return jsonify({"success": True, "message": message})
         else:

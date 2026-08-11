@@ -24,7 +24,7 @@ Three facts shape every plan here:
 | [004](004-restore-pillow-qr.md) | Restore Pillow so the QR endpoint works | P1 | S | LOW | — | **DONE** — `cec6ae4`, merged as `facf9c1`. Pinned `pillow==11.3.0`, **not** the harvested `10.1.0` (no cp314 wheel — see the plan). Verified on both interpreters; see "Plan 004 verification" below. |
 | [005](005-smoke-test-suite.md) | Establish a one-command smoke-test suite | P1 | S | LOW | 001 | **DONE** — host venv path; 21 tests, all 13 routes covered, `pytest tests/ -q` passes in ~0.17s |
 | [006](006-atomic-catalog-writes.md) | Make catalog writes atomic and serialized | P1 | S | LOW | 005 | TODO |
-| [007](007-fail-loudly.md) | Report failures instead of silently reporting success | P1 | S–M | LOW–MED | 005 (006 recommended) | TODO |
+| [007](007-fail-loudly.md) | Report failures instead of silently reporting success | P1 | S–M | LOW–MED | 005 (006 recommended) | **DONE** — branch `advisor/007-fail-loudly`, commits `7b36d0a`..`d6d32bc` (5 defects, one commit each). 21→29 tests, `pytest tests/ -q` passes. Docker/live-curl checks not run (worktree has no `data/`/`.env`); verified in-process instead — see plan's Step 6. |
 | [008](008-public-base-url.md) | Derive published URLs from configuration, not the `Host` header | P2 | S | LOW | 001, 005 | TODO |
 | [009](009-extract-html-template.md) | Extract the embedded HTML template to `templates/index.html` | P2 | S | LOW–MED | 005 | TODO |
 | [010](010-login-session-auth.md) | Gate the mutating routes behind a login form | P2 | M | MED | 001, 005, 009 | TODO |
