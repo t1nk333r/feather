@@ -24,7 +24,75 @@
 - **Risk**: MED — this is the only plan that can break AltStore clients if scoped wrongly
 - **Depends on**: `plans/001-configurable-paths-and-config.md`, `plans/005-smoke-test-suite.md`, `plans/009-extract-html-template.md`
 - **Category**: security
-- **Planned at**: no VCS at authoring time — `app.py` md5 `2d17cee45698fa4f062cd9b4114e20d0`, 2026-08-10
+- **Planned at**: 2026-08-10. **Refreshed 2026-08-11** against `bac2d55`; `app.py` md5 `c93c7c8d725a3574364cc74cc6c14a4f`, now only 1491 lines because Plan 009 moved the template to `templates/index.html` (1493 lines). Every frontend line reference in this plan therefore now points at `templates/index.html`, not `app.py`.
+
+
+## REFRESHED REFERENCES — read this before the steps below (2026-08-11)
+
+Plans 001–009 and 011 have all landed. Verified against `bac2d55`:
+
+**The six mutating routes to gate** (`app.py`):
+
+| Route | Line |
+|---|---|
+| `/api/add-app` | 1266 |
+| `/api/delete-app` | 1305 |
+| `/api/update-app` | 1336 |
+| `/api/add-version` | 1380 |
+| `/api/update-version` | 1422 |
+| `/api/update-source` | 1466 |
+
+**The four routes that MUST stay unauthenticated** — gating any one breaks every subscribed iOS device:
+
+| Route | Line |
+|---|---|
+| `/source.json` | 1166 |
+| `/ipas/<bundle_id>/<filename>` | 1174 |
+| `/icons/<bundle_id>/icon.<ext>` | 1203 |
+| `/qr` | 1234 |
+
+`GET /`, `/api/apps` and `/api/app/<id>` are **also read-only** — leave them public too. Only the six POST routes get the decorator.
+
+**Config already present** (Plan 001), `app.py:33-56`:
+
+```python
+SECRET_KEY = os.environ.get("SECRET_KEY")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")
+...
+if SECRET_KEY:
+    app.secret_key = SECRET_KEY
+else:
+    app.secret_key = os.urandom(32)
+    logging.warning("SECRET_KEY not set — using a random key; sessions will not survive restart")
+```
+
+**Frontend work is now in `templates/index.html`, not `app.py`.** Plan 009 extracted it. Confirmed there:
+- `editAppModal` pattern to copy: `templates/index.html:594` (`<div id="editAppModal" class="modal">`)
+- `.modal` / `.modal-content` / `.modal-header` CSS all exist already
+- **13** `fetch(` call sites, all same-origin — **none needs credential changes**, the session cookie is sent automatically
+
+**The bundled escapeHtml fix** moved too. It is now `templates/index.html:1006`:
+
+```
+<strong>Latest:</strong> ${app.versions?.[0]?.version || 'N/A'} |
+```
+
+Every sibling field on lines 1001–1004 *is* escaped (`escapeHtml(app.name)`, `escapeHtml(app.bundleIdentifier)`, …), so this is an omission, not a decision. Wrap it: `${escapeHtml(app.versions?.[0]?.version || 'N/A')}`. Version strings are attacker-supplied and stored.
+
+**Healthcheck reconciliation** (Step 5). `Dockerfile:31-32` still embeds a credential in a process argument:
+
+```
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f -u "admin:${ADMIN_PASSWORD}" http://localhost:5000/source.json || exit 1
+```
+
+`compose.yml:22-28` already defines a credential-free healthcheck against the same URL and **silently overrides the Dockerfile one at runtime**. Fix the Dockerfile to match compose (drop `-u`), so the two agree and no credential appears in `docker inspect` or the process table.
+
+## Worktree caveat
+
+`data/` and `.env` are gitignored and absent from an executor worktree, so `docker compose` cannot start. Do not fabricate a `.env`. Verify with the pytest suite plus a `docker build` + one-off container (`-e DATA_DIR=/tmp/fd`), which needs neither. The live cutover is an operator task.
+
+**`ADMIN_PASSWORD` is not set in `.env` today** — the key exists in `.env.example` but the operator has not confirmed a value. Your code must refuse to start when `STORAGE_BACKEND`-style required config is missing... but for auth specifically: **refuse to boot if `ADMIN_PASSWORD` is unset**, per the plan. Say clearly in your report that this makes setting `ADMIN_PASSWORD` a hard prerequisite for the next deploy.
 
 ## Why this matters
 
