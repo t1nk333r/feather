@@ -26,7 +26,7 @@ Three facts shape every plan here:
 | [006](006-atomic-catalog-writes.md) | Make catalog writes atomic and serialized | P1 | S | LOW | 005 | **DONE** — `65dccfb`, merged as `a65c6bc`. 29→34 tests. Both guarantees proven by breaking them; see "Plan 006 verification" below. |
 | [007](007-fail-loudly.md) | Report failures instead of silently reporting success | P1 | S–M | LOW–MED | 005 (006 recommended) | **DONE** — `7b36d0a`..`d6d32bc` (5 defects, one commit each), merged as `4de7fed`. 21→29 tests. Container checks run during review; see "Plan 007 verification" below. |
 | [008](008-public-base-url.md) | Derive published URLs from configuration, not the `Host` header | P2 | S | LOW | 001, 005 | **DONE** — `f575e71`, merged as `309f882`. 34→39 tests. Two operator tasks remain: set `PUBLIC_BASE_URL` in `.env`, and hand-fix the one `<nas-ip>:7000` catalog entry. |
-| [009](009-extract-html-template.md) | Extract the embedded HTML template to `templates/index.html` | P2 | S | LOW–MED | 005 | TODO |
+| [009](009-extract-html-template.md) | Extract the embedded HTML template to `templates/index.html` | P2 | S | LOW–MED | 005 | **DONE** — `367c036`, merged as `1f815b0`. Byte-for-byte move of 1,493 lines; `app.py` 2986 → 1491. Dockerfile `COPY` verified both directions. |
 | [010](010-login-session-auth.md) | Gate the mutating routes behind a login form | P2 | M | MED | 001, 005, 009 | TODO |
 | [011](011-garage-s3-ipa-storage.md) | Move IPA storage to the self-hosted Garage S3 object store | P2 | M–L | MED | 005, 008 | **DONE (code)** — merged as `5a636b5`. 39→48 tests. `STORAGE_BACKEND` defaults to `local`, so nothing changed at runtime. Migration run and cutover are operator tasks — see below. |
 
@@ -206,6 +206,23 @@ Container-verified from the merged branch with the default backend: `/source.jso
 **Note on the merge**: the 011 executor's worktree was cut from a ref predating the 008 merge, so its branch conflicted. The conflict was a benign add/add — both branches inserted a function right after `get_file_size` (`resolve_base_url()` from 008, `_require_garage_config()` from 011). Resolved by keeping both; verified afterwards that `resolve_base_url` still has 6 occurrences and `request.url_root` exactly 1.
 
 **Not verified** (needs credentials or the live host): the Garage `exists()` probe, the migration `--apply` run, and the device install.
+
+## Plan 009 verification (2026-08-11)
+
+The executor hit a session limit mid-report, so it produced no verification claims. It had committed cleanly first; everything here was verified independently rather than taken on trust.
+
+**Byte-for-byte confirmed mechanically** — extracting lines 1161–2653 from the pre-merge `app.py` and diffing against `templates/index.html` produces an empty diff. 1,493 lines, no reformatting or whitespace drift. `app.py` drops 2,986 → 1,491.
+
+**The Dockerfile `COPY` is the failure mode that matters**, because the host test suite passes either way and it only breaks inside the container. Verified in both directions by building the image and running a throwaway container (no `data/` or `.env` needed):
+
+```
+with    COPY templates/ ./templates/  ->  GET / 200 text/html, qrImage present
+without COPY templates/ ./templates/  ->  GET / 500 TemplateNotFound
+```
+
+`redirect` survived the import rewrite (Plan 011 needs it for `serve_ipa`) and `render_template_string` is gone. 48 tests pass, unmodified. The pre-existing `SyntaxWarning` about the `\/` escape disappeared on its own now that Python no longer parses that JS regex — as predicted.
+
+**Now unblocked**: Plan 010 can edit the login modal in a real `.html` file.
 
 ## Findings considered and rejected
 
