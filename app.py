@@ -46,11 +46,18 @@ def allowed_icon_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_ICON_EXTENSIONS
 
 def get_file_size(filepath):
-    """Get file size in bytes"""
+    """Get file size in bytes.
+
+    Returns None (not 0) if the size cannot be determined, so "unknown"
+    is distinguishable from "genuinely empty file". Callers that write
+    this into a version's "size" field must normalize None themselves --
+    a `null` size must never reach source.json.
+    """
     try:
         return os.path.getsize(filepath)
-    except:
-        return 0
+    except OSError as e:
+        logging.warning(f"Could not determine size of {filepath}: {e}")
+        return None
 
 class SourceManager:
     """Manages the AltSource data and file operations"""
@@ -153,8 +160,8 @@ class SourceManager:
                 try:
                     if not os.listdir(bundle_folder):
                         os.rmdir(bundle_folder)
-                except:
-                    pass
+                except OSError as e:
+                    logging.warning(f"Could not remove empty bundle folder {bundle_folder}: {e}")
                 return True
             return False
         except Exception as e:
@@ -248,8 +255,8 @@ class SourceManager:
                 try:
                     if not os.listdir(bundle_folder):
                         os.rmdir(bundle_folder)
-                except:
-                    pass
+                except OSError as e:
+                    logging.warning(f"Could not remove empty bundle folder {bundle_folder}: {e}")
                 logging.info(f"Deleted icon file for: {bundle_id}")
                 return True
             return False
@@ -440,8 +447,11 @@ class SourceManager:
                             # Try to parse and reformat existing date
                             parsed_date = datetime.fromisoformat(version['date'].replace('Z', '+00:00'))
                             version['date'] = parsed_date.strftime("%Y-%m-%dT%H:%M:%SZ")
-                        except:
-                            # If parsing fails, use current date
+                        except (ValueError, TypeError) as e:
+                            # If parsing fails, use current date -- this
+                            # reorders versions for clients that sort by
+                            # date, so make the fallback visible.
+                            logging.warning(f"Could not parse date '{version['date']}' for version {version.get('version')}: {e}; using current date")
                             version['date'] = dates['version_date']
                     else:
                         version['date'] = dates['version_date']
