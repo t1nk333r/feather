@@ -1033,7 +1033,7 @@
                                     <h3>${escapeHtml(app.name)}</h3>
                                     <p><strong>Bundle ID:</strong> ${escapeHtml(app.bundleIdentifier)}</p>
                                     <div class="version-info">
-                                        <strong>Latest:</strong> ${app.versions?.[0]?.version || 'N/A'} |
+                                        <strong>Latest:</strong> ${escapeHtml(app.versions?.[0]?.version || 'N/A')} |
                                         <strong>Developer:</strong> ${escapeHtml(app.developerName || 'Unknown')} |
                                         <strong>Added:</strong> ${app.addedDate ? new Date(app.addedDate).toLocaleDateString() : 'N/A'} |
                                         <strong>Versions:</strong> ${app.versions?.length || 0}
