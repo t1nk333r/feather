@@ -18,6 +18,11 @@ import threading
 import pytest
 
 
+# Obviously-fake credentials -- never a real password. Plan 010.
+TEST_ADMIN_PASSWORD = "test-password-not-a-real-secret"
+TEST_SECRET_KEY = "test-secret-key"
+
+
 def seed_source():
     """A minimal valid source.json document, matching plans/005's fixture."""
     return {
@@ -63,8 +68,15 @@ def client(tmp_path):
     env var first and use importlib.reload to re-execute the module body
     (including the module-scope SourceManager construction) against the
     new DATA_DIR.
+
+    ADMIN_PASSWORD and SECRET_KEY must also be set before the reload
+    (Plan 010): app.py now refuses to import at all without ADMIN_PASSWORD,
+    and sessions need a stable SECRET_KEY to survive across requests within
+    a test.
     """
     os.environ["DATA_DIR"] = str(tmp_path)
+    os.environ["ADMIN_PASSWORD"] = TEST_ADMIN_PASSWORD
+    os.environ["SECRET_KEY"] = TEST_SECRET_KEY
 
     import app as app_module
 
@@ -82,6 +94,17 @@ def client(tmp_path):
 
 
 @pytest.fixture(scope="function")
+def authed_client(client):
+    """Same as `client`, but already logged in -- the session cookie is
+    set on the underlying test client, so subsequent requests made through
+    it carry an authenticated session (Plan 010).
+    """
+    resp = client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD})
+    assert resp.status_code == 200
+    return client
+
+
+@pytest.fixture(scope="function")
 def client_with_base_url(tmp_path, monkeypatch):
     """Same as `client`, but with PUBLIC_BASE_URL set before the module
     reloads (plan 008). resolve_base_url() reads PUBLIC_BASE_URL at import
@@ -93,6 +116,8 @@ def client_with_base_url(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("PUBLIC_BASE_URL", "http://feather.example.com")
+    monkeypatch.setenv("ADMIN_PASSWORD", TEST_ADMIN_PASSWORD)
+    monkeypatch.setenv("SECRET_KEY", TEST_SECRET_KEY)
 
     import app as app_module
 
@@ -263,7 +288,7 @@ def test_index_page_ok(client):
 # ---------------------------------------------------------------------------
 
 
-def test_add_app_then_delete_app_round_trip(client):
+def test_add_app_then_delete_app_round_trip(authed_client):
     new_app = {
         "name": "New App",
         "bundleIdentifier": "com.example.newapp",
@@ -271,29 +296,29 @@ def test_add_app_then_delete_app_round_trip(client):
         "version": "1.0.0",
     }
 
-    resp = client.post("/api/add-app", json=new_app)
+    resp = authed_client.post("/api/add-app", json=new_app)
     assert resp.status_code == 200
     body = json.loads(resp.data)
     assert body["success"] is True
 
-    resp = client.get("/source.json")
+    resp = authed_client.get("/source.json")
     body = json.loads(resp.data)
     bundle_ids = [a["bundleIdentifier"] for a in body["apps"]]
     assert "com.example.newapp" in bundle_ids
 
-    resp = client.post("/api/delete-app", json={"bundleIdentifier": "com.example.newapp"})
+    resp = authed_client.post("/api/delete-app", json={"bundleIdentifier": "com.example.newapp"})
     assert resp.status_code == 200
     body = json.loads(resp.data)
     assert body["success"] is True
 
-    resp = client.get("/source.json")
+    resp = authed_client.get("/source.json")
     body = json.loads(resp.data)
     bundle_ids = [a["bundleIdentifier"] for a in body["apps"]]
     assert "com.example.newapp" not in bundle_ids
 
 
-def test_add_version_grows_versions_list(client):
-    resp = client.post(
+def test_add_version_grows_versions_list(authed_client):
+    resp = authed_client.post(
         "/api/add-version",
         json={
             "bundleIdentifier": "com.example.app",
@@ -305,13 +330,13 @@ def test_add_version_grows_versions_list(client):
     body = json.loads(resp.data)
     assert body["success"] is True
 
-    resp = client.get("/api/app/com.example.app")
+    resp = authed_client.get("/api/app/com.example.app")
     body = json.loads(resp.data)
     assert len(body["versions"]) == 2
 
 
-def test_update_version_persists_min_os(client):
-    resp = client.post(
+def test_update_version_persists_min_os(authed_client):
+    resp = authed_client.post(
         "/api/update-version",
         json={
             "bundleIdentifier": "com.example.app",
@@ -324,14 +349,14 @@ def test_update_version_persists_min_os(client):
     body = json.loads(resp.data)
     assert body["success"] is True
 
-    resp = client.get("/api/app/com.example.app")
+    resp = authed_client.get("/api/app/com.example.app")
     body = json.loads(resp.data)
     version = next(v for v in body["versions"] if v["version"] == "1.0.0")
     assert version["minOSVersion"] == "17.0"
 
 
-def test_update_app_persists_name(client):
-    resp = client.post(
+def test_update_app_persists_name(authed_client):
+    resp = authed_client.post(
         "/api/update-app",
         json={"bundleIdentifier": "com.example.app", "name": "Renamed App"},
     )
@@ -339,18 +364,18 @@ def test_update_app_persists_name(client):
     body = json.loads(resp.data)
     assert body["success"] is True
 
-    resp = client.get("/api/app/com.example.app")
+    resp = authed_client.get("/api/app/com.example.app")
     body = json.loads(resp.data)
     assert body["name"] == "Renamed App"
 
 
-def test_update_source_persists_name(client):
-    resp = client.post("/api/update-source", json={"name": "Renamed Source"})
+def test_update_source_persists_name(authed_client):
+    resp = authed_client.post("/api/update-source", json={"name": "Renamed Source"})
     assert resp.status_code == 200
     body = json.loads(resp.data)
     assert body["success"] is True
 
-    resp = client.get("/source.json")
+    resp = authed_client.get("/source.json")
     body = json.loads(resp.data)
     assert body["name"] == "Renamed Source"
 
@@ -360,22 +385,22 @@ def test_update_source_persists_name(client):
 # ---------------------------------------------------------------------------
 
 
-def test_delete_app_missing_bundle_id_400(client):
-    resp = client.post("/api/delete-app", json={})
+def test_delete_app_missing_bundle_id_400(authed_client):
+    resp = authed_client.post("/api/delete-app", json={})
     assert resp.status_code == 400
     body = json.loads(resp.data)
     assert body["success"] is False
 
 
-def test_update_app_missing_bundle_id_400(client):
-    resp = client.post("/api/update-app", json={"name": "X"})
+def test_update_app_missing_bundle_id_400(authed_client):
+    resp = authed_client.post("/api/update-app", json={"name": "X"})
     assert resp.status_code == 400
     body = json.loads(resp.data)
     assert body["success"] is False
 
 
-def test_add_version_missing_bundle_id_400(client):
-    resp = client.post(
+def test_add_version_missing_bundle_id_400(authed_client):
+    resp = authed_client.post(
         "/api/add-version",
         json={"version": "3.0.0", "downloadURL": "http://example.test/x.ipa"},
     )
@@ -384,8 +409,8 @@ def test_add_version_missing_bundle_id_400(client):
     assert body["success"] is False
 
 
-def test_update_version_missing_bundle_id_400(client):
-    resp = client.post(
+def test_update_version_missing_bundle_id_400(authed_client):
+    resp = authed_client.post(
         "/api/update-version",
         json={"version": "1.0.0", "downloadURL": "http://example.test/x.ipa"},
     )
@@ -402,20 +427,20 @@ def test_update_version_missing_bundle_id_400(client):
 # ---------------------------------------------------------------------------
 
 
-def test_delete_app_nonexistent_bundle_id_400(client):
+def test_delete_app_nonexistent_bundle_id_400(authed_client):
     """Unlike some mutating routes, delete_app correctly reports failure
     when the bundle id does not exist (app.py:518-527: it compares list
     length before/after filtering). This is NOT one of the "reports
     success on failure" bugs Plan 007 targets — recorded here so a
     future change to this behaviour shows up as an intentional diff.
     """
-    resp = client.post("/api/delete-app", json={"bundleIdentifier": "com.does.not.exist"})
+    resp = authed_client.post("/api/delete-app", json={"bundleIdentifier": "com.does.not.exist"})
     assert resp.status_code == 400
     body = json.loads(resp.data)
     assert body["success"] is False
 
 
-def test_add_version_downloadurl_never_fetched_without_download_flag(client, tmp_path):
+def test_add_version_downloadurl_never_fetched_without_download_flag(authed_client, tmp_path):
     """Intended behaviour: add_version's success path never validates that
     downloadURL is reachable, and the route only requires ONE of
     ipaFile/downloadURL/downloadFromUrl (app.py:2463-2464). Passing a
@@ -430,7 +455,7 @@ def test_add_version_downloadurl_never_fetched_without_download_flag(client, tmp
     is deliberately unroutable.
     """
     bogus_url = "http://example.invalid/never-fetched.ipa"
-    resp = client.post(
+    resp = authed_client.post(
         "/api/add-version",
         json={
             "bundleIdentifier": "com.example.app",
@@ -442,7 +467,7 @@ def test_add_version_downloadurl_never_fetched_without_download_flag(client, tmp
     body = json.loads(resp.data)
     assert body["success"] is True
 
-    resp = client.get("/api/app/com.example.app")
+    resp = authed_client.get("/api/app/com.example.app")
     body = json.loads(resp.data)
     version = next(v for v in body["versions"] if v["version"] == "9.9.9")
     # Stored verbatim -- no fetch, no validation that it resolves.
@@ -454,14 +479,14 @@ def test_add_version_downloadurl_never_fetched_without_download_flag(client, tmp
 # ---------------------------------------------------------------------------
 
 
-def test_failed_download_reports_error(client):
+def test_failed_download_reports_error(authed_client):
     """Defect 1: a failed IPA download must surface as a specific error,
     not fall through to 'App added successfully'. Points at an unreachable
     loopback port (the same pattern the plan's own curl repro uses)
     rather than a real network host, so no outbound connection is ever
     actually reachable and no real network call is attempted.
     """
-    resp = client.post(
+    resp = authed_client.post(
         "/api/add-app",
         data={
             "name": "Broken",
@@ -478,19 +503,19 @@ def test_failed_download_reports_error(client):
     assert body["success"] is False
     assert body["error"] != "App added successfully"
 
-    resp = client.get("/source.json")
+    resp = authed_client.get("/source.json")
     body = json.loads(resp.data)
     bundle_ids = [a["bundleIdentifier"] for a in body["apps"]]
     assert "com.test.broken" not in bundle_ids
 
 
-def test_failed_save_does_not_return_success_message(client, monkeypatch):
+def test_failed_save_does_not_return_success_message(authed_client, monkeypatch):
     """Defect 1: when save_source itself fails, add_app_manual must not
     report 'App added successfully' as its error message (app.py:341,
     pre-fix)."""
-    monkeypatch.setattr(client.app_module.source_manager, "save_source", lambda data: False)
+    monkeypatch.setattr(authed_client.app_module.source_manager, "save_source", lambda data: False)
 
-    resp = client.post(
+    resp = authed_client.post(
         "/api/add-app",
         json={
             "name": "X",
@@ -505,12 +530,12 @@ def test_failed_save_does_not_return_success_message(client, monkeypatch):
     assert body["error"] != "App added successfully"
 
 
-def test_add_app_missing_bundle_id_400(client):
+def test_add_app_missing_bundle_id_400(authed_client):
     """Defect 5: /api/add-app lacked the bundleIdentifier guard its sibling
     mutating routes all have, so a missing bundleIdentifier fell through
     to a KeyError whose raw repr ("'bundleIdentifier'") was returned as
     the error message."""
-    resp = client.post(
+    resp = authed_client.post(
         "/api/add-app",
         json={"name": "X", "developerName": "Y", "version": "1.0"},
     )
@@ -520,7 +545,7 @@ def test_add_app_missing_bundle_id_400(client):
     assert body["error"] == "Bundle identifier is required"
 
 
-def test_update_version_preserves_original_on_failed_fetch(client, tmp_path):
+def test_update_version_preserves_original_on_failed_fetch(authed_client, tmp_path):
     """Defect 2, the critical one: update_version must fetch the
     replacement IPA before touching the original file. Before the fix,
     the old file was deleted first ("delete old one first"), so a
@@ -537,7 +562,7 @@ def test_update_version_preserves_original_on_failed_fetch(client, tmp_path):
     original_bytes = b"original ipa bytes -- must survive a failed re-fetch"
     (ipa_dir / "1.0.0.ipa").write_bytes(original_bytes)
 
-    resp = client.post(
+    resp = authed_client.post(
         "/api/update-version",
         data={
             "bundleIdentifier": "com.example.app",
@@ -555,14 +580,14 @@ def test_update_version_preserves_original_on_failed_fetch(client, tmp_path):
     assert (ipa_dir / "1.0.0.ipa").read_bytes() == original_bytes
 
 
-def test_gzip_encoded_download_is_decoded(client, tmp_path, gzip_ipa_server):
+def test_gzip_encoded_download_is_decoded(authed_client, tmp_path, gzip_ipa_server):
     """Defect 3: response.raw (used with shutil.copyfileobj) is the
     undecoded urllib3 stream, so a gzip-encoded origin wrote a gzip
     stream to disk instead of the real .ipa. iter_content() applies
     content decoding, so the bytes landing on disk must be the original,
     decompressed payload.
     """
-    resp = client.post(
+    resp = authed_client.post(
         "/api/add-app",
         data={
             "name": "Gzipped",
@@ -583,15 +608,15 @@ def test_gzip_encoded_download_is_decoded(client, tmp_path, gzip_ipa_server):
     assert saved.read_bytes() == _GzipIpaHandler.payload
 
 
-def test_download_over_size_limit_is_rejected(client, tmp_path, large_ipa_server):
+def test_download_over_size_limit_is_rejected(authed_client, tmp_path, large_ipa_server):
     """Defect 3: outbound downloads had no size ceiling at all (Flask's
     MAX_CONTENT_LENGTH only bounds inbound uploads). A download that
     exceeds the configured limit must be rejected and leave no partial
     file behind.
     """
-    client.app_module.app.config["MAX_CONTENT_LENGTH"] = 1024  # 1 KiB cap
+    authed_client.app_module.app.config["MAX_CONTENT_LENGTH"] = 1024  # 1 KiB cap
 
-    resp = client.post(
+    resp = authed_client.post(
         "/api/add-app",
         data={
             "name": "TooBig",
@@ -612,7 +637,7 @@ def test_download_over_size_limit_is_rejected(client, tmp_path, large_ipa_server
     assert not bundle_dir.exists() or list(bundle_dir.iterdir()) == []
 
 
-def test_delete_app_removes_icon(client, tmp_path):
+def test_delete_app_removes_icon(authed_client, tmp_path):
     """delete_icon_file was defined but never called from delete_app, so
     every deleted app left its icon directory behind forever. delete_app
     must now also remove the icon.
@@ -621,7 +646,7 @@ def test_delete_app_removes_icon(client, tmp_path):
     icon_dir.mkdir(parents=True)
     (icon_dir / "icon.png").write_bytes(b"\x89PNG\r\n\x1a\nfakeicon")
 
-    resp = client.post("/api/delete-app", json={"bundleIdentifier": "com.example.app"})
+    resp = authed_client.post("/api/delete-app", json={"bundleIdentifier": "com.example.app"})
     assert resp.status_code == 200
     body = json.loads(resp.data)
     assert body["success"] is True
@@ -649,7 +674,7 @@ def test_get_ipa_path_does_not_create_directories(client, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_save_source_is_atomic_on_failure(client, tmp_path, monkeypatch):
+def test_save_source_is_atomic_on_failure(authed_client, tmp_path, monkeypatch):
     """Core regression test. Before this plan, save_source opened
     source.json with mode 'w', which truncates the file to zero bytes
     before writing anything -- any exception during json.dump left a
@@ -667,9 +692,9 @@ def test_save_source_is_atomic_on_failure(client, tmp_path, monkeypatch):
     # grep), so this patch only affects the write path under test -- it
     # does not touch json.dumps/loads used by Flask's jsonify or by this
     # test file itself.
-    monkeypatch.setattr(client.app_module.json, "dump", boom)
+    monkeypatch.setattr(authed_client.app_module.json, "dump", boom)
 
-    resp = client.post("/api/update-source", json={"name": "Should Not Persist"})
+    resp = authed_client.post("/api/update-source", json={"name": "Should Not Persist"})
     assert resp.status_code == 400
     body = json.loads(resp.data)
     assert body["success"] is False
@@ -682,12 +707,12 @@ def test_save_source_is_atomic_on_failure(client, tmp_path, monkeypatch):
     assert reloaded["apps"][0]["bundleIdentifier"] == "com.example.app"
 
 
-def test_backup_written_before_save(client, tmp_path):
+def test_backup_written_before_save(authed_client, tmp_path):
     """update-source must back up the previous catalog to data/backups/
     before replacing it, so the pre-change state is recoverable."""
     backups_dir = tmp_path / "backups"
 
-    resp = client.post("/api/update-source", json={"name": "Renamed Source"})
+    resp = authed_client.post("/api/update-source", json={"name": "Renamed Source"})
     assert resp.status_code == 200
     body = json.loads(resp.data)
     assert body["success"] is True
@@ -703,11 +728,11 @@ def test_backup_written_before_save(client, tmp_path):
     assert current_content["name"] == "Renamed Source"
 
 
-def test_no_temp_files_left_behind(client, tmp_path):
+def test_no_temp_files_left_behind(authed_client, tmp_path):
     """After a successful mutation, the temp file save_source writes to
     (prefix '.source-', suffix '.json.tmp') must have been renamed away,
     not left sitting in the data directory."""
-    resp = client.post("/api/update-source", json={"name": "Cleanup Check"})
+    resp = authed_client.post("/api/update-source", json={"name": "Cleanup Check"})
     assert resp.status_code == 200
     body = json.loads(resp.data)
     assert body["success"] is True
@@ -753,13 +778,13 @@ def test_concurrent_add_version_all_land(client, tmp_path):
     assert versions == expected
 
 
-def test_backups_pruned_to_20(client, tmp_path):
+def test_backups_pruned_to_20(authed_client, tmp_path):
     """data/backups/ must be pruned to the most recent 20 entries so it
     does not grow without bound."""
     backups_dir = tmp_path / "backups"
 
     for i in range(25):
-        resp = client.post("/api/update-source", json={"name": f"Name {i}"})
+        resp = authed_client.post("/api/update-source", json={"name": f"Name {i}"})
         assert resp.status_code == 200
         body = json.loads(resp.data)
         assert body["success"] is True
@@ -778,7 +803,19 @@ def test_download_url_uses_public_base_url(client_with_base_url, gzip_ipa_server
     """A request with a spoofed Host header must not leak that host into a
     downloadURL written to source.json -- resolve_base_url() must prefer
     the configured PUBLIC_BASE_URL instead.
+
+    Logs in with the same spoofed Host header used below: Werkzeug's test
+    client scopes cookies per-host like a real browser, so a session
+    established against the default host would not be sent back on a
+    request that spoofs a different one.
     """
+    login_resp = client_with_base_url.post(
+        "/api/login",
+        json={"password": TEST_ADMIN_PASSWORD},
+        headers={"Host": "evil.example.com"},
+    )
+    assert login_resp.status_code == 200
+
     resp = client_with_base_url.post(
         "/api/add-app",
         data={
@@ -804,7 +841,18 @@ def test_download_url_uses_public_base_url(client_with_base_url, gzip_ipa_server
 
 
 def test_icon_url_uses_public_base_url(client_with_base_url, gzip_ipa_server):
-    """Same guarantee as above, for get_local_icon_url via /api/update-app."""
+    """Same guarantee as above, for get_local_icon_url via /api/update-app.
+
+    Logs in with the same spoofed Host header used below -- see the
+    docstring on test_download_url_uses_public_base_url for why.
+    """
+    login_resp = client_with_base_url.post(
+        "/api/login",
+        json={"password": TEST_ADMIN_PASSWORD},
+        headers={"Host": "evil.example.com"},
+    )
+    assert login_resp.status_code == 200
+
     resp = client_with_base_url.post(
         "/api/update-app",
         data={
@@ -872,13 +920,13 @@ def test_qr_url_has_slash_before_source_json(client_with_base_url, monkeypatch):
     assert captured["data"] == "feather://feather.example.com/source.json"
 
 
-def test_falls_back_to_host_when_unset(client, gzip_ipa_server, caplog):
+def test_falls_back_to_host_when_unset(authed_client, gzip_ipa_server, caplog):
     """With PUBLIC_BASE_URL unset, the old Host-header-derived behaviour
     must still work (no regression for deployments that haven't set it
     yet), and a warning must be logged so an operator can tell why.
     """
     with caplog.at_level(logging.WARNING):
-        resp = client.post(
+        resp = authed_client.post(
             "/api/add-app",
             data={
                 "name": "Fallback",
@@ -894,7 +942,7 @@ def test_falls_back_to_host_when_unset(client, gzip_ipa_server, caplog):
     body = json.loads(resp.data)
     assert body["success"] is True
 
-    resp = client.get("/api/app/com.test.fallback")
+    resp = authed_client.get("/api/app/com.test.fallback")
     body = json.loads(resp.data)
     download_url = body["versions"][0]["downloadURL"]
     assert download_url.startswith("http://localhost/ipas/")
@@ -902,3 +950,160 @@ def test_falls_back_to_host_when_unset(client, gzip_ipa_server, caplog):
     assert any(
         "PUBLIC_BASE_URL is not set" in record.message for record in caplog.records
     )
+
+
+# ---------------------------------------------------------------------------
+# Plan 010: login/session auth
+#
+# test_public_routes_never_require_auth is the most important test in this
+# suite: it is the regression test for the constraint that no subscribed
+# iOS device may ever be broken by an accidental @requires_auth on a route
+# AltStore/Feather fetch anonymously.
+# ---------------------------------------------------------------------------
+
+
+# Payloads that produce a genuine 200 once authenticated -- not just a 400
+# that an unauthenticated caller would also receive, which would make the
+# "works when authed" test pass for the wrong reason.
+MUTATING_ROUTES_VALID_PAYLOADS = [
+    (
+        "/api/add-app",
+        {
+            "name": "Authed Add",
+            "bundleIdentifier": "com.example.authed-add",
+            "developerName": "Dev",
+            "version": "1.0.0",
+        },
+    ),
+    ("/api/delete-app", {"bundleIdentifier": "com.example.app"}),
+    ("/api/update-app", {"bundleIdentifier": "com.example.app", "name": "Renamed"}),
+    (
+        "/api/add-version",
+        {
+            "bundleIdentifier": "com.example.app",
+            "version": "5.0.0",
+            "downloadURL": "http://example.test/ipas/com.example.app/5.0.0.ipa",
+        },
+    ),
+    (
+        "/api/update-version",
+        {
+            "bundleIdentifier": "com.example.app",
+            "version": "1.0.0",
+            "downloadURL": "http://example.test/ipas/com.example.app/1.0.0.ipa",
+        },
+    ),
+    ("/api/update-source", {"name": "Renamed Source"}),
+]
+
+MUTATING_ROUTE_PATHS = [route for route, _ in MUTATING_ROUTES_VALID_PAYLOADS]
+
+
+@pytest.mark.parametrize("route", MUTATING_ROUTE_PATHS)
+def test_mutating_routes_require_auth(client, route):
+    """None of the six mutating routes may be reachable with no session."""
+    resp = client.post(route, json={"bundleIdentifier": "x"})
+    assert resp.status_code == 401
+
+
+@pytest.mark.parametrize("route,payload", MUTATING_ROUTES_VALID_PAYLOADS)
+def test_mutating_routes_work_when_authed(authed_client, route, payload):
+    """The same six routes, authenticated, succeed -- never a 401."""
+    resp = authed_client.post(route, json=payload)
+    assert resp.status_code != 401
+    assert resp.status_code in (200, 400)
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        "/source.json",
+        "/ipas/com.example.app/1.0.0.ipa",
+        "/icons/com.example.app/icon.png",
+        "/qr",
+        "/",
+    ],
+)
+def test_public_routes_never_require_auth(client, tmp_path, route):
+    """The four anonymous-fetch routes AltStore/Feather clients rely on,
+    plus GET /, must return 200 with NO session. Seeds a real .ipa/icon
+    file so the two file-serving routes don't 404 for an unrelated reason
+    and get mistaken for "correctly" not-200 -- a 401 here is the only
+    failure this test should ever be able to report on those two routes,
+    and it can't produce one without a file to serve in the first place.
+    """
+    ipa_dir = tmp_path / "ipas" / "com.example.app"
+    ipa_dir.mkdir(parents=True, exist_ok=True)
+    (ipa_dir / "1.0.0.ipa").write_bytes(b"fake ipa bytes")
+
+    icon_dir = tmp_path / "icons" / "com.example.app"
+    icon_dir.mkdir(parents=True, exist_ok=True)
+    (icon_dir / "icon.png").write_bytes(b"\x89PNG\r\n\x1a\nfakeicondata")
+
+    resp = client.get(route)
+    assert resp.status_code == 200
+
+
+def test_login_rejects_wrong_password(client):
+    resp = client.post("/api/login", json={"password": "definitely-not-the-password"})
+    assert resp.status_code == 401
+    body = json.loads(resp.data)
+    assert body["success"] is False
+    # No session cookie is set on a failed login: session is never mutated,
+    # so Flask never sends a Set-Cookie header for it.
+    assert "Set-Cookie" not in resp.headers
+
+
+def test_login_accepts_correct_password(client):
+    resp = client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD})
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["success"] is True
+
+    # The session cookie set by login must be enough for a subsequent
+    # mutating request to succeed on the same client.
+    resp = client.post("/api/update-source", json={"name": "Post-login rename"})
+    assert resp.status_code == 200
+
+
+def test_logout_clears_session(authed_client):
+    resp = authed_client.post("/api/update-source", json={"name": "Before logout"})
+    assert resp.status_code == 200
+
+    resp = authed_client.post("/api/logout")
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["success"] is True
+
+    resp = authed_client.post("/api/update-source", json={"name": "After logout"})
+    assert resp.status_code == 401
+
+
+def test_session_endpoint_reports_state(client):
+    resp = client.get("/api/session")
+    assert resp.status_code == 200
+    assert json.loads(resp.data) == {"authed": False}
+
+    resp = client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD})
+    assert resp.status_code == 200
+
+    resp = client.get("/api/session")
+    assert resp.status_code == 200
+    assert json.loads(resp.data) == {"authed": True}
+
+
+def test_version_string_is_escaped():
+    """templates/index.html interpolated the latest version string into
+    innerHTML without escaping, unlike every sibling field on the
+    surrounding lines. Version strings are attacker-supplied and stored,
+    so an unescaped one is a stored-XSS path back into an authenticated
+    session. Rendering is client-side JS with no JS execution harness in
+    this suite, so this is asserted directly against the template source:
+    the version expression must be wrapped in escapeHtml(...).
+    """
+    template_path = os.path.join(
+        os.path.dirname(__file__), "..", "templates", "index.html"
+    )
+    with open(template_path, encoding="utf-8") as f:
+        template_source = f.read()
+    assert "escapeHtml(app.versions?.[0]?.version || 'N/A')" in template_source

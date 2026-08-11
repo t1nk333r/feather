@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, send_file, redirect
+from flask import Flask, render_template, request, jsonify, send_file, redirect, session
 import json
 import os
 import logging
@@ -7,8 +7,10 @@ import io
 import requests
 import tempfile
 import hashlib
+import hmac
 import threading
 import boto3
+from functools import wraps
 from botocore.exceptions import ClientError
 from datetime import datetime
 from werkzeug.utils import secure_filename
@@ -32,6 +34,11 @@ ALLOWED_ICON_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp', 'gif'}
 # Environment-driven configuration
 SECRET_KEY = os.environ.get("SECRET_KEY")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")
+if not ADMIN_PASSWORD:
+    raise RuntimeError(
+        "ADMIN_PASSWORD is not set. Refusing to start with unauthenticated "
+        "admin routes. Set it in .env (compose.yml loads it via env_file)."
+    )
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL")
 PORT = int(os.environ.get("PORT", "5000"))
 MAX_CONTENT_LENGTH = int(os.environ.get("MAX_CONTENT_LENGTH", 2 * 1024 * 1024 * 1024))
@@ -49,6 +56,12 @@ GARAGE_PUBLIC_BASE_URL = os.environ.get("GARAGE_PUBLIC_BASE_URL")
 GARAGE_KEY_PREFIX = os.environ.get("GARAGE_KEY_PREFIX", "ipas")
 
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+# SESSION_COOKIE_SECURE is intentionally left False: this deployment serves
+# plain HTTP on a private network, and setting it would prevent the cookie
+# from ever being stored. Set it to True as soon as TLS terminates in front.
+app.config["SESSION_COOKIE_SECURE"] = False
 if SECRET_KEY:
     app.secret_key = SECRET_KEY
 else:
@@ -1158,10 +1171,39 @@ else:
     ipa_storage = LocalIpaStorage()
 
 
+def requires_auth(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not session.get('authed'):
+            return jsonify({"success": False, "error": "Authentication required"}), 401
+        return f(*args, **kwargs)
+    return wrapper
+
+
 # Routes
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    data = request.get_json(silent=True) or {}
+    supplied = data.get('password', '')
+    if hmac.compare_digest(supplied, ADMIN_PASSWORD):
+        session['authed'] = True
+        session.permanent = True
+        return jsonify({"success": True})
+    logging.warning("Failed login attempt from %s", request.remote_addr)
+    return jsonify({"success": False, "error": "Invalid password"}), 401
+
+@app.route('/api/logout', methods=['POST'])
+def logout():
+    session.clear()
+    return jsonify({"success": True})
+
+@app.route('/api/session')
+def session_status():
+    return jsonify({"authed": bool(session.get('authed'))})
 
 @app.route('/source.json')
 def serve_source():
@@ -1264,6 +1306,7 @@ def get_apps():
         return jsonify([])
 
 @app.route('/api/add-app', methods=['POST'])
+@requires_auth
 def add_app():
     try:
         base_url = resolve_base_url()
@@ -1303,6 +1346,7 @@ def add_app():
         return jsonify({"success": False, "error": str(e)}), 400
 
 @app.route('/api/delete-app', methods=['POST'])
+@requires_auth
 def delete_app():
     try:
         data = request.json
@@ -1334,6 +1378,7 @@ def get_app(bundle_identifier):
         return jsonify({"error": str(e)}), 400
 
 @app.route('/api/update-app', methods=['POST'])
+@requires_auth
 def update_app():
     try:
         base_url = resolve_base_url()
@@ -1378,6 +1423,7 @@ def update_app():
         return jsonify({"success": False, "error": str(e)}), 400
 
 @app.route('/api/add-version', methods=['POST'])
+@requires_auth
 def add_version():
     try:
         base_url = resolve_base_url()
@@ -1420,6 +1466,7 @@ def add_version():
         return jsonify({"success": False, "error": str(e)}), 400
 
 @app.route('/api/update-version', methods=['POST'])
+@requires_auth
 def update_version():
     try:
         base_url = resolve_base_url()
@@ -1464,6 +1511,7 @@ def update_version():
         return jsonify({"success": False, "error": str(e)}), 400
 
 @app.route('/api/update-source', methods=['POST'])
+@requires_auth
 def update_source():
     try:
         data = request.json
