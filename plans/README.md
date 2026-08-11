@@ -21,7 +21,7 @@ Three facts shape every plan here:
 | [001](001-configurable-paths-and-config.md) | Make data paths and configuration environment-driven | P1 | S | LOW | — | **DONE** — `bdcf5da`, merged to `main` as `26451c4`, pushed |
 | [002](002-version-control.md) | Put the repository under version control | P1 | S | LOW | — | **DONE** — `2fe1d2c` on `main`, pushed to `d7eeem/feather` (private) |
 | [003](003-delete-dead-copies.md) | Delete the two dead copies of the application | P1 | S | LOW | 002, 004 | TODO |
-| [004](004-restore-pillow-qr.md) | Restore Pillow so the QR endpoint works | P1 | S | LOW | — | **DONE (host-side)** — `requirements.txt` pinned to `pillow==11.3.0` (not the harvested `10.1.0`; see plan); Step 3b passed on host (PIL imports, real PNG rendered through the PIL backend via `qrcode`). Step 1 was not runnable: `docker compose up -d` and `docker compose up --build -d` both fail immediately with `env file .../.env not found` — this worktree has only committed files, so gitignored `.env`/`data/` are absent. Steps 4–5 (container rebuild + endpoint check) therefore not run. Reviewer should run Steps 1, 4, 5 against a real deployment with `.env`/`data/` present. |
+| [004](004-restore-pillow-qr.md) | Restore Pillow so the QR endpoint works | P1 | S | LOW | — | **DONE** — `cec6ae4`, merged as `facf9c1`. Pinned `pillow==11.3.0`, **not** the harvested `10.1.0` (no cp314 wheel — see the plan). Verified on both interpreters; see "Plan 004 verification" below. |
 | [005](005-smoke-test-suite.md) | Establish a one-command smoke-test suite | P1 | S | LOW | 001 | TODO |
 | [006](006-atomic-catalog-writes.md) | Make catalog writes atomic and serialized | P1 | S | LOW | 005 | TODO |
 | [007](007-fail-loudly.md) | Report failures instead of silently reporting success | P1 | S–M | LOW–MED | 005 (006 recommended) | TODO |
@@ -74,6 +74,27 @@ Plan 005 establishes the suite. The host runs Python 3.14 and the container runs
 > ```
 >
 > Note the host's system `python3` has no `pip` module — use a venv's `pip`.
+
+## Plan 004 verification (2026-08-11)
+
+The executor could not run the plan's container steps — its worktree holds only committed files, so gitignored `.env`/`data/` are absent and `docker compose up` fails on the missing env file. Those checks were run during review instead, by building images directly and using one-off `docker run` containers, which needs neither `.env` nor `data/` and does not disturb the deployment.
+
+**Baseline image** (built from `main` before the fix) — the audit's predicted failure, reproduced exactly:
+
+```
+ModuleNotFoundError: No module named 'PIL'
+backend: PyPNGImage
+TypeError: PyPNGImage.save() got an unexpected keyword argument 'format'
+```
+
+This was the one finding rated MED confidence, because it had never been reproduced in a container. It is now confirmed: `/qr` was a guaranteed 500, not a probable one.
+
+**Fixed image** (Python 3.11.15): `PIL 11.3.0`, backend `PilImage`, 657-byte valid PNG.
+**Host venv** (Python 3.14.6, same `requirements.txt`): `PIL 11.3.0`, backend `PilImage`, 741-byte valid PNG.
+
+Byte counts differ between the two only because the wheels bundle different zlib builds; both start with the PNG magic bytes and both go through the PIL backend, which is what the fix is about.
+
+**Still unverified, and only checkable against the live deployment**: that `GET /qr` returns `200 image/png` over HTTP, and that the page renders the QR rather than a broken image. Nothing was running at review time (`docker compose ps` was empty), so this was not observed end-to-end. The in-process check above exercises the exact failing call at `app.py:2301-2307`, so the remaining risk is low — but on the next `docker compose up --build -d`, confirm `/qr` returns a PNG.
 
 **Pre-existing `SyntaxWarning`** (noted during Plan 001 review, not a regression): `app.py` line ~1614 emits `SyntaxWarning: "\/" is an invalid escape sequence` from a JavaScript regex inside `HTML_TEMPLATE`. It is present in the baseline commit too. Plan 009 moves this code into `templates/index.html`, where Python will stop parsing it and the warning disappears on its own. Don't "fix" it in `app.py`.
 
