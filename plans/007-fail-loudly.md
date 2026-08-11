@@ -381,12 +381,21 @@ curl -f http://localhost:7000/source.json | python3 -c "import json,sys; print(l
 → tests pass, `8` apps.
 
 Then verify the headline behaviour change — a failing download must now report failure:
+**Use `multipart/form-data`, not JSON.** The JSON branch of every mutating route hardcodes `download_from_url = False` (it is labelled "backward compatibility"), so a JSON body never attempts a download and can never exercise this path. An earlier version of this plan used a JSON repro here and it could not have passed regardless of the fix.
+
 ```
-curl -s -X POST http://localhost:7000/api/add-app \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"Broken","bundleIdentifier":"com.test.broken","developerName":"T","version":"1.0","downloadURL":"http://127.0.0.1:9/nope.ipa","downloadFromUrl":"true"}'
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:7000/api/add-app \
+  -F 'name=Broken' -F 'bundleIdentifier=com.test.broken' -F 'developerName=T' \
+  -F 'version=1.0' -F 'downloadURL=http://127.0.0.1:9/nope.ipa' -F 'downloadFromUrl=true'
 ```
 → HTTP 400 with a specific error message (**not** `"App added successfully"`), and `com.test.broken` must **not** appear in `/source.json`.
+
+Confirmed during review against a container built from the merged branch:
+```
+HTTP 400
+{"error":"Failed to download IPA from http://127.0.0.1:9/nope.ipa","success":false}
+catalog: []
+```
 
 Clean up any test app you created via `/api/delete-app`.
 

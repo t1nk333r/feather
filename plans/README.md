@@ -22,9 +22,9 @@ Three facts shape every plan here:
 | [002](002-version-control.md) | Put the repository under version control | P1 | S | LOW | — | **DONE** — `2fe1d2c` on `main`, pushed to `d7eeem/feather` (private) |
 | [003](003-delete-dead-copies.md) | Delete the two dead copies of the application | P1 | S | LOW | 002, 004 | TODO |
 | [004](004-restore-pillow-qr.md) | Restore Pillow so the QR endpoint works | P1 | S | LOW | — | **DONE** — `cec6ae4`, merged as `facf9c1`. Pinned `pillow==11.3.0`, **not** the harvested `10.1.0` (no cp314 wheel — see the plan). Verified on both interpreters; see "Plan 004 verification" below. |
-| [005](005-smoke-test-suite.md) | Establish a one-command smoke-test suite | P1 | S | LOW | 001 | **DONE** — host venv path; 21 tests, all 13 routes covered, `pytest tests/ -q` passes in ~0.17s |
-| [006](006-atomic-catalog-writes.md) | Make catalog writes atomic and serialized | P1 | S | LOW | 005 | TODO |
-| [007](007-fail-loudly.md) | Report failures instead of silently reporting success | P1 | S–M | LOW–MED | 005 (006 recommended) | **DONE** — branch `advisor/007-fail-loudly`, commits `7b36d0a`..`d6d32bc` (5 defects, one commit each). 21→29 tests, `pytest tests/ -q` passes. Docker/live-curl checks not run (worktree has no `data/`/`.env`); verified in-process instead — see plan's Step 6. |
+| [005](005-smoke-test-suite.md) | Establish a one-command smoke-test suite | P1 | S | LOW | 001 | **DONE** — `901699e`, merged as `41c417a`. Host venv path; 21 tests, all 13 routes covered. |
+| [006](006-atomic-catalog-writes.md) | Make catalog writes atomic and serialized | P1 | S | LOW | 005 | TODO — **now the highest-value remaining item**; `save_source` still truncates the live catalog before writing it |
+| [007](007-fail-loudly.md) | Report failures instead of silently reporting success | P1 | S–M | LOW–MED | 005 (006 recommended) | **DONE** — `7b36d0a`..`d6d32bc` (5 defects, one commit each), merged as `4de7fed`. 21→29 tests. Container checks run during review; see "Plan 007 verification" below. |
 | [008](008-public-base-url.md) | Derive published URLs from configuration, not the `Host` header | P2 | S | LOW | 001, 005 | TODO |
 | [009](009-extract-html-template.md) | Extract the embedded HTML template to `templates/index.html` | P2 | S | LOW–MED | 005 | TODO |
 | [010](010-login-session-auth.md) | Gate the mutating routes behind a login form | P2 | M | MED | 001, 005, 009 | TODO |
@@ -98,6 +98,26 @@ Byte counts differ between the two only because the wheels bundle different zlib
 
 **Pre-existing `SyntaxWarning`** (noted during Plan 001 review, not a regression): `app.py` line ~1614 emits `SyntaxWarning: "\/" is an invalid escape sequence` from a JavaScript regex inside `HTML_TEMPLATE`. It is present in the baseline commit too. Plan 009 moves this code into `templates/index.html`, where Python will stop parsing it and the warning disappears on its own. Don't "fix" it in `app.py`.
 
+## Plan 007 verification (2026-08-11)
+
+Run during review, since the executor's worktree has no `data/`/`.env` and so could not start a container.
+
+**The regression tests discriminate.** Checked out `main`'s pre-change `app.py` under the new 29-test suite: **7 of the 8 new tests fail**, including the critical one — `test_update_version_preserves_original_on_failed_fetch` returns 200 where it asserts 400. That is the silent-success bug reproducing on demand. After the change, all 29 pass in ~1.2 s.
+
+**End-to-end in a container** built from the merged branch, with a throwaway `DATA_DIR` so the live deployment was never touched:
+
+| Check | Result |
+|---|---|
+| `GET /source.json` | `200 application/json` |
+| `GET /qr` | `200 image/png`, real 390×390 PNG |
+| `GET /` | `200` |
+| `POST /api/add-app`, no `bundleIdentifier` | `400 {"error":"Bundle identifier is required"}` — was the raw `KeyError` repr `'bundleIdentifier'` |
+| `POST /api/add-app`, multipart, unreachable `downloadURL` | `400 {"error":"Failed to download IPA from http://127.0.0.1:9/nope.ipa"}`, and the app is **absent** from the catalog |
+
+**Correction to the plan**: its Step 6 repro used a JSON body and could never have passed. See the new deferred finding below on the JSON API — the JSON branch hardcodes `download_from_url = False`, so no download is ever attempted. The multipart path is the one under test, and it behaves correctly. Plan text fixed.
+
+**Still unverified**: nobody has clicked through add-app or update-version in the actual web UI. Some requests that used to return 200 now return 400, which is the point — but the frontend's error handling for those paths has only been read, not exercised.
+
 ## Findings considered and rejected
 
 Recorded so nobody re-audits them:
@@ -118,6 +138,7 @@ These were verified and deliberately not planned, mostly because the deployment 
 - **`str(e)` returned to clients at 10 handlers** — `app.py:2228, 2246, 2277, 2343, 2363, 2374, 2418, 2460, 2504, 2519`. Leaks absolute container paths and `requests` connection detail.
 - **Flask 2.3.3 / Werkzeug 2.3.7** — `backup.old/requirements.txt:1` pinned `flask==3.0.0`, so the live pin is a *downgrade*; the pinning is arbitrary rather than deliberate. Werkzeug ≥2.3.8 addresses a multipart resource-exhaustion advisory. Attempt only after Plan 005 exists — `data/app.log:33` records this app already having been broken once by a Flask API removal (`send_file(cache_timeout=…)`).
 - **Bundle-ID case normalisation** — `secure_filename` preserves case, so `data/ipas/` holds both `com.michael-128.qBitControl` (empty) and `com.Michael-128.qbitControl` (4.3 MB). Nothing 404s today because that catalog entry uses an external URL, but it is a latent data-integrity hazard. This is a **migration**, not a patch: it needs a rename step for existing directories. Do not ship a casual `.lower()`.
+- **The JSON API silently ignores file/download parameters** — found during Plan 007's review. Every mutating route branches on `request.content_type`; the `else` branch, labelled "JSON request (backward compatibility)", hardcodes `ipa_file = None` and `download_from_url = False` (likewise `icon_file` / `download_icon_from_url`). So a JSON `POST /api/add-app` carrying `downloadFromUrl: true` is accepted with HTTP 200 and stores the caller's external `downloadURL` verbatim, having fetched nothing — the parameter is dropped without comment. The web UI uses multipart and is unaffected; anyone driving the JSON API by hand gets a catalog entry that silently means something different from what they asked for. Fix is either to honour the parameters in the JSON branch or to reject them explicitly; **not** to add URL validation (see the SSRF entry above).
 - **Orphan reclamation** — `data/ipas/` has 10 directories for 8 catalogued apps (~45 MB stranded, including `com.ryan.anymex`), plus three empty directories created by the `os.makedirs` side effect that Plan 007 removes. A reconciliation routine that *reports* orphans (not deletes them) would be a reasonable follow-up.
 - **No README / CLAUDE.md** — nothing in the repo states which of the three Python files was live. Plan 003 removes that ambiguity structurally; a short README would still help anyone redeploying this.
 
