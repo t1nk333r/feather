@@ -113,7 +113,7 @@ So `http://feather.example.com` is the canonical base in use today. Confirm with
 
 ## Canonical base URL — already decided, do not re-litigate
 
-The operator's canonical base is **`http://feather.example.com`** (no trailing slash, plain HTTP). Verified against the live catalog on 2026-08-11:
+The operator's canonical base is **`https://feather.example.com`** (no trailing slash, **HTTPS**). Corrected 2026-08-11: `http://feather.example.com` 301-redirects to `https://`, so the plain-HTTP value inferred from the old catalog was wrong. Setting `http://` would make every device eat a redirect on every download. Verified against the live catalog on 2026-08-11:
 
 ```
  5  http://feather.example.com      <- this app, canonical
@@ -210,7 +210,7 @@ Note the original concatenated `request.url_root + 'source.json'` — `url_root`
 
 Add to `.env`:
 ```
-PUBLIC_BASE_URL=http://feather.example.com
+PUBLIC_BASE_URL=https://feather.example.com
 ```
 
 **Confirm the exact value with the operator first.** The catalog currently uses `http://feather.example.com` (plain HTTP, no port) — derive it from the live data rather than guessing:

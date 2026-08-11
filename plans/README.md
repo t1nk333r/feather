@@ -177,7 +177,7 @@ The lock is placed correctly in all eight methods: immediately before `load_sour
 Code is merged for 008 and 011, but neither takes effect until a human does these. None can be done from an executor worktree — `.env` and `data/` are gitignored and absent there.
 
 **From Plan 008:**
-1. Set in `.env` (never commit it): `PUBLIC_BASE_URL=http://feather.example.com` — no trailing slash. Until then the app logs a warning and keeps deriving URLs from the `Host` header, i.e. the code change is inert.
+1. Set in `.env` (never commit it): `PUBLIC_BASE_URL=https://feather.example.com` — **HTTPS**, no trailing slash. (Corrected 2026-08-11: `http://` 301s to `https://`.) Until then the app logs a warning and keeps deriving URLs from the `Host` header, i.e. the code change is inert.
 2. Hand-fix one catalog entry: `com.zhiliaoapp.musically` version `43.4.0_AC`, whose `downloadURL` is `http://<nas-ip>:7000/ipas/...` and should be `http://feather.example.com/ipas/...`. **One edit, by hand.** A regex would clobber the four legitimate external URLs (github, michael-128.github.io, and two filebin).
 
 **From Plan 011:**
@@ -252,3 +252,14 @@ These were verified and deliberately not planned, mostly because the deployment 
 
 - `data/source.json` publishes `"size": 0` for `com.michael-128.qBitControl`. The real binary is 4,321,496 bytes and sits under the differently-cased `data/ipas/com.Michael-128.qbitControl/`. Plan 007 stops new instances of this; it does not repair the existing entry.
 - The admin password in `.env` should be **rotated**. The service ran with no authentication at all while that password sat in a mode-0755 file, so it protected nothing and should be treated as burned. Do this before Plan 010 makes it load-bearing.
+
+## Live-deployment note (2026-08-11)
+
+The instance behind `https://feather.example.com` is **not** the checkout in this repo. It serves a 1-app catalog; this repo's `data/` holds 8 apps and 1.3 GB. Whatever runs there has its own `DATA_DIR`.
+
+Observed there: `com.faceboo.instagram.beegram 1.0.0` has `downloadURL = http://<nas-ip>:7000/ipas/...` — the Plan 008 bug, live. The binary itself is fine (valid ZIP, 333,221,896 bytes, and the same file serves correctly at `https://feather.example.com/ipas/...`); only the advertised URL is wrong, and it is unreachable for any device not on that LAN.
+
+Fixing it needs three things **on that host**, not here:
+1. `PUBLIC_BASE_URL=https://feather.example.com` in its `.env`
+2. redeploy onto an image containing Plan 008 (`ghcr.io/d7eeem/feather:latest` or newer)
+3. hand-correct the one existing `downloadURL` — the app only rewrites URLs when an entry is added or updated, so past entries do not self-heal
