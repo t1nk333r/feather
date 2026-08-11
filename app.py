@@ -7,7 +7,6 @@ import io
 import requests
 import tempfile
 import hashlib
-import shutil
 from datetime import datetime
 from werkzeug.utils import secure_filename
 from altparse import AltSourceManager, Parser, AltSource
@@ -114,8 +113,18 @@ class SourceManager:
             response.raise_for_status()
 
             filepath = dest_path or self.get_ipa_path(bundle_id, version)
+            total = 0
+            limit = app.config.get("MAX_CONTENT_LENGTH") or (2 * 1024 * 1024 * 1024)
             with open(filepath, 'wb') as f:
-                shutil.copyfileobj(response.raw, f)
+                for chunk in response.iter_content(chunk_size=1 << 20):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > limit:
+                        f.close()
+                        os.remove(filepath)
+                        raise ValueError(f"Download exceeded size limit of {limit} bytes")
+                    f.write(chunk)
 
             file_size = get_file_size(filepath)
             logging.info(f"Downloaded IPA file: {filepath} ({file_size} bytes)")
@@ -199,10 +208,20 @@ class SourceManager:
             
             filepath = os.path.join(ICON_FOLDER, secure_filename(bundle_id), f"icon.{ext}")
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            
+
+            total = 0
+            limit = app.config.get("MAX_CONTENT_LENGTH") or (2 * 1024 * 1024 * 1024)
             with open(filepath, 'wb') as f:
-                shutil.copyfileobj(response.raw, f)
-            
+                for chunk in response.iter_content(chunk_size=1 << 20):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > limit:
+                        f.close()
+                        os.remove(filepath)
+                        raise ValueError(f"Download exceeded size limit of {limit} bytes")
+                    f.write(chunk)
+
             logging.info(f"Downloaded icon file: {filepath}")
             return filepath
         except Exception as e:

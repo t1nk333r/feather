@@ -7,9 +7,12 @@ and no test makes real network requests.
 See plans/005-smoke-test-suite.md for the design rationale.
 """
 
+import gzip
+import http.server
 import json
 import os
 import importlib
+import threading
 
 import pytest
 
@@ -75,6 +78,64 @@ def client(tmp_path):
     with app_module.app.test_client() as c:
         c.app_module = app_module  # stash for tests that need module access
         yield c
+
+
+# ---------------------------------------------------------------------------
+# Local-loopback HTTP stubs for the download tests below. These bind to
+# 127.0.0.1 on an ephemeral port and only ever talk to the test process
+# itself -- no real network call leaves the machine.
+# ---------------------------------------------------------------------------
+
+
+class _GzipIpaHandler(http.server.BaseHTTPRequestHandler):
+    payload = b"PK\x03\x04 fake but plausible ipa bytes " * 50
+
+    def do_GET(self):
+        compressed = gzip.compress(self.payload)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Encoding", "gzip")
+        self.send_header("Content-Length", str(len(compressed)))
+        self.end_headers()
+        self.wfile.write(compressed)
+
+    def log_message(self, format, *args):
+        pass  # keep test output quiet
+
+
+class _LargeIpaHandler(http.server.BaseHTTPRequestHandler):
+    payload = b"X" * (256 * 1024)  # 256 KiB -- bigger than the test's cap
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(self.payload)))
+        self.end_headers()
+        self.wfile.write(self.payload)
+
+    def log_message(self, format, *args):
+        pass
+
+
+def _local_stub_server(handler_cls):
+    server = http.server.HTTPServer(("127.0.0.1", 0), handler_cls)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/app.ipa"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+@pytest.fixture
+def gzip_ipa_server():
+    yield from _local_stub_server(_GzipIpaHandler)
+
+
+@pytest.fixture
+def large_ipa_server():
+    yield from _local_stub_server(_LargeIpaHandler)
 
 
 # ---------------------------------------------------------------------------
@@ -466,3 +527,60 @@ def test_update_version_preserves_original_on_failed_fetch(client, tmp_path):
 
     assert (ipa_dir / "1.0.0.ipa").exists()
     assert (ipa_dir / "1.0.0.ipa").read_bytes() == original_bytes
+
+
+def test_gzip_encoded_download_is_decoded(client, tmp_path, gzip_ipa_server):
+    """Defect 3: response.raw (used with shutil.copyfileobj) is the
+    undecoded urllib3 stream, so a gzip-encoded origin wrote a gzip
+    stream to disk instead of the real .ipa. iter_content() applies
+    content decoding, so the bytes landing on disk must be the original,
+    decompressed payload.
+    """
+    resp = client.post(
+        "/api/add-app",
+        data={
+            "name": "Gzipped",
+            "bundleIdentifier": "com.test.gzipped",
+            "developerName": "T",
+            "version": "1.0",
+            "downloadURL": gzip_ipa_server,
+            "downloadFromUrl": "true",
+        },
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["success"] is True
+
+    saved = tmp_path / "ipas" / "com.test.gzipped" / "1.0.ipa"
+    assert saved.exists()
+    assert saved.read_bytes() == _GzipIpaHandler.payload
+
+
+def test_download_over_size_limit_is_rejected(client, tmp_path, large_ipa_server):
+    """Defect 3: outbound downloads had no size ceiling at all (Flask's
+    MAX_CONTENT_LENGTH only bounds inbound uploads). A download that
+    exceeds the configured limit must be rejected and leave no partial
+    file behind.
+    """
+    client.app_module.app.config["MAX_CONTENT_LENGTH"] = 1024  # 1 KiB cap
+
+    resp = client.post(
+        "/api/add-app",
+        data={
+            "name": "TooBig",
+            "bundleIdentifier": "com.test.toobig",
+            "developerName": "T",
+            "version": "1.0",
+            "downloadURL": large_ipa_server,
+            "downloadFromUrl": "true",
+        },
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 400
+    body = json.loads(resp.data)
+    assert body["success"] is False
+
+    # No partial file left behind.
+    bundle_dir = tmp_path / "ipas" / "com.test.toobig"
+    assert not bundle_dir.exists() or list(bundle_dir.iterdir()) == []
