@@ -21,6 +21,7 @@
 - **Risk**: LOW
 - **Depends on**: none. **Run this before Plan 003**, which deletes the file the pins are harvested from.
 - **Confidence upgraded to HIGH (2026-08-10)**: during Plan 001's review, `pip install -r requirements.txt` completed cleanly into a fresh venv and `import PIL` then raised `ModuleNotFoundError`. Pillow is confirmed absent and is not pulled in transitively. Step 1's container checks are still worth running to observe the actual `/qr` status code, but the missing dependency is no longer in question.
+- **Pin revised to `pillow==11.3.0` (2026-08-11)**, after a first execution attempt hit a STOP condition. See "Why not `pillow==10.1.0`" below. The harvested pin is no longer the pin to apply.
 - **Category**: bug
 - **Planned at**: no VCS — `requirements.txt` md5 `529118e6cac74383205ed8be97c2fec0`, 2026-08-10
 
@@ -35,6 +36,34 @@ The cause is a dependency that was present in the older copy of the app and drop
 Without PIL, `qrcode.make_image()` falls back to the pure-Python `PyPNGImage` factory, whose method signature is `save(self, stream, kind=None)`. The call site passes `format='PNG'` → `TypeError` → caught → HTTP 500.
 
 **This is the one audit finding rated MED confidence** because it was not reproduced inside a container. Steps 1–2 confirm it before you change anything.
+
+## Why not `pillow==10.1.0` — read this before Step 3
+
+The pin harvested from `backup.old/requirements.txt` is `pillow==10.1.0`. **Do not use it.** A first execution attempt of this plan stopped here, correctly.
+
+`10.1.0` installs fine in the container (`python:3.11-slim` — a `cp311` manylinux wheel exists) but **cannot install on this host**, which runs Python **3.14.6**. No `cp314` wheel was ever published for it, so pip falls back to building from sdist and the build fails against modern setuptools:
+
+```
+File "<string>", line 27, in get_version
+KeyError: '__version__'
+ERROR: Failed to build 'pillow' when getting requirements to build wheel
+```
+
+That matters beyond this plan: **Plan 005 runs its test suite in a host virtualenv** built from `requirements.txt`. A container-only pin would make Plan 005 unrunnable on the recorded known-good path, and Plans 006–010 all depend on Plan 005.
+
+Wheel availability was checked directly (`pip download --no-deps --only-binary=:all: --platform manylinux_2_28_x86_64` for each `--python-version`):
+
+| Pillow | cp311 (container) | cp314 (host) |
+|---|---|---|
+| 10.1.0 | yes | **no** |
+| 11.0.0 | yes | **no** |
+| 11.1.0 | yes | **no** |
+| 11.2.1 | yes | **no** |
+| **11.3.0** | **yes** | **yes** |
+| 12.0.0 | yes | yes |
+| 12.3.0 | yes | yes |
+
+`11.3.0` is the **earliest** version with wheels for both interpreters, so it is the smallest bump the constraint allows. Both `11.3.0` and `12.3.0` were functionally exercised against the exact code path at `app.py:2301-2307` — `qrcode[pil]==7.4.2`, `QRCode(...).make_image(...).save(buf, format='PNG')` — and both produced a byte-identical 777-byte PNG via the `PilImage` factory. `11.3.0` is chosen over `12.3.0` deliberately: the app never decodes untrusted images (`grep` confirms the only PIL consumer is `qrcode`; `app.py` has no `from PIL` import and stores uploaded icons as opaque bytes), so there is no CVE-exposure argument for chasing latest, and a general dependency refresh is a separate deferred change.
 
 ## Current state
 
@@ -171,15 +200,17 @@ docker compose logs --tail 30 altstore-manager | grep "QR generation error"
 cat backup.old/requirements.txt
 ```
 
-Confirm it shows `qrcode[pil]==7.4.2` and `pillow==10.1.0`. If `backup.old/` no longer exists (Plan 003 ran first), use `pillow==10.1.0` as specified here.
+Confirm it shows `qrcode[pil]==7.4.2` and `pillow==10.1.0`. This step exists to capture the `qrcode[pil]` extra, which is what you carry forward.
 
-**Verify**: you have the two exact pin strings recorded.
+**The Pillow version is *not* carried forward.** Use `pillow==11.3.0`, for the reasons in "Why not `pillow==10.1.0`" above. If `backup.old/` no longer exists (Plan 003 ran first), nothing is lost — both pins to apply are stated verbatim in Step 3.
+
+**Verify**: you have the two exact pin strings recorded: `qrcode[pil]==7.4.2` and `pillow==11.3.0`.
 
 ### Step 3: Apply the change
 
 Edit `requirements.txt`: change line 3 from `qrcode==7.4.2` to `qrcode[pil]==7.4.2`, and add an explicit `pillow` pin.
 
-Result should be:
+Result should be exactly:
 
 ```
 Flask==2.3.3
@@ -189,12 +220,43 @@ requests==2.31.0
 atomicwrites==1.4.1
 Werkzeug==2.3.7
 altparse==0.3.0
-pillow==10.1.0
+pillow==11.3.0
 ```
 
 Both the extra *and* the explicit pin are deliberate: the extra expresses the real requirement, the pin makes the build reproducible.
 
-**Verify**: `grep -c "qrcode\[pil\]==7.4.2\|pillow==10.1.0" requirements.txt` → `2`
+**Verify**: `grep -c "qrcode\[pil\]==7.4.2\|pillow==11.3.0" requirements.txt` → `2`
+
+### Step 3b: Confirm it installs on the host before touching Docker
+
+This is the check the first attempt failed on. Do it before the rebuild, because it is fast and it is the one Plan 005 depends on.
+
+```
+python3 -m venv /tmp/p004-host
+/tmp/p004-host/bin/pip install -q -r requirements.txt
+/tmp/p004-host/bin/python -c "import PIL; print(PIL.__version__)"
+```
+
+→ prints `11.3.0`, exit 0. (Note: `python3 -m venv -q` is **not** a valid flag — omit `-q` on the venv line.)
+
+Then exercise the real code path, not just the import:
+
+```
+/tmp/p004-host/bin/python -c "
+import io, qrcode
+qr = qrcode.QRCode(version=1, box_size=10, border=5)
+qr.add_data('feather://example/source.json')
+qr.make(fit=True)
+buf = io.BytesIO()
+qr.make_image(fill_color='black', back_color='white').save(buf, format='PNG')
+assert buf.getvalue()[:8] == b'\x89PNG\r\n\x1a\n', 'not a PNG'
+print('OK', len(buf.getvalue()), 'bytes')
+"
+```
+
+→ prints `OK` and a byte count, exit 0. A failure here means the `format='PNG'` call still is not going through the PIL backend — **STOP and report**.
+
+Clean up: `rm -rf /tmp/p004-host`
 
 ### Step 4: Rebuild and confirm the fix
 
@@ -207,7 +269,7 @@ sleep 15
 ```
 docker compose exec altstore-manager python -c "import PIL; print(PIL.__version__)"
 ```
-→ prints `10.1.0`, exit 0
+→ prints `11.3.0`, exit 0
 
 **Verify the endpoint**:
 ```
@@ -247,6 +309,11 @@ the dependency was dropped in a rewrite. Without PIL, make_image()
 returns PyPNGImage, whose save(stream, kind=None) rejects the
 format='PNG' keyword used at app.py:2292.
 
+Pinned 11.3.0 rather than the harvested 10.1.0: no cp314 wheel exists
+for 10.1.0, so it cannot install on the host that runs the test suite
+(Python 3.14). 11.3.0 is the earliest release with wheels for both
+cp311 (the container) and cp314, and renders a byte-identical PNG.
+
 /qr is the primary onboarding path and the frontend requests it on
 every page load."
 ```
@@ -272,7 +339,9 @@ If Plan 005 has not run yet, the Step 4 `curl` + `file` checks are the verificat
 ALL must hold:
 
 - [ ] `grep -c "qrcode\[pil\]" requirements.txt` returns `1`
-- [ ] `grep -c "^pillow==" requirements.txt` returns `1`
+- [ ] `grep -c "^pillow==11.3.0$" requirements.txt` returns `1`
+- [ ] `grep -c "pillow==10.1.0" requirements.txt` returns `0`
+- [ ] Step 3b passed: a fresh host venv installs `requirements.txt` and renders a real PNG through the PIL backend
 - [ ] `docker compose exec altstore-manager python -c "import PIL"` exits 0
 - [ ] `curl -s -o /dev/null -w "%{http_code}" http://localhost:7000/qr` returns `200`
 - [ ] the downloaded response starts with PNG magic bytes
@@ -285,7 +354,7 @@ ALL must hold:
 
 Stop and report back (do not improvise) if:
 
-- `pillow==10.1.0` fails to install on `python:3.11-slim`. Pillow sometimes needs build dependencies; the slim image may lack them. **Do not add `gcc`/`libjpeg-dev` to the Dockerfile on your own initiative** — report, because a newer Pillow with prebuilt wheels for 3.11 is likely the better answer.
+- `pillow==11.3.0` fails to install anywhere — host or container. A `cp311` manylinux wheel and a `cp314` wheel were both confirmed to exist on PyPI, so a failure means pip is resolving from sdist for some other reason (no network, an index override, a `--no-binary` setting). **Do not add `gcc`/`libjpeg-dev` to the Dockerfile on your own initiative, and do not change the pin on your own initiative** — report what pip printed.
 - `/qr` still returns 500 after the rebuild with PIL present. The cause is then something other than the missing dependency; capture the full traceback from `docker compose logs` and report.
 - You find yourself editing `app.py:2292`. That is explicitly out of scope — report instead.
 - The rebuild breaks any other endpoint (`/source.json` stops returning 8 apps).
@@ -294,5 +363,6 @@ Stop and report back (do not improvise) if:
 
 - **Why both `qrcode[pil]` and an explicit `pillow` pin**: the extra declares intent, the pin makes the build reproducible. A reviewer might flag this as redundant — it is deliberate, keep both.
 - This bug existed because there is no test asserting `/qr` returns an image, and the exception handler at `app.py:2296-2298` converts any failure into a generic `"QR generation failed"` message. Plan 005's test is the permanent guard. The broader "errors are swallowed" pattern is Plan 007's subject.
-- `pillow==10.1.0` is pinned to match what previously worked. It is not the newest release; bumping it is safe and low-value, and should ride along with a general dependency refresh (a deferred finding) rather than happening here.
+- **The pin must stay installable on both interpreters.** The container is `python:3.11-slim`; the host that runs Plan 005's tests is Python 3.14. Any future bump has to keep wheels for both. `11.3.0` is the earliest version that does; `12.x` also works if a later refresh wants it. Verify with `pip download --no-deps --only-binary=:all: --python-version 311 --platform manylinux_2_28_x86_64 pillow==<v>` and again with `--python-version 314` before changing it.
+- The commit message in Step 6 says `pillow==10.1.0` was what `backup.old` had — that is accurate history and should stay. Just make sure the message also notes the applied pin is `11.3.0` and why.
 - **Reviewer should scrutinise**: that `app.py` is untouched. The tempting one-line "fix" (dropping `format='PNG'`) would mask the missing dependency and leave the build non-reproducible.

@@ -18,10 +18,10 @@ Three facts shape every plan here:
 
 | Plan | Title | Priority | Effort | Risk | Depends on | Status |
 |------|-------|----------|--------|------|------------|--------|
-| [001](001-configurable-paths-and-config.md) | Make data paths and configuration environment-driven | P1 | S | LOW | — | **DONE** — `bdcf5da`, branch `worktree-agent-a57b134552d88f7fe`, unmerged |
+| [001](001-configurable-paths-and-config.md) | Make data paths and configuration environment-driven | P1 | S | LOW | — | **DONE** — `bdcf5da`, merged to `main` as `26451c4`, pushed |
 | [002](002-version-control.md) | Put the repository under version control | P1 | S | LOW | — | **DONE** — `2fe1d2c` on `main`, pushed to `d7eeem/feather` (private) |
 | [003](003-delete-dead-copies.md) | Delete the two dead copies of the application | P1 | S | LOW | 002, 004 | TODO |
-| [004](004-restore-pillow-qr.md) | Restore Pillow so the QR endpoint works | P1 | S | LOW | — | TODO |
+| [004](004-restore-pillow-qr.md) | Restore Pillow so the QR endpoint works | P1 | S | LOW | — | IN PROGRESS — first attempt hit a STOP condition (`pillow==10.1.0` has no cp314 wheel); plan revised 2026-08-11 to pin `11.3.0`, re-dispatched |
 | [005](005-smoke-test-suite.md) | Establish a one-command smoke-test suite | P1 | S | LOW | 001 | TODO |
 | [006](006-atomic-catalog-writes.md) | Make catalog writes atomic and serialized | P1 | S | LOW | 005 | TODO |
 | [007](007-fail-loudly.md) | Report failures instead of silently reporting success | P1 | S–M | LOW–MED | 005 (006 recommended) | TODO |
@@ -65,6 +65,15 @@ Plan 005 establishes the suite. The host runs Python 3.14 and the container runs
 > python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 > ```
 > `flask`, `qrcode`, `requests`, `altparse` all import successfully. So Plan 005 should take the host-venv path, not the container fallback. Note `python3 -m venv -q` is **not** a valid flag — omit it.
+
+**The host is Python 3.14.6; the container is Python 3.11.** Every pin in `requirements.txt` must therefore have a wheel for *both* `cp311` and `cp314`, or the host-venv path above breaks and Plan 005 — and everything downstream of it — loses its test environment. This is not hypothetical: it is exactly what stopped Plan 004's first execution attempt (`pillow==10.1.0` publishes no `cp314` wheel). Check a candidate pin with:
+>
+> ```
+> pip download --no-deps --only-binary=:all: --platform manylinux_2_28_x86_64 --python-version 311 -d /tmp/chk <pkg>==<v>
+> pip download --no-deps --only-binary=:all: --platform manylinux_2_28_x86_64 --python-version 314 -d /tmp/chk <pkg>==<v>
+> ```
+>
+> Note the host's system `python3` has no `pip` module — use a venv's `pip`.
 
 **Pre-existing `SyntaxWarning`** (noted during Plan 001 review, not a regression): `app.py` line ~1614 emits `SyntaxWarning: "\/" is an invalid escape sequence` from a JavaScript regex inside `HTML_TEMPLATE`. It is present in the baseline commit too. Plan 009 moves this code into `templates/index.html`, where Python will stop parsing it and the warning disappears on its own. Don't "fix" it in `app.py`.
 
