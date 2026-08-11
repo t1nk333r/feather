@@ -10,6 +10,7 @@ See plans/005-smoke-test-suite.md for the design rationale.
 import gzip
 import http.server
 import json
+import logging
 import os
 import importlib
 import threading
@@ -77,6 +78,31 @@ def client(tmp_path):
     app_module.app.config["TESTING"] = True
     with app_module.app.test_client() as c:
         c.app_module = app_module  # stash for tests that need module access
+        yield c
+
+
+@pytest.fixture(scope="function")
+def client_with_base_url(tmp_path, monkeypatch):
+    """Same as `client`, but with PUBLIC_BASE_URL set before the module
+    reloads (plan 008). resolve_base_url() reads PUBLIC_BASE_URL at import
+    time via a module-level constant, so it must be set before the reload,
+    same as DATA_DIR in the `client` fixture above. monkeypatch.setenv
+    restores the previous (unset) value automatically at teardown, so it
+    does not leak into other tests -- the next test's `client`/
+    `client_with_base_url` fixture reload picks up the restored env.
+    """
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PUBLIC_BASE_URL", "http://feather.example.com")
+
+    import app as app_module
+
+    importlib.reload(app_module)
+
+    (tmp_path / "source.json").write_text(json.dumps(seed_source()))
+
+    app_module.app.config["TESTING"] = True
+    with app_module.app.test_client() as c:
+        c.app_module = app_module
         yield c
 
 
@@ -740,3 +766,139 @@ def test_backups_pruned_to_20(client, tmp_path):
 
     backup_files = list(backups_dir.glob("source-*.json"))
     assert len(backup_files) == 20
+
+
+# ---------------------------------------------------------------------------
+# Plan 008: derive published URLs from PUBLIC_BASE_URL, not the client-
+# controlled Host header.
+# ---------------------------------------------------------------------------
+
+
+def test_download_url_uses_public_base_url(client_with_base_url, gzip_ipa_server):
+    """A request with a spoofed Host header must not leak that host into a
+    downloadURL written to source.json -- resolve_base_url() must prefer
+    the configured PUBLIC_BASE_URL instead.
+    """
+    resp = client_with_base_url.post(
+        "/api/add-app",
+        data={
+            "name": "Spoofed",
+            "bundleIdentifier": "com.test.spoofed",
+            "developerName": "T",
+            "version": "1.0",
+            "downloadURL": gzip_ipa_server,
+            "downloadFromUrl": "true",
+        },
+        content_type="multipart/form-data",
+        headers={"Host": "evil.example.com"},
+    )
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["success"] is True
+
+    resp = client_with_base_url.get("/api/app/com.test.spoofed")
+    body = json.loads(resp.data)
+    download_url = body["versions"][0]["downloadURL"]
+    assert download_url.startswith("http://feather.example.com/ipas/")
+    assert "evil.example.com" not in download_url
+
+
+def test_icon_url_uses_public_base_url(client_with_base_url, gzip_ipa_server):
+    """Same guarantee as above, for get_local_icon_url via /api/update-app."""
+    resp = client_with_base_url.post(
+        "/api/update-app",
+        data={
+            "bundleIdentifier": "com.example.app",
+            "name": "Example App",
+            "developerName": "Example Dev",
+            "iconURL": gzip_ipa_server,
+            "downloadIconFromUrl": "true",
+        },
+        content_type="multipart/form-data",
+        headers={"Host": "evil.example.com"},
+    )
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["success"] is True
+
+    resp = client_with_base_url.get("/api/app/com.example.app")
+    body = json.loads(resp.data)
+    icon_url = body["iconURL"]
+    assert icon_url.startswith("http://feather.example.com/icons/")
+    assert "evil.example.com" not in icon_url
+
+
+def test_qr_uses_public_base_url(client_with_base_url):
+    """/qr must not error with a spoofed Host header, and resolve_base_url()
+    -- the function it builds its payload from -- must ignore that header
+    in favor of the configured PUBLIC_BASE_URL.
+
+    No QR decoder is available in this environment (only qrcode[pil] is
+    installed, which encodes but does not decode), so the payload itself
+    is verified indirectly: via a direct call to resolve_base_url() inside
+    a request context carrying the spoofed header, and via
+    test_qr_url_has_slash_before_source_json below, which spies on the
+    exact string handed to the QR encoder.
+    """
+    resp = client_with_base_url.get("/qr", headers={"Host": "evil.example.com"})
+    assert resp.status_code == 200
+    assert resp.mimetype == "image/png"
+
+    app_module = client_with_base_url.app_module
+    with app_module.app.test_request_context(headers={"Host": "evil.example.com"}):
+        assert app_module.resolve_base_url() == "http://feather.example.com"
+
+
+def test_qr_url_has_slash_before_source_json(client_with_base_url, monkeypatch):
+    """Guards the concatenation bug: resolve_base_url() strips the trailing
+    slash that request.url_root used to provide, so the /qr route must add
+    it back explicitly before appending 'source.json'. Verified (per plan
+    008 step 2) to fail with AssertionError -- payload becomes
+    'feather://feather.example.comsource.json' -- if the route instead
+    concatenates resolve_base_url() + 'source.json' without the slash.
+    """
+    app_module = client_with_base_url.app_module
+    captured = {}
+    original_add_data = app_module.qrcode.QRCode.add_data
+
+    def spy_add_data(self, data, *args, **kwargs):
+        captured["data"] = data
+        return original_add_data(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(app_module.qrcode.QRCode, "add_data", spy_add_data)
+
+    resp = client_with_base_url.get("/qr")
+    assert resp.status_code == 200
+    assert captured["data"] == "feather://feather.example.com/source.json"
+
+
+def test_falls_back_to_host_when_unset(client, gzip_ipa_server, caplog):
+    """With PUBLIC_BASE_URL unset, the old Host-header-derived behaviour
+    must still work (no regression for deployments that haven't set it
+    yet), and a warning must be logged so an operator can tell why.
+    """
+    with caplog.at_level(logging.WARNING):
+        resp = client.post(
+            "/api/add-app",
+            data={
+                "name": "Fallback",
+                "bundleIdentifier": "com.test.fallback",
+                "developerName": "T",
+                "version": "1.0",
+                "downloadURL": gzip_ipa_server,
+                "downloadFromUrl": "true",
+            },
+            content_type="multipart/form-data",
+        )
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["success"] is True
+
+    resp = client.get("/api/app/com.test.fallback")
+    body = json.loads(resp.data)
+    download_url = body["versions"][0]["downloadURL"]
+    assert download_url.startswith("http://localhost/ipas/")
+
+    assert any(
+        "PUBLIC_BASE_URL is not set" in record.message for record in caplog.records
+    )
