@@ -28,6 +28,7 @@ Three facts shape every plan here:
 | [008](008-public-base-url.md) | Derive published URLs from configuration, not the `Host` header | P2 | S | LOW | 001, 005 | TODO |
 | [009](009-extract-html-template.md) | Extract the embedded HTML template to `templates/index.html` | P2 | S | LOW–MED | 005 | TODO |
 | [010](010-login-session-auth.md) | Gate the mutating routes behind a login form | P2 | M | MED | 001, 005, 009 | TODO |
+| [011](011-garage-s3-ipa-storage.md) | Move IPA storage to the self-hosted Garage S3 object store | P2 | M–L | MED | 005 (interacts with 008) | TODO |
 
 Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (with a one-line reason) | `REJECTED` (with a one-line rationale)
 
@@ -36,6 +37,8 @@ Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (with a one-line reas
                                                    ├──> 009 (extract template) ──> 010 (auth)
 002 (git) ──> 003 (delete dead code)               │
 004 (Pillow)  [independent, do anytime]  ──────────┘
+
+005 ──> 011 (Garage S3 for IPA payload)   [008 shares a seam; see plan 011]
 ```
 
 ## Dependency notes
@@ -117,6 +120,33 @@ Run during review, since the executor's worktree has no `data/`/`.env` and so co
 **Correction to the plan**: its Step 6 repro used a JSON body and could never have passed. See the new deferred finding below on the JSON API — the JSON branch hardcodes `download_from_url = False`, so no download is ever attempted. The multipart path is the one under test, and it behaves correctly. Plan text fixed.
 
 **Still unverified**: nobody has clicked through add-app or update-version in the actual web UI. Some requests that used to return 200 now return 400, which is the point — but the frontend's error handling for those paths has only been read, not exercised.
+
+## Live data issues found during Plan 011 recon (2026-08-11)
+
+Three catalogued versions are **not IPAs**. They are gzip-compressed HTML — a 5411-byte filebin landing page — written to disk by the pre-Plan-007 `copyfileobj(response.raw, f)` bug that skipped content-decoding:
+
+```
+1719 B  data/ipas/com.instagram.theta/408.1.0_TH.ipa
+1719 B  data/ipas/com.instagram.ifgram/408.1.0_IF.ipa
+1724 B  data/ipas/com.fouadraheb.watusi/B_25.36.10_WC.ipa
+```
+
+All three are advertised in `data/source.json`, so any device that tries to install them fails. Plan 007 stopped the code producing more of these; **nothing has repaired the existing three.** Fixing it means sourcing real binaries or removing those three versions from the catalog by hand. `zipfile.is_zipfile()` is a reliable detector — an IPA is a ZIP.
+
+The catalog also confirms the **Plan 008 `Host`-header bug in production**: `downloadURL` values are split across `http://feather.example.com/...` and `http://<nas-ip>:7000/...`, so `com.zhiliaoapp.musically` is reachable only from the LAN by IP.
+
+Two **orphans** sit on disk unreferenced by any catalog entry: `com.ryan.anymex/3.0.3.ipa` (42 MB) and `com.Michael-128.qbitControl/1.3.3.ipa` (4.3 MB, the case-collision twin).
+
+**Deployment premise re-confirmed**: `example.com` resolves to `<proxy-ip>`, a private address, so the private-network assumption behind the deferred findings still holds.
+
+## Garage S3 infrastructure (verified 2026-08-11)
+
+| Endpoint | URL | Verified by |
+|---|---|---|
+| S3 API | `https://s3.example.com` | returns `<Region>garage</Region>`, `Forbidden: Garage does not support anonymous access yet` |
+| Web (bucket `feather-repo`) | `https://feather-repo.web.example.com` | a missing key returns `NoSuchKey` (**not** `AccessDenied`) → website access enabled, anonymous reads work |
+
+Both are TLS-terminated by the same openresty on `<proxy-ip>` that fronts the app, so device reachability is not in question. This is why Plan 011 uses a plain `302` to the web endpoint rather than presigned URLs or a proxy-stream fallback.
 
 ## Findings considered and rejected
 
