@@ -2370,12 +2370,17 @@ def add_app():
                 'downloadURL': request.form.get('downloadURL', ''),
                 'minOSVersion': request.form.get('minOSVersion', '14.0')
             }
-            success, message = source_manager.add_app_manual(data, ipa_file=ipa_file if ipa_file and ipa_file.filename else None, download_from_url=download_from_url, base_url=base_url)
         else:
             # JSON request (backward compatibility)
             data = request.get_json() if request.is_json else {}
-            success, message = source_manager.add_app_manual(data, base_url=base_url)
-        
+            ipa_file = None
+            download_from_url = False
+
+        if not data.get('bundleIdentifier'):
+            return jsonify({"success": False, "error": "Bundle identifier is required"}), 400
+
+        success, message = source_manager.add_app_manual(data, ipa_file=ipa_file if ipa_file and ipa_file.filename else None, download_from_url=download_from_url, base_url=base_url)
+
         if success:
             return jsonify({"success": True, "message": message})
         else:

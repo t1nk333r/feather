@@ -416,3 +416,18 @@ def test_failed_save_does_not_return_success_message(client, monkeypatch):
     body = json.loads(resp.data)
     assert body["success"] is False
     assert body["error"] != "App added successfully"
+
+
+def test_add_app_missing_bundle_id_400(client):
+    """Defect 5: /api/add-app lacked the bundleIdentifier guard its sibling
+    mutating routes all have, so a missing bundleIdentifier fell through
+    to a KeyError whose raw repr ("'bundleIdentifier'") was returned as
+    the error message."""
+    resp = client.post(
+        "/api/add-app",
+        json={"name": "X", "developerName": "Y", "version": "1.0"},
+    )
+    assert resp.status_code == 400
+    body = json.loads(resp.data)
+    assert body["success"] is False
+    assert body["error"] == "Bundle identifier is required"
