@@ -49,7 +49,7 @@ IPA_FOLDER = os.path.join(DATA_DIR, "ipas")
 ICON_FOLDER = os.path.join(DATA_DIR, "icons")
 ```
 
-**Critical import-order fact**: `app.py:718-719` runs at module scope —
+**Critical import-order fact**: `app.py:733-734` runs at module scope —
 
 ```python
 # Initialize source manager
@@ -58,25 +58,25 @@ source_manager = SourceManager(SOURCE_FILE)
 
 `SourceManager.__init__` calls `ensure_data_directory()` (which creates `DATA_DIR`) and `initialize_source()` (which writes a default `source.json` if absent). **This means `DATA_DIR` must be set in `os.environ` *before* `import app` executes.** A normal pytest fixture runs too late. See Step 3 for the pattern that handles this.
 
-**The 13 routes** (`app.py:2218-2519`):
+**The 13 routes** — line numbers re-checked against `main` at `09924c9` (`app.py` is 2546 lines):
 
 | Route | Method | Line | Notes |
 |---|---|---|---|
-| `/` | GET | 2218 | serves the embedded HTML page |
-| `/source.json` | GET | 2222 | **the entire product** — iOS clients poll this |
-| `/ipas/<bundle_id>/<filename>` | GET | 2230 | payload delivery |
-| `/icons/<bundle_id>/icon.<ext>` | GET | 2248 | allowlists ext against `ALLOWED_ICON_EXTENSIONS` |
-| `/qr` | GET | 2279 | onboarding QR (see Plan 004) |
-| `/api/apps` | GET | 2300 | |
-| `/api/add-app` | POST | 2311 | mutating |
-| `/api/delete-app` | POST | 2345 | mutating — also deletes IPA files from disk |
-| `/api/app/<bundle_identifier>` | GET | 2365 | |
-| `/api/update-app` | POST | 2376 | mutating |
-| `/api/add-version` | POST | 2420 | mutating |
-| `/api/update-version` | POST | 2462 | mutating |
-| `/api/update-source` | POST | 2506 | mutating |
+| `/` | GET | 2233 | serves the embedded HTML page |
+| `/source.json` | GET | 2237 | **the entire product** — iOS clients poll this |
+| `/ipas/<bundle_id>/<filename>` | GET | 2245 | payload delivery |
+| `/icons/<bundle_id>/icon.<ext>` | GET | 2263 | allowlists ext against `ALLOWED_ICON_EXTENSIONS` (the check is at 2271) |
+| `/qr` | GET | 2294 | onboarding QR — Plan 004 has landed, this works now |
+| `/api/apps` | GET | 2315 | |
+| `/api/add-app` | POST | 2326 | mutating; multipart/JSON branch at 2331 |
+| `/api/delete-app` | POST | 2360 | mutating — also deletes IPA files from disk |
+| `/api/app/<bundle_identifier>` | GET | 2380 | |
+| `/api/update-app` | POST | 2391 | mutating |
+| `/api/add-version` | POST | 2435 | mutating; the "needs one of ipaFile/downloadURL/downloadFromUrl" check is at 2463 |
+| `/api/update-version` | POST | 2477 | mutating |
+| `/api/update-source` | POST | 2521 | mutating |
 
-The mutating routes accept **either** `multipart/form-data` **or** JSON, branching on `request.content_type`. Example, `app.py:2345-2359`:
+The mutating routes accept **either** `multipart/form-data` **or** JSON, branching on `request.content_type`. Example, `app.py:2360-2374`:
 
 ```python
 @app.route('/api/delete-app', methods=['POST'])
@@ -133,7 +133,9 @@ def delete_app():
 
 **Repo conventions**: plain Python, 4-space indent, no type annotations, no linter or formatter config. There are no existing tests to model on, so this plan defines the pattern. Keep it plain `pytest` — no fixtures library, no factories, no mocking framework.
 
-**Environment**: the host runs Python 3.14; the container runs Python 3.11 (`Dockerfile:1`). `pytest` is **not** installed on the host. See Step 1 — this matters, because `Flask==2.3.3` may not install cleanly on Python 3.14.
+**Environment**: the host runs Python **3.14.6**; the container runs Python 3.11 (`Dockerfile:1`). `pytest` is **not** installed on the host.
+
+The earlier concern that `Flask==2.3.3` might not install on 3.14 has been **resolved — it installs fine.** `requirements.txt` was verified to install cleanly into a fresh host venv during Plans 001 and 004, and `flask`, `qrcode`, `requests`, `altparse`, and `PIL` all import. **Take the host-venv path.** The container fallback in Step 1 is now a contingency you are unlikely to need; if you find yourself reaching for it, that is a signal something else is wrong — report it.
 
 ## Commands you will need
 
@@ -151,7 +153,7 @@ def delete_app():
 - `tests/test_routes.py` (create)
 - `tests/__init__.py` (create, empty — keeps imports unambiguous)
 - `requirements-dev.txt` (create)
-- `.gitignore` — append `.venv/` if Plan 002 has run and it is not already there
+- `.gitignore` — **already contains `.venv/`; no change needed.** Verify with `grep -c "^\.venv/$" .gitignore` → `1`.
 
 **Out of scope** (do NOT touch):
 - `app.py` — **this plan changes zero application code.** If a test fails because the app has a bug, that is a *finding to report*, not a thing to fix here. Plans 006 and 007 fix the known bugs; this plan documents current behaviour.
@@ -168,13 +170,15 @@ def delete_app():
 
 ### Step 1: Establish a working Python environment
 
-The host has Python 3.14 and no pytest. `Flask==2.3.3` is from 2023 and may not install on 3.14.
+The host has Python 3.14.6 and no pytest. This install is already known to work (see "Environment" above) — you are confirming, not discovering.
 
 ```
 cd /home/t1nk33r/Documents/feather
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
+
+Note `python3 -m venv -q` is **not** a valid flag — omit `-q` on the venv line. (`-q` is fine on `pip`.) The host's system `python3` has no `pip` module of its own, so always go through the venv's `pip`.
 
 **If that succeeds**: continue on the host. This is the preferred path — fast tests, no Docker.
 
@@ -184,7 +188,7 @@ docker compose exec altstore-manager pip install pytest
 ```
 and mount/copy `tests/` in. **Record which path you took** in your report and in `plans/README.md` — every later plan's "run the tests" instruction depends on it.
 
-**Verify**: `.venv/bin/python -c "import flask, qrcode, requests, altparse; print('ok')"` → `ok`
+**Verify**: `.venv/bin/python -c "import flask, qrcode, requests, altparse, PIL; print('ok', PIL.__version__)"` → `ok 11.3.0`
 (or the container equivalent)
 
 ### Step 2: Create `requirements-dev.txt`
@@ -256,10 +260,11 @@ Write these tests in `tests/test_routes.py`. They are ordered by what breaks wor
    - request a missing file → 404 (not 500)
 
 3. **`GET /icons/<bundle>/icon.png`** — write a fake icon, expect 200.
-   - `GET /icons/<bundle>/icon.exe` → **400** (the extension allowlist at `app.py:2256`)
+   - `GET /icons/<bundle>/icon.exe` → **400** (the extension allowlist at `app.py:2271`)
 
 4. **`GET /qr`** → 200, `image/png`, body starts with PNG magic bytes `b'\x89PNG\r\n\x1a\n'`.
-   - This is the permanent guard for Plan 004. **If Plan 004 has not run, this test will fail** — that is correct and expected. Mark it `@pytest.mark.xfail(reason="fixed by plan 004")` and note it in your report rather than skipping it.
+   - This is the permanent guard for Plan 004, **which has landed** (`facf9c1`). Write it as a normal passing test — **do not** mark it `xfail`. If it fails, that is a real regression: report it, do not paper over it with a marker.
+   - The magic-byte assertion matters more than the status code — it is what catches a silent fallback to the pure-Python `PyPNGImage` backend if Pillow ever goes missing again.
 
 5. **`GET /api/apps`** → 200, a JSON list with one entry.
 
@@ -272,10 +277,10 @@ Write these tests in `tests/test_routes.py`. They are ordered by what breaks wor
 ### Step 5: Cover the mutating routes
 
 8. **Round trip**: `POST /api/add-app` with a JSON body → assert the new app appears in `GET /source.json` → `POST /api/delete-app` → assert it is gone.
-   Use `client.post('/api/add-app', json={...})` — the JSON branch at `app.py:2333` is much easier to drive than multipart. A minimal valid body needs `name`, `bundleIdentifier`, `developerName`, `version`.
+   Use `client.post('/api/add-app', json={...})` — the JSON branch (the `else` of the `multipart/form-data` check at `app.py:2331`) is much easier to drive than multipart. A minimal valid body needs `name`, `bundleIdentifier`, `developerName`, `version`.
 
 9. **`POST /api/add-version`** — add a version to the seeded app; assert `versions` grows from 1 to 2.
-   Note `app.py:2448` requires one of `ipaFile` / `downloadURL` / `downloadFromUrl`, so include a `downloadURL`.
+   Note `app.py:2463` requires one of `ipaFile` / `downloadURL` / `downloadFromUrl`, so include a `downloadURL`.
 
 10. **`POST /api/update-version`** — change `minOSVersion` on the seeded version; assert it persisted.
 
@@ -300,13 +305,26 @@ That keeps the suite green and makes Plan 007's diff self-documenting.
 
 The suite must never touch real data.
 
-**Verify**:
+**If you are running in a git worktree** (the usual case for an executor), `data/` is gitignored and therefore **absent** — there is nothing to corrupt, and the `md5sum` check below has no file to read. In that case, verify the stronger property instead: that a full test run creates no `data/` directory at all.
+
+```
+test -e data && echo "PRE-EXISTING data/ — use the md5sum check below instead"
+.venv/bin/python -m pytest tests/ -q
+test -e data && echo "FAIL: tests created data/" || echo "OK: no data/ created"
+```
+→ `OK: no data/ created`
+
+Also confirm nothing escaped to the container path: `test -e /app && echo FAIL || echo "OK: no /app"`.
+
+**If you are running in the main checkout**, where the real 1.3 GB `data/` exists:
 ```
 md5sum data/source.json > /tmp/before.md5
 .venv/bin/python -m pytest tests/ -q
 md5sum -c /tmp/before.md5
 ```
 → `data/source.json: OK`
+
+Run whichever applies and **state in your report which one you ran**.
 
 **Also verify** no network access is attempted: the suite must not make real HTTP requests. `grep -c "requests.get\|http://" tests/test_routes.py` should only match the fake `downloadURL` strings in fixtures, which are never fetched because the tests do not set `downloadFromUrl=true`.
 
@@ -341,11 +359,12 @@ ALL must hold:
 - [ ] `.venv/bin/python -m pytest tests/ -q` exits 0 (or the container equivalent, if Step 1 fell back)
 - [ ] The suite runs in under 5 seconds
 - [ ] All 13 routes have at least one test
-- [ ] `md5sum -c` confirms `data/source.json` is byte-identical before and after a test run
+- [ ] Isolation confirmed per Step 6 — either `md5sum -c` shows `data/source.json` byte-identical, or (in a worktree) a full run creates no `data/` and no `/app`. State which.
 - [ ] No test requires Docker or network access
 - [ ] `git status --short` shows `app.py` **unmodified**
-- [ ] `.venv/` is gitignored
-- [ ] `plans/README.md` status row updated, recording whether tests run on host or in container
+- [ ] `.venv/` is gitignored (already true — just confirm)
+- [ ] `git status --short` shows no untracked `.venv/`, `.pytest_cache/`, or `__pycache__/` leaking into the commit
+- [ ] `plans/README.md` status row updated, recording whether tests run on host or in container, **and the exact test command filled into the "Test command:" placeholder** in that file's "Notes on running the tests" section — every later plan reads it from there
 
 ## STOP conditions
 
