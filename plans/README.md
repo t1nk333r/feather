@@ -25,10 +25,10 @@ Three facts shape every plan here:
 | [005](005-smoke-test-suite.md) | Establish a one-command smoke-test suite | P1 | S | LOW | 001 | **DONE** — `901699e`, merged as `41c417a`. Host venv path; 21 tests, all 13 routes covered. |
 | [006](006-atomic-catalog-writes.md) | Make catalog writes atomic and serialized | P1 | S | LOW | 005 | **DONE** — `65dccfb`, merged as `a65c6bc`. 29→34 tests. Both guarantees proven by breaking them; see "Plan 006 verification" below. |
 | [007](007-fail-loudly.md) | Report failures instead of silently reporting success | P1 | S–M | LOW–MED | 005 (006 recommended) | **DONE** — `7b36d0a`..`d6d32bc` (5 defects, one commit each), merged as `4de7fed`. 21→29 tests. Container checks run during review; see "Plan 007 verification" below. |
-| [008](008-public-base-url.md) | Derive published URLs from configuration, not the `Host` header | P2 | S | LOW | 001, 005 | TODO |
+| [008](008-public-base-url.md) | Derive published URLs from configuration, not the `Host` header | P2 | S | LOW | 001, 005 | **DONE** — `f575e71`, merged as `309f882`. 34→39 tests. Two operator tasks remain: set `PUBLIC_BASE_URL` in `.env`, and hand-fix the one `<nas-ip>:7000` catalog entry. |
 | [009](009-extract-html-template.md) | Extract the embedded HTML template to `templates/index.html` | P2 | S | LOW–MED | 005 | TODO |
 | [010](010-login-session-auth.md) | Gate the mutating routes behind a login form | P2 | M | MED | 001, 005, 009 | TODO |
-| [011](011-garage-s3-ipa-storage.md) | Move IPA storage to the self-hosted Garage S3 object store | P2 | M–L | MED | 005 (interacts with 008) | TODO |
+| [011](011-garage-s3-ipa-storage.md) | Move IPA storage to the self-hosted Garage S3 object store | P2 | M–L | MED | 005, 008 | **DONE (code)** — merged as `5a636b5`. 39→48 tests. `STORAGE_BACKEND` defaults to `local`, so nothing changed at runtime. Migration run and cutover are operator tasks — see below. |
 
 Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (with a one-line reason) | `REJECTED` (with a one-line rationale)
 
@@ -171,6 +171,41 @@ The lock is placed correctly in all eight methods: immediately before `load_sour
 **Correction to the plan**: the `grep -c "os.replace"` criterion was wrong twice (`1`, then `3`). The baseline already returns `3` — Plan 007's two real calls plus a comment containing the string — so the correct post-change count is `4`. The executor caught this and did not improvise around it. Criterion fixed, and reworded to check the substance rather than a count.
 
 **Not verified**: the Docker and live-`curl` half of Step 6. The worktree has no `data/` or `.env`. The equivalent behaviour is covered by the backup/temp-file tests against a `tmp_path` data dir. On the next `docker compose up --build -d`, confirm `data/backups/` starts filling and that no `.source-*.tmp` files accumulate in `data/`.
+
+## Operator tasks outstanding (2026-08-11)
+
+Code is merged for 008 and 011, but neither takes effect until a human does these. None can be done from an executor worktree — `.env` and `data/` are gitignored and absent there.
+
+**From Plan 008:**
+1. Set in `.env` (never commit it): `PUBLIC_BASE_URL=http://feather.example.com` — no trailing slash. Until then the app logs a warning and keeps deriving URLs from the `Host` header, i.e. the code change is inert.
+2. Hand-fix one catalog entry: `com.zhiliaoapp.musically` version `43.4.0_AC`, whose `downloadURL` is `http://<nas-ip>:7000/ipas/...` and should be `http://feather.example.com/ipas/...`. **One edit, by hand.** A regex would clobber the four legitimate external URLs (github, michael-128.github.io, and two filebin).
+
+**From Plan 011:**
+3. Create the Garage bucket key and put the credentials in `.env` (`GARAGE_S3_ENDPOINT=https://s3.example.com`, `GARAGE_BUCKET=feather-repo`, `GARAGE_PUBLIC_BASE_URL=https://feather-repo.web.example.com`, plus the access key id and secret).
+4. `.venv/bin/python scripts/migrate_ipas_to_garage.py` — dry run first. Expect **8 uploadable, 3 skipped as corrupt, 2 orphans**. If the corrupt count is not 3, stop and re-read the plan; the data has drifted.
+5. `... --apply`, then confirm one object byte-for-byte:
+   `curl -so /dev/null -w '%{http_code} %{size_download}\n' https://feather-repo.web.example.com/ipas/com.google.ios.youtube/20.49.5.ipa` → `200 124889851`
+6. Only then set `STORAGE_BACKEND=garage` and restart. **Then start one real install on a device** — nothing else proves the iOS client follows the 302. If it fails, set `STORAGE_BACKEND=local`, restart; that rollback is why the flag exists.
+
+**Independent of both:** rotate the admin password (still unconfirmed, and Plan 010 makes it load-bearing), and repair the three corrupt catalog entries.
+
+## Plan 011 verification (2026-08-11)
+
+Four guarantees proven by breaking them one at a time in the worktree:
+
+| Break | Caught by |
+|---|---|
+| redirect branch disabled | `test_serve_ipa_redirects_when_backend_is_garage` |
+| `exists()`-first 404 guard removed | `test_ipas_missing_file_404` (500 != 404), `test_serve_ipa_404_when_object_missing` |
+| destructive delete injected before the staged upload | `test_update_version_preserves_original_on_failed_fetch` **and** `test_update_version_preserves_original_on_failed_upload` |
+
+That last row is the important one — Plan 007's "never destroy the hosted binary before its replacement is complete" guarantee survives into the Garage path, and both the old and the new test catch a regression.
+
+Container-verified from the merged branch with the default backend: `/source.json` `200 application/json`, `/qr` `200 image/png`, `/` `200 text/html`. With `STORAGE_BACKEND=garage` and nothing configured it refuses to boot, naming all five missing variables and no values.
+
+**Note on the merge**: the 011 executor's worktree was cut from a ref predating the 008 merge, so its branch conflicted. The conflict was a benign add/add — both branches inserted a function right after `get_file_size` (`resolve_base_url()` from 008, `_require_garage_config()` from 011). Resolved by keeping both; verified afterwards that `resolve_base_url` still has 6 occurrences and `request.url_root` exactly 1.
+
+**Not verified** (needs credentials or the live host): the Garage `exists()` probe, the migration `--apply` run, and the device install.
 
 ## Findings considered and rejected
 
