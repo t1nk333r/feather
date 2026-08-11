@@ -1,8 +1,8 @@
 Flask==2.3.3
 Flask-Limiter==3.5.0
-qrcode==7.4.2
+qrcode[pil]==7.4.2
 requests==2.31.0
 atomicwrites==1.4.1
 Werkzeug==2.3.7
 altparse==0.3.0
-
+pillow==11.3.0
