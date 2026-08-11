@@ -9,12 +9,18 @@
 > **Drift check (run first)**:
 > ```
 > cd /home/t1nk33r/Documents/feather
-> sed -n '721p;2215p' app.py
+> git rev-parse --short HEAD          # plan refreshed against 33149ab
+> md5sum app.py                       # expect aaab44f7ca28bbe9a4bd131b6b9036b3
+> wc -l < app.py                      # expect 2986
+> sed -n '1160p;2654p' app.py
 > grep -c "{{\|{%" app.py
+> .venv/bin/python -m pytest tests/ -q   # expect 48 passed
 > ```
-> Line 721 must be `HTML_TEMPLATE = '''`, line 2215 must be `'''`, and the
-> Jinja-syntax count must be `0`. **If that count is not 0, STOP** — the whole
-> premise of this plan is that the template contains no Jinja.
+> Line **1160** must be `HTML_TEMPLATE = '''`, line **2654** must be `'''`, and
+> the Jinja-syntax count must be `0`. **If that count is not 0, STOP** — the
+> whole premise of this plan is that the template contains no Jinja.
+> **All line numbers re-verified 2026-08-11** after plans 004–008 and 011
+> landed; they moved the template down by ~439 lines.
 
 ## Status
 
@@ -24,11 +30,11 @@
 - **Depends on**: `plans/005-smoke-test-suite.md` (its `GET /` test is the safety net)
 - **Blocks**: `plans/010-login-session-auth.md`, which edits this markup
 - **Category**: tech-debt
-- **Planned at**: no VCS at authoring time — `app.py` md5 `2d17cee45698fa4f062cd9b4114e20d0`, 2026-08-10
+- **Planned at**: 2026-08-10. **Refreshed 2026-08-11** against `33149ab`; `app.py` md5 `aaab44f7ca28bbe9a4bd131b6b9036b3`, 2986 lines. Plans 004–008 and 011 landed in between and shifted the template down by ~439 lines. Re-verified that the no-Jinja premise still holds: `{{`, `{%` and `{#` all count **0** inside the template.
 
 ## Why this matters
 
-1,493 of `app.py`'s 2,531 lines — **59% of the file** — are a single Python string literal holding the entire frontend: HTML, ~490 lines of CSS, and ~770 lines of JavaScript.
+1,493 of `app.py`'s 2,986 lines — **50% of the file** — are a single Python string literal holding the entire frontend: HTML, ~493 lines of CSS, and ~771 lines of JavaScript.
 
 The concrete cost: no syntax highlighting, no HTML/CSS/JS linting, no formatter, no language server, no browser-devtools "edit and save back to source". The editor sees one enormous string. Frontend CSS and `SourceManager` business logic share the same merge surface. Quotes inside the template are permanently constrained by the `'''` delimiter.
 
@@ -40,21 +46,30 @@ Plan 010 adds a login modal to this markup. Doing that in a real `.html` file ra
 
 **The template boundaries**, verified:
 
-- Line 721: `HTML_TEMPLATE = '''`
-- Line 722: `<!DOCTYPE html>` — first line of content
-- Line 2214: `</html>` — last line of content
-- Line 2215: `'''` — closing delimiter
+- Line **1160**: `HTML_TEMPLATE = '''`
+- Line **1161**: `<!DOCTYPE html>` — first line of content
+- Line **2653**: `</html>` — last line of content
+- Line **2654**: `'''` — closing delimiter
 
-**Content to move: lines 722–2214 inclusive (1,493 lines).**
+**Content to move: lines 1161–2653 inclusive (1,493 lines).**
 
-Internal structure:
+Internal structure, re-verified:
 
 | Region | Lines | Size |
 |---|---|---|
-| `<style>` … `</style>` | 727–1220 | ~494 |
-| `<body>` | 1222– | |
-| `<script>` … `</script>` | 1441–2212 | ~772 |
-| `</body>` `</html>` | 2213–2214 | 2 |
+| `<style>` … `</style>` | 1166–1659 | ~494 |
+| `<script>` … `</script>` | 1880–2651 | ~772 |
+| `</body>` `</html>` | 2652–2653 | 2 |
+
+`render_template_string(HTML_TEMPLATE)` is at **`app.py:2659`**, inside `index()`. The `flask` import line is `app.py:1` and currently reads:
+
+```python
+from flask import Flask, render_template_string, request, jsonify, send_file, redirect
+```
+
+`redirect` was added by Plan 011 — keep it. Swap `render_template_string` for `render_template`.
+
+The `GET /` test that guards this move asserts the marker `qrImage` (`tests/test_routes.py:258`), which lives at `app.py:1834` inside the template. That marker must survive the move.
 
 `app.py:719-726` as it exists:
 
@@ -106,6 +121,21 @@ COPY app.py .
 Flask's default template folder is `templates/` relative to the application root, so no `template_folder` configuration is needed — just the directory and the `COPY`.
 
 **Repo conventions**: none for frontend (there is no frontend tooling). Preserve the existing markup exactly — indentation, formatting, everything. This plan moves bytes; it does not improve them.
+
+## Worktree caveat
+
+You run in a git worktree; `data/` and `.env` are gitignored and absent, so `docker compose` cannot start. **Do not run it, and do not fabricate a `.env`.** Add the `COPY templates/ ./templates/` line to the `Dockerfile` anyway — forgetting it is the single most likely way this plan breaks production, and it is invisible until the container runs. Verify it by *building the image* (`docker build -t feather-009-check .`) and running a one-off container that fetches `/`, which needs neither `data/` nor `.env`:
+
+```
+docker build -q -t feather-009-check .
+CID=$(docker run -d --rm -p 7097:5000 -e DATA_DIR=/tmp/fd feather-009-check)
+sleep 7
+curl -so /dev/null -w '%{http_code}\n' http://localhost:7097/       # expect 200, NOT 500
+curl -s http://localhost:7097/ | grep -c qrImage                     # expect >= 1
+docker stop $CID
+```
+
+A `TemplateNotFound` here means the `COPY` is missing or wrong. That is precisely the failure this check exists to catch, so **do run it** — it is the one Docker step that is possible without `data/`.
 
 ## Commands you will need
 
