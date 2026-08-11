@@ -1,0 +1,109 @@
+name: Build and publish image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is what the container ships (Dockerfile: python:3.11-slim).
+        # 3.14 is the development host. Every pin in requirements.txt has to
+        # install on both — that constraint is what stalled plan 004, so it is
+        # enforced here rather than rediscovered by hand.
+        python-version: ['3.11', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run test suite
+        run: python -m pytest tests/ -q
+
+  build:
+    name: Build and push
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Pull requests build to verify the Dockerfile still works, but must not
+      # publish — a PR from a fork would otherwise push to the registry.
+      - name: Log in to ${{ env.REGISTRY }}
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The image is only useful if it actually boots. DATA_DIR points at a
+      # throwaway path so this never expects a real catalog to be present.
+      - name: Smoke-test the built image
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          IMAGE="$(echo '${{ steps.meta.outputs.tags }}' | head -n1)"
+          docker run -d --rm --name feather-smoke -p 5000:5000 \
+            -e DATA_DIR=/tmp/feather-data "$IMAGE"
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://localhost:5000/source.json; then break; fi
+            sleep 1
+          done
+          curl -fsS -o /dev/null -w 'source.json  %{http_code} %{content_type}\n' \
+            http://localhost:5000/source.json
+          curl -fsS -o /dev/null -w 'qr           %{http_code} %{content_type}\n' \
+            http://localhost:5000/qr
+          curl -fsS -o /dev/null -w 'index        %{http_code}\n' \
+            http://localhost:5000/
+          docker logs feather-smoke
+          docker stop feather-smoke
