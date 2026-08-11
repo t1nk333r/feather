@@ -69,11 +69,12 @@ class SourceManager:
         logging.info("Data directories verified")
     
     def get_ipa_path(self, bundle_id, version):
-        """Get the file path for an IPA file"""
-        # Create subdirectory for bundle ID
+        """Get the file path for an IPA file.
+
+        Read-only: does not create the bundle subdirectory. Callers that
+        write to this path are responsible for creating it first.
+        """
         bundle_folder = os.path.join(IPA_FOLDER, secure_filename(bundle_id))
-        os.makedirs(bundle_folder, exist_ok=True)
-        # Use version in filename
         filename = f"{secure_filename(version)}.ipa"
         return os.path.join(bundle_folder, filename)
     
@@ -87,6 +88,7 @@ class SourceManager:
         filepath = None
         try:
             filepath = dest_path or self.get_ipa_path(bundle_id, version)
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
             file.save(filepath)
             file_size = get_file_size(filepath)
             logging.info(f"Saved IPA file: {filepath} ({file_size} bytes)")
@@ -113,6 +115,7 @@ class SourceManager:
             response.raise_for_status()
 
             filepath = dest_path or self.get_ipa_path(bundle_id, version)
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
             total = 0
             limit = app.config.get("MAX_CONTENT_LENGTH") or (2 * 1024 * 1024 * 1024)
             with open(filepath, 'wb') as f:
@@ -167,9 +170,14 @@ class SourceManager:
         return path
     
     def get_icon_path(self, bundle_id):
-        """Get the file path for an icon file"""
+        """Get the file path for an icon file.
+
+        Read-only: does not create the bundle subdirectory (see
+        get_ipa_path's docstring for why). Not currently called by
+        save_icon_file/download_icon_from_url, which construct their own
+        paths and already create their own directories.
+        """
         bundle_folder = os.path.join(ICON_FOLDER, secure_filename(bundle_id))
-        os.makedirs(bundle_folder, exist_ok=True)
         # Try to find existing icon or use default name
         return os.path.join(bundle_folder, "icon.png")
     
@@ -572,11 +580,12 @@ class SourceManager:
         ]
         
         if len(source_data['apps']) < initial_count:
-            # Delete all IPA files for this app
+            # Delete all IPA files and the icon for this app
             if app_to_delete:
                 for version in app_to_delete.get('versions', []):
                     self.delete_ipa_file(bundle_identifier, version.get('version', ''))
-            
+                self.delete_icon_file(bundle_identifier)
+
             success = self.save_source(source_data)
             return success, "App deleted successfully" if success else "Failed to save source after deletion"
         else:

@@ -584,3 +584,35 @@ def test_download_over_size_limit_is_rejected(client, tmp_path, large_ipa_server
     # No partial file left behind.
     bundle_dir = tmp_path / "ipas" / "com.test.toobig"
     assert not bundle_dir.exists() or list(bundle_dir.iterdir()) == []
+
+
+def test_delete_app_removes_icon(client, tmp_path):
+    """delete_icon_file was defined but never called from delete_app, so
+    every deleted app left its icon directory behind forever. delete_app
+    must now also remove the icon.
+    """
+    icon_dir = tmp_path / "icons" / "com.example.app"
+    icon_dir.mkdir(parents=True)
+    (icon_dir / "icon.png").write_bytes(b"\x89PNG\r\n\x1a\nfakeicon")
+
+    resp = client.post("/api/delete-app", json={"bundleIdentifier": "com.example.app"})
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["success"] is True
+
+    assert not icon_dir.exists()
+
+
+def test_get_ipa_path_does_not_create_directories(client, tmp_path):
+    """get_ipa_path is a read-only path computation and must not create
+    the bundle subdirectory as a side effect -- that left empty
+    directories under data/ipas/ for bundle ids that were only ever
+    looked up, never written.
+    """
+    source_manager = client.app_module.source_manager
+    bundle_folder = tmp_path / "ipas" / "com.example.novel"
+
+    path = source_manager.get_ipa_path("com.example.novel", "1.0.0")
+
+    assert not bundle_folder.exists()
+    assert not os.path.exists(os.path.dirname(path))
