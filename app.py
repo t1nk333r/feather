@@ -7,6 +7,7 @@ import io
 import requests
 import tempfile
 import hashlib
+import threading
 from datetime import datetime
 from werkzeug.utils import secure_filename
 from altparse import AltSourceManager, Parser, AltSource
@@ -22,6 +23,7 @@ SOURCE_FILE = os.path.join(DATA_DIR, "source.json")
 UPLOAD_FOLDER = os.path.join(DATA_DIR, "uploads")
 IPA_FOLDER = os.path.join(DATA_DIR, "ipas")
 ICON_FOLDER = os.path.join(DATA_DIR, "icons")
+BACKUP_FOLDER = os.path.join(DATA_DIR, "backups")
 ALLOWED_EXTENSIONS = {'ipa'}
 ALLOWED_ICON_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp', 'gif'}
 
@@ -64,15 +66,23 @@ class SourceManager:
     
     def __init__(self, source_file):
         self.source_file = source_file
+        # NOTE: this in-process lock only serializes writes within a single
+        # Python process. app.run() runs one process (threaded=True), so
+        # this holds today. If this app is ever served by gunicorn with
+        # -w > 1 (or any multi-process WSGI setup), this lock silently stops
+        # protecting anything -- it would need to become a cross-process
+        # file lock instead.
+        self._lock = threading.Lock()
         self.ensure_data_directory()
         self.initialize_source()
-    
+
     def ensure_data_directory(self):
         """Ensure data and upload directories exist"""
         os.makedirs(DATA_DIR, exist_ok=True)
         os.makedirs(UPLOAD_FOLDER, exist_ok=True)
         os.makedirs(IPA_FOLDER, exist_ok=True)
         os.makedirs(ICON_FOLDER, exist_ok=True)
+        os.makedirs(BACKUP_FOLDER, exist_ok=True)
         logging.info("Data directories verified")
     
     def get_ipa_path(self, bundle_id, version):
@@ -305,14 +315,74 @@ class SourceManager:
             logging.error(f"Error loading source: {str(e)}")
             return None
     
-    def save_source(self, source_data):
-        """Save source data to JSON file"""
+    def _backup_source(self):
+        """Copy the current source.json into data/backups/ before it is
+        replaced, then prune old backups down to the most recent 20.
+
+        Best-effort only: a failure here is logged and swallowed. A failed
+        backup is a nuisance; letting a backup failure block save_source
+        (and therefore the live catalog write) would turn a nuisance into
+        data loss.
+
+        Filenames use a UTC timestamp plus an incrementing counter suffix
+        (".001", ".002", ...) so that multiple backups taken within the
+        same second -- which the plain one-second-resolution timestamp
+        alone would collide on -- still get distinct filenames.
+        """
+        if not os.path.exists(self.source_file):
+            return
         try:
-            with open(self.source_file, 'w') as f:
+            os.makedirs(BACKUP_FOLDER, exist_ok=True)
+            timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+            counter = 0
+            while True:
+                suffix = f".{counter:03d}" if counter else ""
+                backup_path = os.path.join(BACKUP_FOLDER, f"source-{timestamp}{suffix}.json")
+                if not os.path.exists(backup_path):
+                    break
+                counter += 1
+            with open(self.source_file, 'rb') as src, open(backup_path, 'wb') as dst:
+                dst.write(src.read())
+
+            # Prune to the most recent 20 backups.
+            backups = sorted(
+                (f for f in os.listdir(BACKUP_FOLDER) if f.startswith("source-") and f.endswith(".json")),
+                reverse=True
+            )
+            for stale in backups[20:]:
+                try:
+                    os.remove(os.path.join(BACKUP_FOLDER, stale))
+                except OSError as e:
+                    logging.warning(f"Could not remove stale backup {stale}: {e}")
+        except Exception as e:
+            logging.error(f"Error backing up source: {str(e)}")
+
+    def save_source(self, source_data):
+        """Save source data to JSON file atomically.
+
+        Writes to a temp file in the same directory then atomically renames
+        it into position, so a crash mid-write can never truncate the live
+        catalog. A timestamped copy of the previous catalog is kept in
+        data/backups/.
+        """
+        tmp_path = None
+        try:
+            self._backup_source()
+            directory = os.path.dirname(self.source_file) or "."
+            fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".source-", suffix=".json.tmp")
+            with os.fdopen(fd, 'w') as f:
                 json.dump(source_data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.source_file)
             return True
         except Exception as e:
             logging.error(f"Error saving source: {str(e)}")
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
             return False
     
     def get_current_dates(self):
@@ -325,281 +395,285 @@ class SourceManager:
     
     def add_app_manual(self, data, ipa_file=None, download_from_url=False, icon_file=None, download_icon_from_url=False, base_url=None):
         """Add app manually with provided data"""
-        source_data = self.load_source()
-        if not source_data:
-            return False, "Failed to load source data"
+        with self._lock:
+            source_data = self.load_source()
+            if not source_data:
+                return False, "Failed to load source data"
         
-        dates = self.get_current_dates()
-        bundle_id = data['bundleIdentifier']
-        version = data['version']
-        download_url = data.get('downloadURL', '')
-        icon_url = data.get('iconURL', '')
+            dates = self.get_current_dates()
+            bundle_id = data['bundleIdentifier']
+            version = data['version']
+            download_url = data.get('downloadURL', '')
+            icon_url = data.get('iconURL', '')
         
-        # Handle IPA file - upload, download, or use URL
-        file_size = 0
-        if ipa_file and allowed_file(ipa_file.filename):
-            # Upload file
-            filepath, file_size = self.save_ipa_file(ipa_file, bundle_id, version)
-            if filepath:
-                download_url = self.get_local_ipa_url(bundle_id, version, base_url)
-            else:
-                return False, f"Failed to save uploaded IPA for {bundle_id} {version}"
-        elif download_from_url and download_url:
-            # Download from URL
-            filepath, file_size = self.download_ipa_from_url(download_url, bundle_id, version)
-            if filepath:
-                download_url = self.get_local_ipa_url(bundle_id, version, base_url)
-            else:
-                return False, f"Failed to download IPA from {download_url}"
-
-        if file_size is None:
-            # get_file_size could not stat the file even though the save/
-            # download itself reported success. Record 0 rather than
-            # publishing `null` into source.json -- clients expect an int.
+            # Handle IPA file - upload, download, or use URL
             file_size = 0
+            if ipa_file and allowed_file(ipa_file.filename):
+                # Upload file
+                filepath, file_size = self.save_ipa_file(ipa_file, bundle_id, version)
+                if filepath:
+                    download_url = self.get_local_ipa_url(bundle_id, version, base_url)
+                else:
+                    return False, f"Failed to save uploaded IPA for {bundle_id} {version}"
+            elif download_from_url and download_url:
+                # Download from URL
+                filepath, file_size = self.download_ipa_from_url(download_url, bundle_id, version)
+                if filepath:
+                    download_url = self.get_local_ipa_url(bundle_id, version, base_url)
+                else:
+                    return False, f"Failed to download IPA from {download_url}"
 
-        # Handle icon file - upload, download, or use URL
-        if icon_file and allowed_icon_file(icon_file.filename):
-            # Upload icon file
-            filepath = self.save_icon_file(icon_file, bundle_id)
-            if filepath:
-                icon_url = self.get_local_icon_url(bundle_id, base_url)
-            else:
-                return False, f"Failed to save uploaded icon for {bundle_id}"
-        elif download_icon_from_url and icon_url:
-            # Download icon from URL
-            filepath = self.download_icon_from_url(icon_url, bundle_id)
-            if filepath:
-                icon_url = self.get_local_icon_url(bundle_id, base_url)
-            else:
-                return False, f"Failed to download icon from {icon_url}"
+            if file_size is None:
+                # get_file_size could not stat the file even though the save/
+                # download itself reported success. Record 0 rather than
+                # publishing `null` into source.json -- clients expect an int.
+                file_size = 0
 
-        new_app = {
-            "name": data['name'],
-            "bundleIdentifier": bundle_id,
-            "developerName": data['developerName'],
-            "localizedDescription": data.get('localizedDescription', ''),
-            "iconURL": icon_url,
-            "addedDate": dates['feather_date'],
-            "versions": [{
-                "version": version,
-                "date": dates['version_date'],
-                "downloadURL": download_url,
-                "minOSVersion": data.get('minOSVersion', '14.0'),
-                "size": file_size
-            }]
-        }
+            # Handle icon file - upload, download, or use URL
+            if icon_file and allowed_icon_file(icon_file.filename):
+                # Upload icon file
+                filepath = self.save_icon_file(icon_file, bundle_id)
+                if filepath:
+                    icon_url = self.get_local_icon_url(bundle_id, base_url)
+                else:
+                    return False, f"Failed to save uploaded icon for {bundle_id}"
+            elif download_icon_from_url and icon_url:
+                # Download icon from URL
+                filepath = self.download_icon_from_url(icon_url, bundle_id)
+                if filepath:
+                    icon_url = self.get_local_icon_url(bundle_id, base_url)
+                else:
+                    return False, f"Failed to download icon from {icon_url}"
+
+            new_app = {
+                "name": data['name'],
+                "bundleIdentifier": bundle_id,
+                "developerName": data['developerName'],
+                "localizedDescription": data.get('localizedDescription', ''),
+                "iconURL": icon_url,
+                "addedDate": dates['feather_date'],
+                "versions": [{
+                    "version": version,
+                    "date": dates['version_date'],
+                    "downloadURL": download_url,
+                    "minOSVersion": data.get('minOSVersion', '14.0'),
+                    "size": file_size
+                }]
+            }
         
-        # Check if app already exists
-        existing_index = None
-        for i, app in enumerate(source_data['apps']):
-            if app['bundleIdentifier'] == bundle_id:
-                existing_index = i
-                break
+            # Check if app already exists
+            existing_index = None
+            for i, app in enumerate(source_data['apps']):
+                if app['bundleIdentifier'] == bundle_id:
+                    existing_index = i
+                    break
         
-        if existing_index is not None:
-            # Update existing app with new version
-            source_data['apps'][existing_index]['versions'].insert(0, new_app['versions'][0])
-            source_data['apps'][existing_index]['addedDate'] = dates['feather_date']
-            logging.info(f"Updated app: {data['name']}")
-        else:
-            # Add new app
-            source_data['apps'].append(new_app)
-            logging.info(f"Added new app: {data['name']}")
+            if existing_index is not None:
+                # Update existing app with new version
+                source_data['apps'][existing_index]['versions'].insert(0, new_app['versions'][0])
+                source_data['apps'][existing_index]['addedDate'] = dates['feather_date']
+                logging.info(f"Updated app: {data['name']}")
+            else:
+                # Add new app
+                source_data['apps'].append(new_app)
+                logging.info(f"Added new app: {data['name']}")
         
-        if self.save_source(source_data):
-            return True, "App added successfully"
-        return False, "Failed to save source data"
+            if self.save_source(source_data):
+                return True, "App added successfully"
+            return False, "Failed to save source data"
 
     def add_app_from_github(self, data):
         """Add app from GitHub repository"""
-        source_data = self.load_source()
-        if not source_data:
-            return False, "Failed to load source data"
+        with self._lock:
+            source_data = self.load_source()
+            if not source_data:
+                return False, "Failed to load source data"
         
-        try:
-            src = AltSource(**source_data)
-            sources_data = [{
-                "parser": Parser.GITHUB,
-                "kwargs": {
-                    "repo_author": data['repo_author'],
-                    "repo_name": data['repo_name']
-                },
-                "ids": [data.get('app_id', '')]
-            }]
+            try:
+                src = AltSource(**source_data)
+                sources_data = [{
+                    "parser": Parser.GITHUB,
+                    "kwargs": {
+                        "repo_author": data['repo_author'],
+                        "repo_name": data['repo_name']
+                    },
+                    "ids": [data.get('app_id', '')]
+                }]
             
-            srcmgr = AltSourceManager(src, sources_data)
-            srcmgr.update()
-            srcmgr.update_hashes()
+                srcmgr = AltSourceManager(src, sources_data)
+                srcmgr.update()
+                srcmgr.update_hashes()
             
-            # Convert back to dictionary and add dates
-            dates = self.get_current_dates()
-            updated_source = srcmgr.source.to_dict()
+                # Convert back to dictionary and add dates
+                dates = self.get_current_dates()
+                updated_source = srcmgr.source.to_dict()
             
-            # Add dates to imported apps
-            for app in updated_source['apps']:
-                if 'addedDate' not in app or not app['addedDate']:
-                    app['addedDate'] = dates['feather_date']
-                # Ensure version dates are also in correct format
-                for version in app.get('versions', []):
-                    if 'date' in version and version['date']:
-                        try:
-                            # Try to parse and reformat existing date
-                            parsed_date = datetime.fromisoformat(version['date'].replace('Z', '+00:00'))
-                            version['date'] = parsed_date.strftime("%Y-%m-%dT%H:%M:%SZ")
-                        except (ValueError, TypeError) as e:
-                            # If parsing fails, use current date -- this
-                            # reorders versions for clients that sort by
-                            # date, so make the fallback visible.
-                            logging.warning(f"Could not parse date '{version['date']}' for version {version.get('version')}: {e}; using current date")
+                # Add dates to imported apps
+                for app in updated_source['apps']:
+                    if 'addedDate' not in app or not app['addedDate']:
+                        app['addedDate'] = dates['feather_date']
+                    # Ensure version dates are also in correct format
+                    for version in app.get('versions', []):
+                        if 'date' in version and version['date']:
+                            try:
+                                # Try to parse and reformat existing date
+                                parsed_date = datetime.fromisoformat(version['date'].replace('Z', '+00:00'))
+                                version['date'] = parsed_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+                            except (ValueError, TypeError) as e:
+                                # If parsing fails, use current date -- this
+                                # reorders versions for clients that sort by
+                                # date, so make the fallback visible.
+                                logging.warning(f"Could not parse date '{version['date']}' for version {version.get('version')}: {e}; using current date")
+                                version['date'] = dates['version_date']
+                        else:
                             version['date'] = dates['version_date']
-                    else:
-                        version['date'] = dates['version_date']
             
-            return self.save_source(updated_source), "Apps imported from GitHub successfully"
+                return self.save_source(updated_source), "Apps imported from GitHub successfully"
             
-        except Exception as e:
-            logging.error(f"GitHub import error: {str(e)}")
-            return False, f"GitHub import failed: {str(e)}"
+            except Exception as e:
+                logging.error(f"GitHub import error: {str(e)}")
+                return False, f"GitHub import failed: {str(e)}"
     
     def add_app_from_altsource(self, data):
         """Add app from another AltSource"""
-        source_data = self.load_source()
-        if not source_data:
-            return False, "Failed to load source data"
+        with self._lock:
+            source_data = self.load_source()
+            if not source_data:
+                return False, "Failed to load source data"
         
-        source_url = data.get('source_url', '').strip()
-        if not source_url:
-            return False, "Source URL is required"
+            source_url = data.get('source_url', '').strip()
+            if not source_url:
+                return False, "Source URL is required"
         
-        try:
-            # Download the AltSource JSON from URL
-            logging.info(f"Downloading AltSource from: {source_url}")
-            response = requests.get(source_url, timeout=30)
-            response.raise_for_status()
+            try:
+                # Download the AltSource JSON from URL
+                logging.info(f"Downloading AltSource from: {source_url}")
+                response = requests.get(source_url, timeout=30)
+                response.raise_for_status()
             
-            # Parse the downloaded JSON
-            remote_source = response.json()
+                # Parse the downloaded JSON
+                remote_source = response.json()
             
-            # Get app IDs to import
-            app_ids = [id.strip() for id in data.get('app_ids', '').split(',') if id.strip()]
+                # Get app IDs to import
+                app_ids = [id.strip() for id in data.get('app_ids', '').split(',') if id.strip()]
             
-            if not app_ids:
-                return False, "At least one app bundle ID is required"
+                if not app_ids:
+                    return False, "At least one app bundle ID is required"
             
-            # Find matching apps from the remote source
-            apps_to_import = []
-            for app in remote_source.get('apps', []):
-                if app.get('bundleIdentifier') in app_ids:
-                    apps_to_import.append(app)
+                # Find matching apps from the remote source
+                apps_to_import = []
+                for app in remote_source.get('apps', []):
+                    if app.get('bundleIdentifier') in app_ids:
+                        apps_to_import.append(app)
             
-            if not apps_to_import:
-                return False, f"No apps found with bundle IDs: {', '.join(app_ids)}"
+                if not apps_to_import:
+                    return False, f"No apps found with bundle IDs: {', '.join(app_ids)}"
             
-            # Merge apps into current source
-            dates = self.get_current_dates()
-            existing_bundle_ids = {app['bundleIdentifier'] for app in source_data.get('apps', [])}
+                # Merge apps into current source
+                dates = self.get_current_dates()
+                existing_bundle_ids = {app['bundleIdentifier'] for app in source_data.get('apps', [])}
             
-            for app in apps_to_import:
-                bundle_id = app.get('bundleIdentifier')
+                for app in apps_to_import:
+                    bundle_id = app.get('bundleIdentifier')
                 
-                # Convert versionDate to date format if needed
-                if 'versionDate' in app and 'versions' in app and app['versions']:
-                    if 'date' not in app['versions'][0]:
-                        app['versions'][0]['date'] = app.get('versionDate', dates['version_date'])
+                    # Convert versionDate to date format if needed
+                    if 'versionDate' in app and 'versions' in app and app['versions']:
+                        if 'date' not in app['versions'][0]:
+                            app['versions'][0]['date'] = app.get('versionDate', dates['version_date'])
                 
-                # Ensure all versions have proper date format
-                for version in app.get('versions', []):
-                    if 'date' in version and version['date']:
-                        try:
-                            # Try to parse and reformat existing date
-                            date_str = version['date']
-                            if isinstance(date_str, str):
-                                # Handle different date formats
-                                if 'T' in date_str:
-                                    parsed_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-                                    version['date'] = parsed_date.strftime("%Y-%m-%dT%H:%M:%SZ")
-                                else:
-                                    # If it's just a date, add time
-                                    parsed_date = datetime.fromisoformat(date_str)
-                                    version['date'] = parsed_date.strftime("%Y-%m-%dT%H:%M:%SZ")
-                        except Exception as e:
-                            logging.warning(f"Date parsing error for version {version.get('version')}: {e}")
+                    # Ensure all versions have proper date format
+                    for version in app.get('versions', []):
+                        if 'date' in version and version['date']:
+                            try:
+                                # Try to parse and reformat existing date
+                                date_str = version['date']
+                                if isinstance(date_str, str):
+                                    # Handle different date formats
+                                    if 'T' in date_str:
+                                        parsed_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                                        version['date'] = parsed_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+                                    else:
+                                        # If it's just a date, add time
+                                        parsed_date = datetime.fromisoformat(date_str)
+                                        version['date'] = parsed_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+                            except Exception as e:
+                                logging.warning(f"Date parsing error for version {version.get('version')}: {e}")
+                                version['date'] = dates['version_date']
+                        else:
                             version['date'] = dates['version_date']
-                    else:
-                        version['date'] = dates['version_date']
                 
-                # Add or update app
-                if bundle_id in existing_bundle_ids:
-                    # Update existing app - replace it
-                    for i, existing_app in enumerate(source_data['apps']):
-                        if existing_app['bundleIdentifier'] == bundle_id:
-                            # Merge versions - add new versions to the beginning
-                            existing_versions = existing_app.get('versions', [])
-                            new_versions = app.get('versions', [])
-                            # Combine and deduplicate by version number
-                            version_map = {v['version']: v for v in existing_versions}
-                            for new_version in new_versions:
-                                version_map[new_version['version']] = new_version
-                            app['versions'] = list(version_map.values())
-                            # Sort by date descending (newest first)
-                            app['versions'].sort(key=lambda x: x.get('date', ''), reverse=True)
-                            source_data['apps'][i] = app
-                            app['addedDate'] = dates['feather_date']
-                            logging.info(f"Updated app: {app.get('name', bundle_id)}")
-                            break
+                    # Add or update app
+                    if bundle_id in existing_bundle_ids:
+                        # Update existing app - replace it
+                        for i, existing_app in enumerate(source_data['apps']):
+                            if existing_app['bundleIdentifier'] == bundle_id:
+                                # Merge versions - add new versions to the beginning
+                                existing_versions = existing_app.get('versions', [])
+                                new_versions = app.get('versions', [])
+                                # Combine and deduplicate by version number
+                                version_map = {v['version']: v for v in existing_versions}
+                                for new_version in new_versions:
+                                    version_map[new_version['version']] = new_version
+                                app['versions'] = list(version_map.values())
+                                # Sort by date descending (newest first)
+                                app['versions'].sort(key=lambda x: x.get('date', ''), reverse=True)
+                                source_data['apps'][i] = app
+                                app['addedDate'] = dates['feather_date']
+                                logging.info(f"Updated app: {app.get('name', bundle_id)}")
+                                break
+                    else:
+                        # Add new app
+                        app['addedDate'] = dates['feather_date']
+                        source_data['apps'].append(app)
+                        logging.info(f"Added new app: {app.get('name', bundle_id)}")
+            
+                success = self.save_source(source_data)
+                if success:
+                    return True, f"Successfully imported {len(apps_to_import)} app(s) from AltSource"
                 else:
-                    # Add new app
-                    app['addedDate'] = dates['feather_date']
-                    source_data['apps'].append(app)
-                    logging.info(f"Added new app: {app.get('name', bundle_id)}")
+                    return False, "Failed to save source after import"
             
-            success = self.save_source(source_data)
-            if success:
-                return True, f"Successfully imported {len(apps_to_import)} app(s) from AltSource"
-            else:
-                return False, "Failed to save source after import"
-            
-        except requests.RequestException as e:
-            logging.error(f"AltSource download error: {str(e)}")
-            return False, f"Failed to download AltSource: {str(e)}"
-        except json.JSONDecodeError as e:
-            logging.error(f"AltSource JSON parse error: {str(e)}")
-            return False, f"Invalid JSON in AltSource: {str(e)}"
-        except Exception as e:
-            logging.error(f"AltSource import error: {str(e)}")
-            return False, f"AltSource import failed: {str(e)}"
+            except requests.RequestException as e:
+                logging.error(f"AltSource download error: {str(e)}")
+                return False, f"Failed to download AltSource: {str(e)}"
+            except json.JSONDecodeError as e:
+                logging.error(f"AltSource JSON parse error: {str(e)}")
+                return False, f"Invalid JSON in AltSource: {str(e)}"
+            except Exception as e:
+                logging.error(f"AltSource import error: {str(e)}")
+                return False, f"AltSource import failed: {str(e)}"
     
     def delete_app(self, bundle_identifier):
         """Delete app by bundle identifier"""
-        source_data = self.load_source()
-        if not source_data:
-            return False, "Failed to load source data"
+        with self._lock:
+            source_data = self.load_source()
+            if not source_data:
+                return False, "Failed to load source data"
         
-        # Find app to delete IPA files
-        app_to_delete = None
-        for app in source_data['apps']:
-            if app['bundleIdentifier'] == bundle_identifier:
-                app_to_delete = app
-                break
+            # Find app to delete IPA files
+            app_to_delete = None
+            for app in source_data['apps']:
+                if app['bundleIdentifier'] == bundle_identifier:
+                    app_to_delete = app
+                    break
         
-        initial_count = len(source_data['apps'])
-        source_data['apps'] = [
-            app for app in source_data['apps'] 
-            if app['bundleIdentifier'] != bundle_identifier
-        ]
+            initial_count = len(source_data['apps'])
+            source_data['apps'] = [
+                app for app in source_data['apps'] 
+                if app['bundleIdentifier'] != bundle_identifier
+            ]
         
-        if len(source_data['apps']) < initial_count:
-            # Delete all IPA files and the icon for this app
-            if app_to_delete:
-                for version in app_to_delete.get('versions', []):
-                    self.delete_ipa_file(bundle_identifier, version.get('version', ''))
-                self.delete_icon_file(bundle_identifier)
+            if len(source_data['apps']) < initial_count:
+                # Delete all IPA files and the icon for this app
+                if app_to_delete:
+                    for version in app_to_delete.get('versions', []):
+                        self.delete_ipa_file(bundle_identifier, version.get('version', ''))
+                    self.delete_icon_file(bundle_identifier)
 
-            success = self.save_source(source_data)
-            return success, "App deleted successfully" if success else "Failed to save source after deletion"
-        else:
-            return False, "App not found"
+                success = self.save_source(source_data)
+                return success, "App deleted successfully" if success else "Failed to save source after deletion"
+            else:
+                return False, "App not found"
     
     def get_app(self, bundle_identifier):
         """Get app by bundle identifier"""
@@ -614,214 +688,218 @@ class SourceManager:
     
     def update_app(self, bundle_identifier, data, icon_file=None, download_icon_from_url=False, base_url=None):
         """Update app details"""
-        source_data = self.load_source()
-        if not source_data:
-            return False, "Failed to load source data"
+        with self._lock:
+            source_data = self.load_source()
+            if not source_data:
+                return False, "Failed to load source data"
         
-        app_index = None
-        for i, app in enumerate(source_data['apps']):
-            if app['bundleIdentifier'] == bundle_identifier:
-                app_index = i
-                break
+            app_index = None
+            for i, app in enumerate(source_data['apps']):
+                if app['bundleIdentifier'] == bundle_identifier:
+                    app_index = i
+                    break
         
-        if app_index is None:
-            return False, "App not found"
+            if app_index is None:
+                return False, "App not found"
         
-        # Update app fields
-        app = source_data['apps'][app_index]
-        updatable_fields = ['name', 'developerName', 'localizedDescription']
-        for field in updatable_fields:
-            if field in data and data[field] is not None:
-                app[field] = data[field]
+            # Update app fields
+            app = source_data['apps'][app_index]
+            updatable_fields = ['name', 'developerName', 'localizedDescription']
+            for field in updatable_fields:
+                if field in data and data[field] is not None:
+                    app[field] = data[field]
         
-        # Handle icon file - upload, download, or use URL
-        # Only update icon if a new one is provided
-        icon_url = data.get('iconURL', '')
-        icon_updated = False
+            # Handle icon file - upload, download, or use URL
+            # Only update icon if a new one is provided
+            icon_url = data.get('iconURL', '')
+            icon_updated = False
         
-        if icon_file and allowed_icon_file(icon_file.filename):
-            # Upload icon file
-            filepath = self.save_icon_file(icon_file, bundle_identifier)
-            if filepath:
-                icon_url = self.get_local_icon_url(bundle_identifier, base_url)
+            if icon_file and allowed_icon_file(icon_file.filename):
+                # Upload icon file
+                filepath = self.save_icon_file(icon_file, bundle_identifier)
+                if filepath:
+                    icon_url = self.get_local_icon_url(bundle_identifier, base_url)
+                    app['iconURL'] = icon_url
+                    icon_updated = True
+                else:
+                    return False, f"Failed to save uploaded icon for {bundle_identifier}"
+            elif download_icon_from_url and icon_url:
+                # Download icon from URL
+                filepath = self.download_icon_from_url(icon_url, bundle_identifier)
+                if filepath:
+                    icon_url = self.get_local_icon_url(bundle_identifier, base_url)
+                    app['iconURL'] = icon_url
+                    icon_updated = True
+                else:
+                    return False, f"Failed to download icon from {icon_url}"
+            elif icon_url and icon_url.strip():
+                # Just update URL (only if not empty)
                 app['iconURL'] = icon_url
                 icon_updated = True
-            else:
-                return False, f"Failed to save uploaded icon for {bundle_identifier}"
-        elif download_icon_from_url and icon_url:
-            # Download icon from URL
-            filepath = self.download_icon_from_url(icon_url, bundle_identifier)
-            if filepath:
-                icon_url = self.get_local_icon_url(bundle_identifier, base_url)
-                app['iconURL'] = icon_url
-                icon_updated = True
-            else:
-                return False, f"Failed to download icon from {icon_url}"
-        elif icon_url and icon_url.strip():
-            # Just update URL (only if not empty)
-            app['iconURL'] = icon_url
-            icon_updated = True
-        # If icon_updated is False, preserve existing icon (don't modify app['iconURL'])
+            # If icon_updated is False, preserve existing icon (don't modify app['iconURL'])
         
-        success = self.save_source(source_data)
-        return success, "App updated successfully" if success else "Failed to update app"
+            success = self.save_source(source_data)
+            return success, "App updated successfully" if success else "Failed to update app"
     
     def add_version(self, bundle_identifier, version_data, ipa_file=None, download_from_url=False, base_url=None):
         """Add a new version to an existing app"""
-        source_data = self.load_source()
-        if not source_data:
-            return False, "Failed to load source data"
+        with self._lock:
+            source_data = self.load_source()
+            if not source_data:
+                return False, "Failed to load source data"
         
-        app_index = None
-        for i, app in enumerate(source_data['apps']):
-            if app['bundleIdentifier'] == bundle_identifier:
-                app_index = i
-                break
+            app_index = None
+            for i, app in enumerate(source_data['apps']):
+                if app['bundleIdentifier'] == bundle_identifier:
+                    app_index = i
+                    break
         
-        if app_index is None:
-            return False, "App not found"
+            if app_index is None:
+                return False, "App not found"
         
-        dates = self.get_current_dates()
-        app = source_data['apps'][app_index]
+            dates = self.get_current_dates()
+            app = source_data['apps'][app_index]
         
-        # Ensure versions array exists
-        if 'versions' not in app:
-            app['versions'] = []
+            # Ensure versions array exists
+            if 'versions' not in app:
+                app['versions'] = []
         
-        # Get minOSVersion from provided data, or from existing version, or default
-        min_os = version_data.get('minOSVersion')
-        if not min_os and app['versions']:
-            min_os = app['versions'][0].get('minOSVersion', '14.0')
-        if not min_os:
-            min_os = '14.0'
+            # Get minOSVersion from provided data, or from existing version, or default
+            min_os = version_data.get('minOSVersion')
+            if not min_os and app['versions']:
+                min_os = app['versions'][0].get('minOSVersion', '14.0')
+            if not min_os:
+                min_os = '14.0'
         
-        version = version_data['version']
-        download_url = version_data.get('downloadURL', '')
-        file_size = version_data.get('size', 0)
+            version = version_data['version']
+            download_url = version_data.get('downloadURL', '')
+            file_size = version_data.get('size', 0)
         
-        # Handle IPA file - upload, download, or use URL
-        if ipa_file and allowed_file(ipa_file.filename):
-            # Upload file
-            filepath, file_size = self.save_ipa_file(ipa_file, bundle_identifier, version)
-            if filepath:
-                download_url = self.get_local_ipa_url(bundle_identifier, version, base_url)
-            else:
-                return False, f"Failed to save uploaded IPA for {bundle_identifier} {version}"
-        elif download_from_url and download_url:
-            # Download from URL
-            filepath, file_size = self.download_ipa_from_url(download_url, bundle_identifier, version)
-            if filepath:
-                download_url = self.get_local_ipa_url(bundle_identifier, version, base_url)
-            else:
-                return False, f"Failed to download IPA from {download_url}"
+            # Handle IPA file - upload, download, or use URL
+            if ipa_file and allowed_file(ipa_file.filename):
+                # Upload file
+                filepath, file_size = self.save_ipa_file(ipa_file, bundle_identifier, version)
+                if filepath:
+                    download_url = self.get_local_ipa_url(bundle_identifier, version, base_url)
+                else:
+                    return False, f"Failed to save uploaded IPA for {bundle_identifier} {version}"
+            elif download_from_url and download_url:
+                # Download from URL
+                filepath, file_size = self.download_ipa_from_url(download_url, bundle_identifier, version)
+                if filepath:
+                    download_url = self.get_local_ipa_url(bundle_identifier, version, base_url)
+                else:
+                    return False, f"Failed to download IPA from {download_url}"
 
-        if file_size is None:
-            # Same "unknown size" rationale as add_app_manual above.
-            file_size = 0
+            if file_size is None:
+                # Same "unknown size" rationale as add_app_manual above.
+                file_size = 0
 
-        new_version = {
-            "version": version,
-            "date": dates['version_date'],
-            "downloadURL": download_url,
-            "minOSVersion": min_os,
-            "size": file_size
-        }
+            new_version = {
+                "version": version,
+                "date": dates['version_date'],
+                "downloadURL": download_url,
+                "minOSVersion": min_os,
+                "size": file_size
+            }
         
-        # Insert at the beginning (latest version first)
-        app['versions'].insert(0, new_version)
-        app['addedDate'] = dates['feather_date']
+            # Insert at the beginning (latest version first)
+            app['versions'].insert(0, new_version)
+            app['addedDate'] = dates['feather_date']
         
-        success = self.save_source(source_data)
-        return success, "Version added successfully" if success else "Failed to add version"
+            success = self.save_source(source_data)
+            return success, "Version added successfully" if success else "Failed to add version"
     
     def update_version(self, bundle_identifier, version, version_data, ipa_file=None, download_from_url=False, base_url=None):
         """Update a specific version of an app"""
-        source_data = self.load_source()
-        if not source_data:
-            return False, "Failed to load source data"
+        with self._lock:
+            source_data = self.load_source()
+            if not source_data:
+                return False, "Failed to load source data"
         
-        app_index = None
-        for i, app in enumerate(source_data['apps']):
-            if app['bundleIdentifier'] == bundle_identifier:
-                app_index = i
-                break
+            app_index = None
+            for i, app in enumerate(source_data['apps']):
+                if app['bundleIdentifier'] == bundle_identifier:
+                    app_index = i
+                    break
         
-        if app_index is None:
-            return False, "App not found"
+            if app_index is None:
+                return False, "App not found"
         
-        app = source_data['apps'][app_index]
-        version_index = None
+            app = source_data['apps'][app_index]
+            version_index = None
         
-        for i, v in enumerate(app.get('versions', [])):
-            if v['version'] == version:
-                version_index = i
-                break
+            for i, v in enumerate(app.get('versions', [])):
+                if v['version'] == version:
+                    version_index = i
+                    break
         
-        if version_index is None:
-            return False, "Version not found"
+            if version_index is None:
+                return False, "Version not found"
         
-        # Update version fields
-        version_obj = app['versions'][version_index]
+            # Update version fields
+            version_obj = app['versions'][version_index]
         
-        # Handle IPA file update - upload, download, or use URL.
-        #
-        # Fetch the replacement to a temporary path first, and only ever
-        # touch the original file via an atomic os.replace() once that
-        # fetch has fully succeeded. A failed fetch must never destroy a
-        # binary that is still being served -- deleting the original
-        # before the replacement was confirmed was the old (and
-        # dangerous) behaviour.
-        if ipa_file and allowed_file(ipa_file.filename):
-            final_path = self.get_ipa_path(bundle_identifier, version)
-            tmp_path = final_path + ".new"
-            filepath, file_size = self.save_ipa_file(ipa_file, bundle_identifier, version, dest_path=tmp_path)
-            if filepath:
-                os.replace(filepath, final_path)
-                if file_size is None:
-                    # Same "unknown size" rationale as add_app_manual above.
-                    file_size = 0
-                version_obj['downloadURL'] = self.get_local_ipa_url(bundle_identifier, version, base_url)
-                version_obj['size'] = file_size
+            # Handle IPA file update - upload, download, or use URL.
+            #
+            # Fetch the replacement to a temporary path first, and only ever
+            # touch the original file via an atomic os.replace() once that
+            # fetch has fully succeeded. A failed fetch must never destroy a
+            # binary that is still being served -- deleting the original
+            # before the replacement was confirmed was the old (and
+            # dangerous) behaviour.
+            if ipa_file and allowed_file(ipa_file.filename):
+                final_path = self.get_ipa_path(bundle_identifier, version)
+                tmp_path = final_path + ".new"
+                filepath, file_size = self.save_ipa_file(ipa_file, bundle_identifier, version, dest_path=tmp_path)
+                if filepath:
+                    os.replace(filepath, final_path)
+                    if file_size is None:
+                        # Same "unknown size" rationale as add_app_manual above.
+                        file_size = 0
+                    version_obj['downloadURL'] = self.get_local_ipa_url(bundle_identifier, version, base_url)
+                    version_obj['size'] = file_size
+                else:
+                    return False, f"Failed to save uploaded IPA for {bundle_identifier} {version}; original file untouched"
+            elif download_from_url and version_data.get('downloadURL'):
+                final_path = self.get_ipa_path(bundle_identifier, version)
+                tmp_path = final_path + ".new"
+                filepath, file_size = self.download_ipa_from_url(version_data['downloadURL'], bundle_identifier, version, dest_path=tmp_path)
+                if filepath:
+                    os.replace(filepath, final_path)
+                    if file_size is None:
+                        file_size = 0
+                    version_obj['downloadURL'] = self.get_local_ipa_url(bundle_identifier, version, base_url)
+                    version_obj['size'] = file_size
+                else:
+                    return False, f"Failed to download IPA from {version_data['downloadURL']}; original file untouched"
             else:
-                return False, f"Failed to save uploaded IPA for {bundle_identifier} {version}; original file untouched"
-        elif download_from_url and version_data.get('downloadURL'):
-            final_path = self.get_ipa_path(bundle_identifier, version)
-            tmp_path = final_path + ".new"
-            filepath, file_size = self.download_ipa_from_url(version_data['downloadURL'], bundle_identifier, version, dest_path=tmp_path)
-            if filepath:
-                os.replace(filepath, final_path)
-                if file_size is None:
-                    file_size = 0
-                version_obj['downloadURL'] = self.get_local_ipa_url(bundle_identifier, version, base_url)
-                version_obj['size'] = file_size
-            else:
-                return False, f"Failed to download IPA from {version_data['downloadURL']}; original file untouched"
-        else:
-            # Just update URL and other fields
-            updatable_fields = ['downloadURL', 'minOSVersion']
-            for field in updatable_fields:
-                if field in version_data and version_data[field] is not None:
-                    version_obj[field] = version_data[field]
+                # Just update URL and other fields
+                updatable_fields = ['downloadURL', 'minOSVersion']
+                for field in updatable_fields:
+                    if field in version_data and version_data[field] is not None:
+                        version_obj[field] = version_data[field]
             
-            # Update size if provided
-            if 'size' in version_data and version_data['size'] is not None:
-                version_obj['size'] = version_data['size']
+                # Update size if provided
+                if 'size' in version_data and version_data['size'] is not None:
+                    version_obj['size'] = version_data['size']
         
-        success = self.save_source(source_data)
-        return success, "Version updated successfully" if success else "Failed to update version"
+            success = self.save_source(source_data)
+            return success, "Version updated successfully" if success else "Failed to update version"
     
     def update_source_info(self, data):
         """Update source metadata"""
-        source_data = self.load_source()
-        if not source_data:
-            return False, "Failed to load source data"
+        with self._lock:
+            source_data = self.load_source()
+            if not source_data:
+                return False, "Failed to load source data"
         
-        for key in ['name', 'subtitle', 'description', 'website', 'tintColor']:
-            if key in data and data[key]:
-                source_data[key] = data[key]
+            for key in ['name', 'subtitle', 'description', 'website', 'tintColor']:
+                if key in data and data[key]:
+                    source_data[key] = data[key]
         
-        success = self.save_source(source_data)
-        return success, "Source information updated successfully" if success else "Failed to update source information"
+            success = self.save_source(source_data)
+            return success, "Source information updated successfully" if success else "Failed to update source information"
 
 # Initialize source manager
 source_manager = SourceManager(SOURCE_FILE)
