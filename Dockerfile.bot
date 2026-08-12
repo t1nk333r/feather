@@ -1,0 +1,17 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Only dependency: requests, already pinned in requirements.txt for the
+# main app. No python-telegram-bot / aiogram / telethon -- two HTTP
+# endpoints (getUpdates, getFile) don't need a framework.
+RUN pip install --no-cache-dir requests==2.31.0
+
+COPY scripts/telegram_bot_ingest.py .
+
+# Non-root user, matching the main Dockerfile's convention.
+RUN groupadd -r ipabot && useradd -r -g ipabot ipabot \
+    && chown -R ipabot:ipabot /app
+USER ipabot
+
+CMD ["python", "telegram_bot_ingest.py"]
