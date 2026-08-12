@@ -37,6 +37,7 @@ Three facts shape every plan here:
 | [018](018-dockerignore.md) | Add a deny-by-default `.dockerignore` | P1 | XS | LOW | — | **DONE** — `70ed756`, merged. A `COPY . .` image now contains only the four allowlisted paths; no `.env`, `data/` or `.git`. Public packages are now safe. |
 | [019](019-compose-pull-images.md) | Make `compose.yml` pull published images instead of building | P2 | XS | LOW–MED | 017, 018 | **DONE** — `50bad62`, merged. Update ritual is now `docker compose pull && docker compose up -d` (**no `--build`**). `build:` kept as the local fallback. |
 | [020](020-fix-getfile-timeout-and-silence.md) | Enable `--local`, redact tokens, surface failures | P1 | S | LOW | 013 | **DONE** — `aee7a19`, merged. Root cause: `--local` never reached the server, because that image's entrypoint ignores compose's `command:`. 78→83 tests. **Rotate the bot token** — it was logged in full. |
+| [021](021-extract-ipa-metadata.md) | Read the bundle identifier and version out of the IPA | P2 | S | LOW | 013, 020 | TODO — removes hand-typing the bundle id; the operator already mistyped one. stdlib only. |
 | [011](011-garage-s3-ipa-storage.md) | Move IPA storage to the self-hosted Garage S3 object store | P2 | M–L | MED | 005, 008 | **DONE (code)** — merged as `5a636b5`. 39→48 tests. `STORAGE_BACKEND` defaults to `local`, so nothing changed at runtime. Migration run and cutover are operator tasks — see below. |
 
 Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (with a one-line reason) | `REJECTED` (with a one-line rationale)
@@ -313,6 +314,23 @@ exec $COMMAND
 Consequence: the server ran in cloud-proxy mode, where `getFile` still enforces the 20 MB cap, so a 31 MB forward failed with `400 Bad Request`. Every option for this image must be set through `TELEGRAM_*` environment variables, and verified against the command line the container logs at startup.
 
 **Credential note**: the Bot API puts the token in the URL *path*, and `requests` echoes the URL in every exception, so `logger.exception` wrote a live token into the container log. Fixed by central redaction in Plan 020; the exposed token needs rotating via @BotFather.
+
+## Catalog bundle IDs disagree with the IPAs they ship (2026-08-12)
+
+Found while planning 021, by reading `Info.plist` out of every IPA in `data/ipas/`. **Three of eight catalogued apps declare a different bundle identifier than the binary they serve:**
+
+| Catalog says | The IPA actually declares |
+|---|---|
+| `com.instagram.theta` | **`com.burbn.instagram`** |
+| `com.instagram.ifgram` | **`com.burbn.instagram`** |
+| `com.michael-128.qBitControl` | **`MikeMichael225.qBitControl`** |
+| `com.zhiliaoapp.musically` | matches |
+| `com.google.ios.youtube` | matches |
+| `com.ryan.anymex` | matches |
+
+Versions drift too: `YT_20.49.5_KP.ipa` and `YT_20.49.5_KP_Cracked.ipa` are catalogued as `20.49.5` but both declare `CFBundleShortVersionString = 20.47.3`. **The filename lies; the plist does not.**
+
+Some of this may be deliberate — renaming a patched Instagram build lets it install beside the real one — but it should be a decision rather than an accident, because AltStore keys update-tracking on the bundle identifier. **Not fixed by any plan; this is a hand edit of `data/source.json` and an operator call.**
 
 ## Findings considered and rejected
 
