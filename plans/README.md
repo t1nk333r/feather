@@ -35,6 +35,7 @@ Three facts shape every plan here:
 | [016](016-telegram-services-opt-in.md) | Make Plan 013's Telegram services opt-in | P1 | XS | LOW | 013 | **DONE** — `b20a0a9`+`05f84c6`, merged. `docker compose up -d` now starts only `altstore-manager`; `--profile telegram` starts all three. Zero warnings. |
 | [017](017-ci-build-bot-image.md) | Build and publish the ingest-bot image in CI | P2 | S | LOW | 013, 015 | TODO — `Dockerfile.bot` is currently built by nothing in CI; a break only surfaces at deploy time. |
 | [018](018-dockerignore.md) | Add a deny-by-default `.dockerignore` | P1 | XS | LOW | — | **DONE** — `70ed756`, merged. A `COPY . .` image now contains only the four allowlisted paths; no `.env`, `data/` or `.git`. Public packages are now safe. |
+| [019](019-compose-pull-images.md) | Make `compose.yml` pull published images instead of building | P2 | XS | LOW–MED | **017**, 018 | TODO — blocked until 017 publishes `feather-bot`; referencing it earlier 404s a working stack. |
 | [011](011-garage-s3-ipa-storage.md) | Move IPA storage to the self-hosted Garage S3 object store | P2 | M–L | MED | 005, 008 | **DONE (code)** — merged as `5a636b5`. 39→48 tests. `STORAGE_BACKEND` defaults to `local`, so nothing changed at runtime. Migration run and cutover are operator tasks — see below. |
 
 Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (with a one-line reason) | `REJECTED` (with a one-line rationale)
