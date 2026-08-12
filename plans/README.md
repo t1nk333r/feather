@@ -40,6 +40,7 @@ Three facts shape every plan here:
 | [021](021-extract-ipa-metadata.md) | Read the bundle identifier and version out of the IPA | P2 | S | LOW | 013, 020 | **DONE** — `d8a40da`, merged. Bare `/add` uses detected values; `/add <id> <ver>` still overrides. 83→91 tests. Verified against all 11 real IPAs. |
 | [022](022-narrow-redaction.md) | Narrow the redaction to actual secrets | P2 | XS | LOW | 020 | TODO — Plan 020 scrubs `BOT_API_FILE_ROOT`, which is a mountpoint, not a secret. It made a real `MountMismatchError` undiagnosable. |
 | [023](023-create-app-on-first-publish.md) | Create the app when it isn't in the catalog yet, and set its icon | P1 | S–M | LOW–MED | 013, 020, 021 | **DONE** — `c46593e`, merged. `/add` creates the app on exactly `App not found`, then sets the icon from the Telegram thumbnail via `/api/update-app`. 91→102 tests. |
+| [024](024-altstore-schema-required-fields.md) | Emit the AltStore-required fields so the source imports | P1 | S | LOW | 005 | TODO — **the source will not import on iOS**. `nsfw`, `appPermissions` and `buildVersion` are required by the spec and absent. |
 | [011](011-garage-s3-ipa-storage.md) | Move IPA storage to the self-hosted Garage S3 object store | P2 | M–L | MED | 005, 008 | **DONE (code)** — merged as `5a636b5`. 39→48 tests. `STORAGE_BACKEND` defaults to `local`, so nothing changed at runtime. Migration run and cutover are operator tasks — see below. |
 
 Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (with a one-line reason) | `REJECTED` (with a one-line rationale)
