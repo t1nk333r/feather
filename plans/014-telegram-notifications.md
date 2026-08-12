@@ -10,9 +10,9 @@
 > ```
 > cd /home/t1nk33r/Documents/feather
 > git rev-parse --short HEAD          # plan written against 62c8642
-> md5sum app.py                       # expect 97f5489786b0b4af47c063ecf4154411
-> wc -l < app.py                      # expect 1539
-> ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q   # expect 70 passed
+> md5sum app.py                       # expect d6299fef0f55f6b8bc4bd69f31fae283
+> wc -l < app.py                      # expect 1587
+> ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q   # expect 108 passed
 > ```
 > The `ADMIN_PASSWORD=x` prefix is required — Plan 010 landed and the app
 > refuses to import without it.
@@ -25,7 +25,7 @@
 - **Depends on**: 005 (tests), 010 (auth — the routes being hooked are now gated). Both DONE.
 - **Relationship to 013**: independent, but shares `TELEGRAM_BOT_TOKEN` and composes with 013's self-hosted server if present. Neither blocks the other. See "Composing with Plan 013".
 - **Category**: feature
-- **Planned at**: 2026-08-12, `62c8642`, `app.py` md5 `97f5489786b0b4af47c063ecf4154411`
+- **Planned at**: 2026-08-12, `62c8642`. **Refreshed 2026-08-12** against `c01db83`; `app.py` md5 `d6299fef0f55f6b8bc4bd69f31fae283`, 1587 lines. Plans 021/023/024 landed in between and moved every line reference below.
 
 ## Why this matters
 
@@ -47,7 +47,7 @@ Three structural consequences, all non-negotiable:
 
 ## Current state
 
-**The hook point** — `app.py:1425` onward, `/api/add-version`. Every mutating route has this identical shape, and the `success, message = source_manager.…` line is where the lock has already been released:
+**The hook point** — `app.py:1473` onward, `/api/add-version`. Every mutating route has this identical shape, and the `success, message = source_manager.…` line is where the lock has already been released:
 
 ```python
         success, message = source_manager.add_version(bundle_id, data, ipa_file=ipa_file if ipa_file and ipa_file.filename else None, download_from_url=download_from_url, base_url=base_url)
@@ -62,7 +62,7 @@ Three structural consequences, all non-negotiable:
         return jsonify({"success": False, "error": str(e)}), 400
 ```
 
-**The config block** to extend — `app.py:34-56`, following the pattern Plan 001 established:
+**The config block** to extend — `app.py:36-50`, following the pattern Plan 001 established:
 
 ```python
 SECRET_KEY = os.environ.get("SECRET_KEY")
@@ -79,7 +79,7 @@ MAX_CONTENT_LENGTH = int(os.environ.get("MAX_CONTENT_LENGTH", 2 * 1024 * 1024 * 
 
 Note the shape: read with `os.environ.get`, and only `raise` when the thing is genuinely required. **Notifications are optional — do not raise when they are unconfigured.**
 
-**Already available**: `requests` is pinned in `requirements.txt` and imported at `app.py:7`. `threading` is imported (Plan 006). `resolve_base_url()` exists at `app.py:78` for building a public link. **No new dependency is needed and none may be added.**
+**Already available**: `requests` and `threading` are both imported already. `resolve_base_url()` is at `app.py:92`, and `normalize_source()` — added by Plan 024 — sits just after it at `app.py:108`; put `notify()` near them. **No new dependency is needed and none may be added.**
 
 **Repo conventions**: module-level constants for config; `logging.warning(f"...")` for degraded-but-working; `logging.error(f"...: {str(e)}")` for failures; 4-space indent; no type annotations.
 
@@ -135,6 +135,14 @@ Include the source URL from `resolve_base_url()` on `add_app`/`add_version` so t
 
 **Do not make this plan depend on 013**, and do not add any of 013's containers or config here. If 013 has already landed and `TELEGRAM_BOT_TOKEN` is already in `.env.example`, do not duplicate the line.
 
+## Interaction with what landed since this plan was written
+
+Plans 021, 023 and 024 all touched this area. None conflict, but:
+
+- **`/api/add-app` is now reachable from the Telegram bot** (Plan 023), so an `add_app` notification will fire for bot-created apps as well as web-UI ones. That is desirable — it is the case where you most want to know.
+- **`normalize_source()` (Plan 024) runs on the `/source.json` serve path.** `notify()` runs on the mutating routes. They never interact; do not call one from the other.
+- **The three route line numbers**: `/api/add-app` at `app.py:1356`, `/api/delete-app` at `app.py:1396`, `/api/add-version` at `app.py:1473`.
+
 ## Scope
 
 **In scope**:
@@ -150,7 +158,7 @@ Include the source URL from `resolve_base_url()` on `add_app`/`add_version` so t
 - The storage classes (Plan 011), `templates/`, `Dockerfile`, `compose.yml`.
 - `requirements.txt` — `requests` and `threading` are already available. **Adding a dependency is a STOP condition.**
 - Retries, queues, delivery guarantees. This is fire-and-forget; a dropped notification is acceptable and a retry loop is not worth the complexity on a single-admin tool.
-- The 70 existing tests. If one needs editing to pass, you changed behaviour you should not have — report.
+- The 108 existing tests. If one needs editing to pass, you changed behaviour you should not have — report.
 
 ## Commands you will need
 
@@ -169,7 +177,7 @@ Include the source URL from `resolve_base_url()` on `add_app`/`add_version` so t
 
 ### Step 1: Config and the helper
 
-Add the four variables to the config block after `MAX_CONTENT_LENGTH`, and the `notify()` helper near `resolve_base_url()` (`app.py:78`).
+Add the four variables to the config block after `MAX_CONTENT_LENGTH`, and the `notify()` helper near `resolve_base_url()` (`app.py:92`) / `normalize_source()` (`app.py:108`).
 
 **Do not raise when unconfigured.** Log once at startup:
 
@@ -199,7 +207,7 @@ In `/api/add-app`, `/api/add-version` and `/api/delete-app`, add a single `notif
 
 Never notify on the failure branch — a failed publish is not news, and Plan 007 already reports it to the caller.
 
-**Verify**: `grep -c "notify(" app.py` → `4` (one definition + three call sites). Confirm with `grep -n "notify(" app.py` that all three call sites sit inside a success branch.
+**Verify**: `grep -n "notify(" app.py` — one definition plus three call sites, each read and confirmed to sit inside an `if success:` branch.
 
 ### Step 3: Tests
 
@@ -217,20 +225,20 @@ Add to `tests/test_routes.py`, reusing the existing `authed_client` fixture (Pla
 
 **No test may make a real network call.** The suite runs in ~3.5 s with no network and that property is worth protecting.
 
-**Verify**: `ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q` → **75** (70 + 5), the 70 existing unmodified.
+**Verify**: `ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q` → **113** (108 + 5), the 108 existing unmodified.
 
 ## Done criteria
 
 ALL must hold:
 
 - [ ] `ADMIN_PASSWORD=x .venv/bin/python -m py_compile app.py` exits 0
-- [ ] `grep -c "notify(" app.py` returns `4` (one def, three call sites)
+- [ ] `grep -n "notify(" app.py` shows exactly one `def` and **three** call sites, each inside an `if success:` branch. Count the call sites by reading, not by a bare `grep -c` — a docstring mentioning `notify(` would inflate it, and this repo has already had three done-criteria fail on exactly that kind of arithmetic.
 - [ ] All three call sites are inside an `if success:` branch — verified by reading, not just grepping
 - [ ] `grep -c "parse_mode" app.py` returns `0`
 - [ ] `grep -c "daemon=True" app.py` returns `1`
 - [ ] With the env vars unset, a mutating route makes no `requests.post` call
 - [ ] A raising `requests.post` still yields HTTP 200 and a persisted version — and that test fails if the notifier's `try/except` is removed
-- [ ] `ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q` → 75, the 70 pre-existing unmodified
+- [ ] `ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q` → 113, the 108 pre-existing unmodified
 - [ ] `git diff requirements.txt` is empty — no dependency added
 - [ ] `grep -c "TELEGRAM_NOTIFY_CHAT_ID" .env.example` returns `1`; `.env.example` contains no values
 - [ ] No `SourceManager` method was modified (`git diff app.py` shows no change inside the class)
