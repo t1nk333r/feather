@@ -43,15 +43,57 @@ def make_env(**overrides):
 
 
 class FakeBotAPI:
-    def __init__(self, get_file_result=None):
+    def __init__(self, get_file_result=None, get_file_error=None, send_message_error=None):
         self.get_file_result = get_file_result or {}
+        self.get_file_error = get_file_error
+        self.send_message_error = send_message_error
         self.sent_messages = []  # (chat_id, text)
+        self.calls = []  # ordered list of "get_file" / "send_message"
 
     def get_file(self, file_id):
+        self.calls.append("get_file")
+        if self.get_file_error is not None:
+            raise self.get_file_error
         return self.get_file_result
 
     def send_message(self, chat_id, text):
+        self.calls.append("send_message")
+        if self.send_message_error is not None:
+            raise self.send_message_error
         self.sent_messages.append((chat_id, text))
+
+
+class _FakeResponse:
+    """Records only what BotAPIClient touches -- status/json, nothing real."""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+class _FakeSession:
+    """Records the kwargs BotAPIClient's requests are made with.
+
+    Used only to verify timeout plumbing (Step 1) -- never touches the
+    network, mirroring the rest of this file's no-network rule.
+    """
+
+    def __init__(self, payload=None):
+        self.payload = payload if payload is not None else {"ok": True, "result": {}}
+        self.calls = []  # (method, url, kwargs)
+
+    def get(self, url, **kwargs):
+        self.calls.append(("GET", url, kwargs))
+        return _FakeResponse(self.payload)
+
+    def post(self, url, **kwargs):
+        self.calls.append(("POST", url, kwargs))
+        return _FakeResponse(self.payload)
 
 
 class FakeFeatherClient:
@@ -274,3 +316,125 @@ def test_add_command_parses_bundle_and_version(tmp_path):
     assert feather.add_version_calls == [("com.x.y", "1.2.3", str(ipa_path))]
     assert ALLOWED_USER_ID not in pending  # cleared after a successful publish
     assert any("Published" in text for _, text in bot.sent_messages)
+
+
+# ---------------------------------------------------------------------------
+# 9. test_getfile_timeout_defaults_to_900 (plan 020)
+# ---------------------------------------------------------------------------
+
+
+def test_getfile_timeout_defaults_to_900():
+    config = ingest.load_config(make_env())
+    assert config["bot_api_getfile_timeout"] == 900
+
+    session = _FakeSession()
+    bot = ingest.BotAPIClient(
+        session, "http://x", "t", getfile_timeout=config["bot_api_getfile_timeout"]
+    )
+    bot.get_file("file123")
+
+    _, _, kwargs = session.calls[0]
+    assert kwargs["timeout"] == 900
+
+
+# ---------------------------------------------------------------------------
+# 10. test_getfile_timeout_is_configurable (plan 020)
+# ---------------------------------------------------------------------------
+
+
+def test_getfile_timeout_is_configurable():
+    config = ingest.load_config(make_env(BOT_API_GETFILE_TIMEOUT="120"))
+    assert config["bot_api_getfile_timeout"] == 120
+
+    session = _FakeSession()
+    bot = ingest.BotAPIClient(
+        session, "http://x", "t", getfile_timeout=config["bot_api_getfile_timeout"]
+    )
+    bot.get_file("file123")
+
+    _, _, kwargs = session.calls[0]
+    assert kwargs["timeout"] == 120
+
+
+# ---------------------------------------------------------------------------
+# 11. test_ack_sent_before_getfile (plan 020) -- regression test for the
+#     silence: a "Fetching..." message must reach the user before the
+#     blocking getFile call, not after.
+# ---------------------------------------------------------------------------
+
+
+def test_ack_sent_before_getfile(tmp_path):
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    ipa_path = write_minimal_ipa(tmp_path / "Beegram.ipa")
+
+    bot = FakeBotAPI(get_file_result={"file_path": str(ipa_path)})
+    feather = FakeFeatherClient()
+    pending = {}
+
+    update = document_update(ALLOWED_USER_ID)
+    update["message"]["document"]["file_size"] = ipa_path.stat().st_size
+
+    ingest.handle_update(update, config, bot, feather, pending)
+
+    assert "send_message" in bot.calls
+    assert "get_file" in bot.calls
+    assert bot.calls.index("send_message") < bot.calls.index("get_file")
+
+    ack_text = bot.sent_messages[0][1]
+    assert "Fetching" in ack_text
+    assert "Beegram.ipa" in ack_text
+
+
+# ---------------------------------------------------------------------------
+# 12. test_getfile_failure_replies_to_user (plan 020) -- also doubles as the
+#     redaction test: the injected exception's message embeds a fake token,
+#     and the reply the user receives must not.
+# ---------------------------------------------------------------------------
+
+
+def test_getfile_failure_replies_to_user():
+    token = "123456:FAKE_TOKEN_FOR_TESTS"
+    config = ingest.load_config(make_env(TELEGRAM_BOT_TOKEN=token))
+
+    bot = FakeBotAPI(
+        get_file_error=RuntimeError(
+            "400 Client Error: Bad Request for url: "
+            f"http://telegram-bot-api:8081/bot{token}/getFile?file_id=file123"
+        )
+    )
+    feather = FakeFeatherClient()
+    pending = {}
+
+    # Must not raise -- process_update is the loop's per-update wrapper.
+    ingest.process_update(document_update(ALLOWED_USER_ID), config, bot, feather, pending)
+
+    assert len(bot.sent_messages) == 2  # the "Fetching..." ack, then the error
+    ack_text = bot.sent_messages[0][1]
+    assert "Fetching" in ack_text
+
+    error_text = bot.sent_messages[1][1]
+    assert "RuntimeError" in error_text
+    assert token not in error_text
+    assert "<REDACTED>" in error_text
+
+
+# ---------------------------------------------------------------------------
+# 13. test_reply_failure_does_not_kill_loop (plan 020)
+# ---------------------------------------------------------------------------
+
+
+def test_reply_failure_does_not_kill_loop():
+    config = ingest.load_config(make_env())
+
+    bot = FakeBotAPI(
+        get_file_error=RuntimeError("boom"),
+        send_message_error=RuntimeError("telegram unreachable"),
+    )
+    feather = FakeFeatherClient()
+    pending = {}
+
+    # Must not raise, even though both the fetch and every reply attempt
+    # (the ack, and the error reply) fail.
+    ingest.process_update(document_update(ALLOWED_USER_ID), config, bot, feather, pending)
+
+    assert bot.sent_messages == []

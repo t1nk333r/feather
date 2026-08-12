@@ -34,6 +34,7 @@ import logging
 import os
 import sys
 import time
+import traceback
 import zipfile
 
 import requests
@@ -58,6 +59,15 @@ USAGE_HINT = "Send:  /add <bundleIdentifier> <version>"
 NOT_A_FILE_REPLY = (
     "That isn't a file. Forward an IPA, then send /add <bundleIdentifier> <version>."
 )
+
+# getFile blocks for the entire download in --local mode (not documented by
+# the cloud Bot API docs, which describe the cloud behaviour). 900s at a
+# pessimistic 1 MB/s covers ~900 MB -- comfortably past the largest file in
+# the catalog (353 MB). It's a ceiling, not a delay: a fast transfer
+# returns immediately. Optional/plan-020 -- BOT_API_GETFILE_TIMEOUT is
+# deliberately not in REQUIRED_VARS, so an unset value must not break the
+# running deployment on restart.
+DEFAULT_GETFILE_TIMEOUT = 900
 
 
 class ConfigError(RuntimeError):
@@ -86,11 +96,77 @@ class FeatherAuthError(RuntimeError):
     """
 
 
-def load_config(env=None):
-    """Read and validate the eight required variables.
+def _redact(text, *secrets):
+    """Replace every occurrence of any given secret substring with <REDACTED>.
 
-    Refuses to start (raises ConfigError) if any is missing -- naming only
-    the missing *names*, never a value -- or if the allowlist is empty.
+    The Bot API puts the token in the URL *path*, and `requests` embeds the
+    full request URL in every exception it raises, so any log line or
+    user-facing message built from an exception -- present or future --
+    can carry a live credential unless it passes through here first. This
+    is called centrally at every site that logs or replies with exception
+    text, rather than patched in at the one call site that is known to
+    leak today.
+
+    Accepts multiple secrets (token, feather admin password, the local
+    file-root config value) so callers can scrub everything sensitive that
+    might appear in a single pass.
+    """
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "<REDACTED>")
+    return text
+
+
+def _log_exception(config, msg):
+    """logger.exception, but with secrets scrubbed from the traceback.
+
+    The default `logger.exception` lets the logging module format the
+    traceback straight from `sys.exc_info()`, which would bypass any
+    redaction applied to a message string. This formats the traceback
+    itself so it can be redacted before it reaches the log handler.
+    """
+    logger.error(
+        _redact(
+            f"{msg}\n{traceback.format_exc()}",
+            config.get("bot_token"),
+            config.get("feather_admin_password"),
+            config.get("bot_api_file_root"),
+        )
+    )
+
+
+def _format_size(num_bytes):
+    """Human-readable size for the pre-fetch acknowledgement, e.g. '31.1 MB'."""
+    if num_bytes is None:
+        return "unknown size"
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def _chat_id_from_update(update):
+    """Best-effort chat id, for the polling loop's failure reply.
+
+    Mirrors the extraction `handle_update` does for the happy path. Used
+    when the loop needs to reply to a chat *after* `handle_update` has
+    already raised, so it cannot rely on a value computed inside the
+    handler that just failed.
+    """
+    message = update.get("message") or {}
+    chat = message.get("chat") or {}
+    return chat.get("id")
+
+
+def load_config(env=None):
+    """Read and validate the eight required variables, plus one optional one.
+
+    Refuses to start (raises ConfigError) if any required variable is
+    missing -- naming only the missing *names*, never a value -- or if the
+    allowlist is empty. BOT_API_GETFILE_TIMEOUT is optional and defaults to
+    DEFAULT_GETFILE_TIMEOUT; it is deliberately not in REQUIRED_VARS.
     """
     env = os.environ if env is None else env
 
@@ -118,6 +194,17 @@ def load_config(env=None):
             "allowlist that would permit anyone to publish to the catalog"
         )
 
+    raw_timeout = env.get("BOT_API_GETFILE_TIMEOUT")
+    if raw_timeout:
+        try:
+            getfile_timeout = int(raw_timeout)
+        except ValueError:
+            raise ConfigError(
+                "BOT_API_GETFILE_TIMEOUT must be an integer number of seconds"
+            )
+    else:
+        getfile_timeout = DEFAULT_GETFILE_TIMEOUT
+
     return {
         "telegram_api_id": env["TELEGRAM_API_ID"],
         "telegram_api_hash": env["TELEGRAM_API_HASH"],
@@ -127,6 +214,7 @@ def load_config(env=None):
         "bot_api_file_root": env["BOT_API_FILE_ROOT"],
         "feather_base_url": env["FEATHER_BASE_URL"].rstrip("/"),
         "feather_admin_password": env["FEATHER_ADMIN_PASSWORD"],
+        "bot_api_getfile_timeout": getfile_timeout,
     }
 
 
@@ -193,10 +281,13 @@ class BotAPIClient:
     replies -- plain `requests`, no telegram framework. See plan rationale.
     """
 
-    def __init__(self, session, base_url, token):
+    def __init__(self, session, base_url, token, getfile_timeout=DEFAULT_GETFILE_TIMEOUT):
         self.session = session
         self.base_url = base_url
         self.token = token
+        # Only get_file uses this. getUpdates (long-poll) and sendMessage
+        # keep their own fixed, short timeouts -- see plan 020.
+        self.getfile_timeout = getfile_timeout
 
     def _url(self, method):
         return f"{self.base_url}/bot{self.token}/{method}"
@@ -214,8 +305,12 @@ class BotAPIClient:
         return data["result"]
 
     def get_file(self, file_id):
+        # --local mode blocks for the entire download here, unlike the
+        # cloud API -- see DEFAULT_GETFILE_TIMEOUT's comment.
         resp = self.session.get(
-            self._url("getFile"), params={"file_id": file_id}, timeout=30
+            self._url("getFile"),
+            params={"file_id": file_id},
+            timeout=self.getfile_timeout,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -271,6 +366,19 @@ def handle_document(user_id, chat_id, document, config, bot, pending):
     filename = document.get("file_name") or ""
     declared_size = document.get("file_size")
     file_id = document.get("file_id")
+
+    # Acknowledge before the blocking call: getFile can take minutes for a
+    # large file in --local mode, and without this a slow download is
+    # indistinguishable from a dead bot. A failed courtesy message must not
+    # block the actual fetch, so it's caught and only logged.
+    try:
+        bot.send_message(
+            chat_id,
+            f"Fetching {filename} ({_format_size(declared_size)}) from Telegram "
+            "— this can take a few minutes for large files.",
+        )
+    except Exception:
+        _log_exception(config, "Failed to send fetch acknowledgement to chat %s" % chat_id)
 
     file_info = bot.get_file(file_id)
     local_path = resolve_local_path(
@@ -368,9 +476,47 @@ def handle_update(update, config, bot, feather, pending):
     bot.send_message(chat_id, NOT_A_FILE_REPLY)
 
 
+def process_update(update, config, bot, feather, pending):
+    """Handle one update, catching and reporting any failure.
+
+    A malformed update, a mount mismatch, a getFile 400, or any other
+    surprise must not kill the worker -- restart: unless-stopped would mask
+    a crash-loop as "working" -- but it must not be silent either: that is
+    what made a real failure four exchanges to diagnose. So this attempts a
+    reply to the originating chat naming what went wrong, then swallows the
+    error either way. The reply attempt has its own try/except: if
+    Telegram itself is unreachable, the worker still must not die.
+    """
+    try:
+        handle_update(update, config, bot, feather, pending)
+    except Exception as e:
+        _log_exception(config, f"Error handling update {update.get('update_id')}")
+
+        chat_id = _chat_id_from_update(update)
+        if chat_id is None:
+            return
+        try:
+            bot.send_message(
+                chat_id,
+                _redact(
+                    f"Something went wrong: {type(e).__name__}: {e}",
+                    config.get("bot_token"),
+                    config.get("feather_admin_password"),
+                    config.get("bot_api_file_root"),
+                ),
+            )
+        except Exception:
+            _log_exception(config, f"Failed to send error reply to chat {chat_id}")
+
+
 def run(config):
     session = requests.Session()
-    bot = BotAPIClient(session, config["bot_api_base_url"], config["bot_token"])
+    bot = BotAPIClient(
+        session,
+        config["bot_api_base_url"],
+        config["bot_token"],
+        getfile_timeout=config["bot_api_getfile_timeout"],
+    )
     feather = FeatherClient(
         requests.Session(), config["feather_base_url"], config["feather_admin_password"]
     )
@@ -386,21 +532,13 @@ def run(config):
         try:
             updates = bot.get_updates(offset, timeout=30)
         except Exception:
-            logger.exception("getUpdates failed; retrying in 5s")
+            _log_exception(config, "getUpdates failed; retrying in 5s")
             time.sleep(5)
             continue
 
         for update in updates:
             offset = update["update_id"] + 1
-            try:
-                handle_update(update, config, bot, feather, pending)
-            except Exception:
-                # A malformed update, a mount mismatch, or any other
-                # surprise must not kill the worker -- restart:
-                # unless-stopped would mask a crash-loop as "working".
-                logger.exception(
-                    "Error handling update %s", update.get("update_id")
-                )
+            process_update(update, config, bot, feather, pending)
 
 
 def main():

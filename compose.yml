@@ -42,10 +42,10 @@ services:
     profiles: ["telegram"]
     image: aiogram/telegram-bot-api:latest
     container_name: telegram-bot-api
-    command: ["--local", "--http-port=8081"]
     environment:
       - TELEGRAM_API_ID=${TELEGRAM_API_ID:-}
       - TELEGRAM_API_HASH=${TELEGRAM_API_HASH:-}
+      - TELEGRAM_LOCAL=true
     volumes:
       - telegram-bot-api-data:/var/lib/telegram-bot-api
     restart: unless-stopped
