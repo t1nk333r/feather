@@ -30,6 +30,7 @@ Three facts shape every plan here:
 | [010](010-login-session-auth.md) | Gate the mutating routes behind a login form | P2 | M | MED | 001, 005, 009 | **DONE** — `1f95005`, merged as `632f40f`. 48→70 tests. Six routes gated, four public routes proven ungated. **`ADMIN_PASSWORD` is now required to boot.** |
 | [012](012-telegram-ipa-ingest.md) | Ingest IPAs from a Telegram channel (Telethon / user account) | P3 | M | MED | 005, 010 | **FALLBACK ONLY** — superseded by 013 unless 013's Step 0 fails. Bigger credential blast radius; see 013's comparison table. |
 | [013](013-telegram-bot-ingest.md) | Self-hosted Bot API server + forward-to-bot IPA ingest | P3 | M | MED | 005, 010 | TODO — **preferred**. Blocked if the source channel has content protection; 013 Step 0 is the test. |
+| [014](014-telegram-notifications.md) | Telegram notifications on catalog changes | P3 | S | LOW | 005, 010 | TODO — independent of 013; shares only `TELEGRAM_BOT_TOKEN`. |
 | [011](011-garage-s3-ipa-storage.md) | Move IPA storage to the self-hosted Garage S3 object store | P2 | M–L | MED | 005, 008 | **DONE (code)** — merged as `5a636b5`. 39→48 tests. `STORAGE_BACKEND` defaults to `local`, so nothing changed at runtime. Migration run and cutover are operator tasks — see below. |
 
 Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (with a one-line reason) | `REJECTED` (with a one-line rationale)
