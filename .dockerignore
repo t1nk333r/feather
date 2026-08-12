@@ -1,0 +1,25 @@
+# Deny by default, then re-admit only what the Dockerfiles COPY.
+# Rationale: this file's job is to make a future `COPY . .` harmless.
+# Anything not explicitly re-admitted below cannot reach an image layer,
+# which matters because the published packages are (or will be) public.
+*
+
+# Dockerfile needs these
+!requirements.txt
+!app.py
+!templates/
+
+# Dockerfile.bot needs this one script -- do NOT blanket-exclude scripts/
+!scripts/telegram_bot_ingest.py
+
+# Belt and braces: even if something above is loosened later, these must
+# never enter a build context.
+.env
+.env.*
+data/
+.git/
+.claude/
+.venv/
+venv/
+__pycache__/
+*.pyc
