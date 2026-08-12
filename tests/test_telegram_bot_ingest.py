@@ -10,6 +10,7 @@ See plans/013-telegram-bot-ingest.md's test plan for the eight cases below.
 """
 
 import gzip
+import plistlib
 import zipfile
 
 import pytest
@@ -124,6 +125,21 @@ def write_minimal_ipa(path):
 def write_zip_without_payload(path):
     with zipfile.ZipFile(path, "w") as zf:
         zf.writestr("readme.txt", "not an ipa")
+    return path
+
+
+def write_ipa_with_plists(path, entries):
+    """Build a zip at `path` with each `{zip_name: plist_dict_or_bytes}` entry.
+
+    A dict value is serialised as a binary plist (what real IPAs carry);
+    bytes are written as-is, for fixtures that need unparseable garbage.
+    """
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, value in entries.items():
+            if isinstance(value, (bytes, bytearray)):
+                zf.writestr(name, bytes(value))
+            else:
+                zf.writestr(name, plistlib.dumps(value, fmt=plistlib.FMT_BINARY))
     return path
 
 
@@ -438,3 +454,194 @@ def test_reply_failure_does_not_kill_loop():
     ingest.process_update(document_update(ALLOWED_USER_ID), config, bot, feather, pending)
 
     assert bot.sent_messages == []
+
+
+# ---------------------------------------------------------------------------
+# 14. test_extract_reads_bundle_id_and_version (plan 021)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_reads_bundle_id_and_version(tmp_path):
+    path = write_ipa_with_plists(
+        tmp_path / "App.ipa",
+        {
+            "Payload/App.app/Info.plist": {
+                "CFBundleIdentifier": "com.example.app",
+                "CFBundleShortVersionString": "1.2.3",
+            }
+        },
+    )
+
+    assert ingest.extract_ipa_metadata(str(path)) == ("com.example.app", "1.2.3")
+
+
+# ---------------------------------------------------------------------------
+# 15. test_extract_ignores_nested_plists (plan 021) -- the important one:
+#     proves the regex discriminates the app's own Info.plist from a
+#     bundled extension's. See the demonstration in the plan/task report --
+#     loosening `_APP_INFO_PLIST` to `Info.plist$` makes this fail.
+# ---------------------------------------------------------------------------
+
+
+def test_extract_ignores_nested_plists(tmp_path):
+    path = write_ipa_with_plists(
+        tmp_path / "App.ipa",
+        {
+            "Payload/App.app/Info.plist": {
+                "CFBundleIdentifier": "com.example.app",
+                "CFBundleShortVersionString": "1.2.3",
+            },
+            "Payload/App.app/PlugIns/Ext.appex/Info.plist": {
+                "CFBundleIdentifier": "com.example.app.ext",
+                "CFBundleShortVersionString": "1.2.3",
+            },
+        },
+    )
+
+    bundle_id, _ = ingest.extract_ipa_metadata(str(path))
+    assert bundle_id == "com.example.app"
+
+
+# ---------------------------------------------------------------------------
+# 16. test_extract_prefers_short_version_string (plan 021)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_prefers_short_version_string(tmp_path):
+    path = write_ipa_with_plists(
+        tmp_path / "App.ipa",
+        {
+            "Payload/App.app/Info.plist": {
+                "CFBundleIdentifier": "com.example.app",
+                "CFBundleShortVersionString": "1.2.3",
+                "CFBundleVersion": "434010",
+            }
+        },
+    )
+
+    assert ingest.extract_ipa_metadata(str(path)) == ("com.example.app", "1.2.3")
+
+
+# ---------------------------------------------------------------------------
+# 17. test_extract_falls_back_to_bundle_version (plan 021)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_falls_back_to_bundle_version(tmp_path):
+    path = write_ipa_with_plists(
+        tmp_path / "App.ipa",
+        {
+            "Payload/App.app/Info.plist": {
+                "CFBundleIdentifier": "com.example.app",
+                "CFBundleVersion": "434010",
+            }
+        },
+    )
+
+    assert ingest.extract_ipa_metadata(str(path)) == ("com.example.app", "434010")
+
+
+# ---------------------------------------------------------------------------
+# 18. test_extract_returns_none_on_unreadable_plist (plan 021)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_returns_none_on_unreadable_plist(tmp_path):
+    path = write_ipa_with_plists(
+        tmp_path / "App.ipa",
+        {"Payload/App.app/Info.plist": b"not a plist at all"},
+    )
+
+    # Must not raise.
+    assert ingest.extract_ipa_metadata(str(path)) == (None, None)
+
+
+# ---------------------------------------------------------------------------
+# 19. test_add_with_no_args_uses_detected_values (plan 021)
+# ---------------------------------------------------------------------------
+
+
+def test_add_with_no_args_uses_detected_values(tmp_path):
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    ipa_path = write_minimal_ipa(tmp_path / "Beegram.ipa")
+
+    bot = FakeBotAPI()
+    feather = FakeFeatherClient()
+    pending = {
+        ALLOWED_USER_ID: {
+            "path": str(ipa_path),
+            "filename": "Beegram.ipa",
+            "size": ipa_path.stat().st_size,
+            "sha256": "deadbeef",
+            "bundle_id": "app.alextran.immich",
+            "version": "3.1.0",
+        }
+    }
+
+    ingest.handle_update(text_update(ALLOWED_USER_ID, "/add"), config, bot, feather, pending)
+
+    assert feather.add_version_calls == [("app.alextran.immich", "3.1.0", str(ipa_path))]
+    assert ALLOWED_USER_ID not in pending
+    assert any("Published" in text for _, text in bot.sent_messages)
+
+
+# ---------------------------------------------------------------------------
+# 20. test_add_with_args_overrides_detection (plan 021)
+# ---------------------------------------------------------------------------
+
+
+def test_add_with_args_overrides_detection(tmp_path):
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    ipa_path = write_minimal_ipa(tmp_path / "Beegram.ipa")
+
+    bot = FakeBotAPI()
+    feather = FakeFeatherClient()
+    pending = {
+        ALLOWED_USER_ID: {
+            "path": str(ipa_path),
+            "filename": "Beegram.ipa",
+            "size": ipa_path.stat().st_size,
+            "sha256": "deadbeef",
+            "bundle_id": "app.alextran.immich",
+            "version": "3.1.0",
+        }
+    }
+
+    ingest.handle_update(
+        text_update(ALLOWED_USER_ID, "/add other.id 9.9.9"), config, bot, feather, pending
+    )
+
+    assert feather.add_version_calls == [("other.id", "9.9.9", str(ipa_path))]
+    assert ALLOWED_USER_ID not in pending
+    assert any("Published" in text for _, text in bot.sent_messages)
+
+
+# ---------------------------------------------------------------------------
+# 21. test_add_with_no_args_and_no_detection_refuses (plan 021)
+# ---------------------------------------------------------------------------
+
+
+def test_add_with_no_args_and_no_detection_refuses(tmp_path):
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    ipa_path = write_minimal_ipa(tmp_path / "Beegram.ipa")
+
+    bot = FakeBotAPI()
+    feather = FakeFeatherClient()
+    pending = {
+        ALLOWED_USER_ID: {
+            "path": str(ipa_path),
+            "filename": "Beegram.ipa",
+            "size": ipa_path.stat().st_size,
+            "sha256": "deadbeef",
+            "bundle_id": None,
+            "version": None,
+        }
+    }
+
+    ingest.handle_update(text_update(ALLOWED_USER_ID, "/add"), config, bot, feather, pending)
+
+    assert feather.add_version_calls == []
+    assert feather.login_calls == 0
+    assert ALLOWED_USER_ID in pending  # nothing consumed
+    assert len(bot.sent_messages) == 1
+    assert "Usage" in bot.sent_messages[0][1]
