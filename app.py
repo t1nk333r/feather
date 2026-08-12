@@ -1442,10 +1442,11 @@ def add_app():
         success, message = source_manager.add_app_manual(data, ipa_file=ipa_file if ipa_file and ipa_file.filename else None, download_from_url=download_from_url, base_url=base_url)
 
         if success:
+            notify("add_app", f"New app published: {data.get('name')} ({data.get('bundleIdentifier')}) v{data.get('version')}\n{base_url}/source.json")
             return jsonify({"success": True, "message": message})
         else:
             return jsonify({"success": False, "error": message}), 400
-            
+
     except Exception as e:
         logging.error(f"Error adding app: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 400
@@ -1461,8 +1462,9 @@ def delete_app():
             return jsonify({"success": False, "error": "Bundle identifier is required"}), 400
         
         success, message = source_manager.delete_app(bundle_id)
-        
+
         if success:
+            notify("delete_app", f"App removed: {bundle_id}")
             return jsonify({"success": True, "message": message})
         else:
             return jsonify({"success": False, "error": message}), 400
@@ -1560,8 +1562,12 @@ def add_version():
             return jsonify({"success": False, "error": "Either IPA file or download URL is required"}), 400
         
         success, message = source_manager.add_version(bundle_id, data, ipa_file=ipa_file if ipa_file and ipa_file.filename else None, download_from_url=download_from_url, base_url=base_url)
-        
+
         if success:
+            app_info = source_manager.get_app(bundle_id)
+            app_name = app_info.get('name', bundle_id) if app_info else bundle_id
+            size = app_info['versions'][0].get('size', 0) if app_info and app_info.get('versions') else 0
+            notify("add_version", f"New version: {app_name} {data.get('version')} — {size} bytes\n{base_url}/source.json")
             return jsonify({"success": True, "message": message})
         else:
             return jsonify({"success": False, "error": message}), 400
