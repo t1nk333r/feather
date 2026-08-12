@@ -78,7 +78,7 @@ Every `logger.exception` therefore writes a live credential to the container log
 
 Relevant excerpts from `scripts/telegram_bot_ingest.py`:
 
-- `get_file` — `timeout=30` (the bug)
+- `get_file` — `timeout=30` (wrong, but not what failed here)
 - `handle_document` — sends its first message only *after* `get_file` and `resolve_local_path` succeed
 - the polling loop — `except Exception: logger.exception(...)`, no user-facing reply
 
@@ -86,7 +86,7 @@ Relevant excerpts from `scripts/telegram_bot_ingest.py`:
 
 ## Design
 
-Three changes, smallest first.
+Four changes. Step 0 is the one that makes the feature work at all; the rest make the next failure diagnosable instead of silent.
 
 **1. A generous, configurable timeout.** Add `BOT_API_GETFILE_TIMEOUT`, default **900** seconds. Optional — absent means 900. At a pessimistic 1 MB/s, 900 s covers ~900 MB, comfortably past the largest file in the catalog (353 MB). It is a ceiling, not a delay: a fast transfer returns immediately.
 
@@ -107,7 +107,7 @@ Fetching Immich_vv3.1.0-AppAssassin.ipa (31.1 MB) from Telegram — this can tak
 - `tests/test_telegram_bot_ingest.py`
 
 **Out of scope — do NOT touch**:
-- `app.py`, `compose.yml`, `Dockerfile.bot`, `.github/`, `requirements.txt`.
+- `app.py`, `Dockerfile.bot`, `.github/`, `requirements.txt`. (`compose.yml` **is** in scope, but only the `telegram-bot-api` service's `environment:` and `command:` — nothing else in that file.)
 - The allowlist check, or its position as the first thing `handle_update` does. STOP condition.
 - The five validation checks. Do not weaken any to a warning.
 - `resolve_local_path`'s `MountMismatchError` behaviour — it must still raise rather than fall back to an HTTP download. This plan makes that failure *visible*, not tolerated.
