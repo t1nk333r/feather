@@ -131,6 +131,84 @@ def client_with_base_url(tmp_path, monkeypatch):
         yield c
 
 
+# Obviously-fake Telegram credentials -- never a real bot token or chat id.
+TEST_TELEGRAM_BOT_TOKEN = "123456:test-token-not-a-real-secret"
+TEST_TELEGRAM_CHAT_ID = "-100123456789"
+
+
+@pytest.fixture(scope="function")
+def client_with_telegram(tmp_path, monkeypatch):
+    """Same as `authed_client`, but with TELEGRAM_BOT_TOKEN and
+    TELEGRAM_NOTIFY_CHAT_ID set before the module reloads (plan 014), so
+    notify() is enabled. Same DATA_DIR-before-import constraint as
+    `client_with_base_url` above.
+    """
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ADMIN_PASSWORD", TEST_ADMIN_PASSWORD)
+    monkeypatch.setenv("SECRET_KEY", TEST_SECRET_KEY)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TEST_TELEGRAM_BOT_TOKEN)
+    monkeypatch.setenv("TELEGRAM_NOTIFY_CHAT_ID", TEST_TELEGRAM_CHAT_ID)
+
+    import app as app_module
+
+    importlib.reload(app_module)
+
+    (tmp_path / "source.json").write_text(json.dumps(seed_source()))
+
+    app_module.app.config["TESTING"] = True
+    with app_module.app.test_client() as c:
+        c.app_module = app_module
+        resp = c.post("/api/login", json={"password": TEST_ADMIN_PASSWORD})
+        assert resp.status_code == 200
+        yield c
+
+
+@pytest.fixture(scope="function")
+def client_with_telegram_filtered(tmp_path, monkeypatch):
+    """Same as `client_with_telegram`, but with TELEGRAM_NOTIFY_EVENTS
+    restricted to "add_app" only -- for the event-filter test, which
+    needs an add_version call to send nothing.
+    """
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ADMIN_PASSWORD", TEST_ADMIN_PASSWORD)
+    monkeypatch.setenv("SECRET_KEY", TEST_SECRET_KEY)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TEST_TELEGRAM_BOT_TOKEN)
+    monkeypatch.setenv("TELEGRAM_NOTIFY_CHAT_ID", TEST_TELEGRAM_CHAT_ID)
+    monkeypatch.setenv("TELEGRAM_NOTIFY_EVENTS", "add_app")
+
+    import app as app_module
+
+    importlib.reload(app_module)
+
+    (tmp_path / "source.json").write_text(json.dumps(seed_source()))
+
+    app_module.app.config["TESTING"] = True
+    with app_module.app.test_client() as c:
+        c.app_module = app_module
+        resp = c.post("/api/login", json={"password": TEST_ADMIN_PASSWORD})
+        assert resp.status_code == 200
+        yield c
+
+
+def _run_notify_threads_synchronously(app_module, monkeypatch):
+    """notify() sends on a daemon thread (plan 014) so the HTTP response
+    never waits on Telegram. Tests need the send to have happened by the
+    time the request returns, so this replaces threading.Thread with a
+    stand-in whose start() runs the target immediately, inline, instead
+    of on a real thread. Scoped to a single test via monkeypatch, which
+    restores the real threading.Thread at teardown.
+    """
+    class ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            if self._target:
+                self._target()
+
+    monkeypatch.setattr(app_module.threading, "Thread", ImmediateThread)
+
+
 # ---------------------------------------------------------------------------
 # Local-loopback HTTP stubs for the download tests below. These bind to
 # 127.0.0.1 on an ephemeral port and only ever talk to the test process
@@ -1230,3 +1308,159 @@ def test_version_string_is_escaped():
     with open(template_path, encoding="utf-8") as f:
         template_source = f.read()
     assert "escapeHtml(app.versions?.[0]?.version || 'N/A')" in template_source
+
+
+# ---------------------------------------------------------------------------
+# Plan 014: Telegram notifications on catalog changes.
+#
+# notify() must never let a Telegram problem reach the HTTP response (test
+# 3 is the one that matters for that), must make no network call at all
+# when unconfigured (test 1) or filtered out (test 4), and must send plain
+# text with no parse_mode -- app names and version strings are
+# attacker-supplied and stored (test 5).
+# ---------------------------------------------------------------------------
+
+
+def test_notify_is_noop_when_unconfigured(authed_client, monkeypatch):
+    """Default path: TELEGRAM_BOT_TOKEN / TELEGRAM_NOTIFY_CHAT_ID are
+    unset in the plain `authed_client` fixture, so a mutating route must
+    complete successfully without notify() ever calling requests.post.
+    """
+    calls = []
+    monkeypatch.setattr(
+        authed_client.app_module.requests, "post", lambda *a, **k: calls.append((a, k))
+    )
+
+    resp = authed_client.post(
+        "/api/add-version",
+        json={
+            "bundleIdentifier": "com.example.app",
+            "version": "2.0.0",
+            "downloadURL": "http://example.test/ipas/com.example.app/2.0.0.ipa",
+        },
+    )
+    assert resp.status_code == 200
+    assert json.loads(resp.data)["success"] is True
+    assert calls == []
+
+
+def test_notify_sends_on_add_version(client_with_telegram, monkeypatch):
+    """With the token and chat id configured, a successful /api/add-version
+    call must send exactly one sendMessage POST to the right chat, with
+    the new version string in the body.
+    """
+    app_module = client_with_telegram.app_module
+    _run_notify_threads_synchronously(app_module, monkeypatch)
+
+    calls = []
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append((url, json, timeout))
+
+    monkeypatch.setattr(app_module.requests, "post", fake_post)
+
+    resp = client_with_telegram.post(
+        "/api/add-version",
+        json={
+            "bundleIdentifier": "com.example.app",
+            "version": "3.1.4",
+            "downloadURL": "http://example.test/ipas/com.example.app/3.1.4.ipa",
+        },
+    )
+    assert resp.status_code == 200
+    assert json.loads(resp.data)["success"] is True
+
+    assert len(calls) == 1
+    url, payload, timeout = calls[0]
+    assert url == f"https://api.telegram.org/bot{TEST_TELEGRAM_BOT_TOKEN}/sendMessage"
+    assert payload["chat_id"] == TEST_TELEGRAM_CHAT_ID
+    assert "3.1.4" in payload["text"]
+
+
+def test_notify_failure_does_not_fail_the_request(client_with_telegram, monkeypatch):
+    """The critical test: a raising requests.post must not turn a
+    successful publish into a failed HTTP response, and the version must
+    still land in the catalog. Proven (per plan 014) to fail if the
+    try/except inside notify()'s send thread is removed -- see the
+    executor's verification notes for that check; it is not re-run here
+    on every suite run because it requires editing app.py.
+    """
+    app_module = client_with_telegram.app_module
+    _run_notify_threads_synchronously(app_module, monkeypatch)
+
+    def raising_post(*args, **kwargs):
+        raise RuntimeError("simulated Telegram outage")
+
+    monkeypatch.setattr(app_module.requests, "post", raising_post)
+
+    resp = client_with_telegram.post(
+        "/api/add-version",
+        json={
+            "bundleIdentifier": "com.example.app",
+            "version": "4.0.0",
+            "downloadURL": "http://example.test/ipas/com.example.app/4.0.0.ipa",
+        },
+    )
+    assert resp.status_code == 200
+    assert json.loads(resp.data)["success"] is True
+
+    resp = client_with_telegram.get("/api/app/com.example.app")
+    body = json.loads(resp.data)
+    assert any(v["version"] == "4.0.0" for v in body["versions"])
+
+
+def test_notify_respects_event_filter(client_with_telegram_filtered, monkeypatch):
+    """TELEGRAM_NOTIFY_EVENTS=add_app means an add_version call must send
+    nothing, even though notifications are otherwise enabled.
+    """
+    app_module = client_with_telegram_filtered.app_module
+    _run_notify_threads_synchronously(app_module, monkeypatch)
+
+    calls = []
+    monkeypatch.setattr(
+        app_module.requests, "post", lambda *a, **k: calls.append((a, k))
+    )
+
+    resp = client_with_telegram_filtered.post(
+        "/api/add-version",
+        json={
+            "bundleIdentifier": "com.example.app",
+            "version": "5.0.0",
+            "downloadURL": "http://example.test/ipas/com.example.app/5.0.0.ipa",
+        },
+    )
+    assert resp.status_code == 200
+    assert json.loads(resp.data)["success"] is True
+    assert calls == []
+
+
+def test_notify_sends_no_parse_mode(client_with_telegram, monkeypatch):
+    """Pins the escaping decision (plan 014): app names and version
+    strings are attacker-supplied and stored, so the outgoing payload
+    must never carry parse_mode. A future "let's make it bold" change
+    should have to delete this test deliberately, not trip over it by
+    accident.
+    """
+    app_module = client_with_telegram.app_module
+    _run_notify_threads_synchronously(app_module, monkeypatch)
+
+    calls = []
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append(json)
+
+    monkeypatch.setattr(app_module.requests, "post", fake_post)
+
+    resp = client_with_telegram.post(
+        "/api/add-version",
+        json={
+            "bundleIdentifier": "com.example.app",
+            "version": "6.0.0",
+            "downloadURL": "http://example.test/ipas/com.example.app/6.0.0.ipa",
+        },
+    )
+    assert resp.status_code == 200
+    assert json.loads(resp.data)["success"] is True
+
+    assert len(calls) == 1
+    assert "parse_mode" not in calls[0]
