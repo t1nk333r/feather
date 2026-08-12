@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, jsonify, send_file, redirect, session
 import json
 import os
+import copy
 import logging
 import qrcode
 import io
@@ -102,6 +103,49 @@ def resolve_base_url():
         "URLs written to source.json will reflect however this request reached the server."
     )
     return request.url_root.rstrip('/')
+
+
+def normalize_source(source_data):
+    """Fill in AltStore-required fields that may be absent from the stored
+    catalog, without ever overwriting a value that is already present.
+
+    Plan 024: the AltStore source spec requires 'nsfw' at the top level,
+    'appPermissions' per app, and 'buildVersion' per version. Older or
+    hand-edited catalogs can lack these, which makes a strict client
+    decoder reject the whole document. This runs at serve time only —
+    it never writes to disk — so it fixes every existing entry on the
+    next request without a migration.
+
+    Works on a deep copy; the argument is never mutated. Tolerates
+    malformed input (missing 'apps', a non-dict app or version) by
+    leaving the offending element untouched rather than raising, since
+    this sits on the /source.json request path that every subscribed
+    device polls and which must never 500.
+    """
+    if not isinstance(source_data, dict):
+        return source_data
+
+    data = copy.deepcopy(source_data)
+
+    data.setdefault("nsfw", False)
+
+    apps = data.get('apps')
+    if isinstance(apps, list):
+        for app_entry in apps:
+            if not isinstance(app_entry, dict):
+                continue
+            if 'appPermissions' not in app_entry:
+                app_entry['appPermissions'] = {"entitlements": [], "privacy": {}}
+
+            versions = app_entry.get('versions')
+            if isinstance(versions, list):
+                for version_entry in versions:
+                    if not isinstance(version_entry, dict):
+                        continue
+                    if 'buildVersion' not in version_entry:
+                        version_entry['buildVersion'] = str(version_entry.get('version', ''))
+
+    return data
 
 
 def _require_garage_config():
@@ -549,7 +593,8 @@ class SourceManager:
                 "tintColor": "#4185A9",
                 "featuredApps": [],
                 "apps": [],
-                "news": []
+                "news": [],
+                "nsfw": False
             }
             self.save_source(initial_source)
             logging.info("Initialized new source.json file")
@@ -1208,7 +1253,10 @@ def session_status():
 @app.route('/source.json')
 def serve_source():
     try:
-        return send_file(SOURCE_FILE, mimetype='application/json')
+        source_data = source_manager.load_source()
+        if source_data is None:
+            return send_file(SOURCE_FILE, mimetype='application/json')
+        return jsonify(normalize_source(source_data))
     except Exception as e:
         logging.error(f"Error serving source: {str(e)}")
         return jsonify({"error": str(e)}), 404
