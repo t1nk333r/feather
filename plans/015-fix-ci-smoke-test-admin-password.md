@@ -130,7 +130,7 @@ docker stop $CID; docker rmi -f feather-015
 
 ALL must hold:
 
-- [ ] `grep -c "ADMIN_PASSWORD" .github/workflows/docker-publish.yml` returns `2` (the run flag + the refuse-to-boot assertion)
+- [x] `grep -c "ADMIN_PASSWORD" .github/workflows/docker-publish.yml` returns **`4`** — the `-e` flag, the comment, and both `echo` lines contain the word. An earlier version of this criterion said `2`; that was an arithmetic slip, caught by the executor. The substantive check is `grep -c "ADMIN_PASSWORD=ci-smoke-test-not-a-real-password"` → `1`.
 - [ ] `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/docker-publish.yml'))"` exits 0
 - [ ] Locally: the image fails to import `app` without the variable, succeeds with it
 - [ ] Locally: the three smoke URLs all return `200`

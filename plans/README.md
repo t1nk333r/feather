@@ -31,7 +31,7 @@ Three facts shape every plan here:
 | [012](012-telegram-ipa-ingest.md) | Ingest IPAs from a Telegram channel (Telethon / user account) | P3 | M | MED | 005, 010 | **FALLBACK ONLY** — superseded by 013 unless 013's Step 0 fails. Bigger credential blast radius; see 013's comparison table. |
 | [013](013-telegram-bot-ingest.md) | Self-hosted Bot API server + forward-to-bot IPA ingest | P3 | M | MED | 005, 010 | **DONE (code)** — merged as `15ae84e`. 70→78 tests. **Step 0 still unverified**: if the source channel blocks forwarding, this path is dead and 012 is the fallback. Step 6 (real token) is an operator task. |
 | [014](014-telegram-notifications.md) | Telegram notifications on catalog changes | P3 | S | LOW | 005, 010 | TODO — independent of 013; shares only `TELEGRAM_BOT_TOKEN`. |
-| [015](015-fix-ci-smoke-test-admin-password.md) | Fix the CI smoke test broken by Plan 010 | P1 | XS | LOW | — | TODO — **`main` is red**; every push since `da7ee42` has failed. |
+| [015](015-fix-ci-smoke-test-admin-password.md) | Fix the CI smoke test broken by Plan 010 | P1 | XS | LOW | — | **DONE** — `2d405aa`, merged. Also asserts the image refuses to boot without `ADMIN_PASSWORD`. |
 | [011](011-garage-s3-ipa-storage.md) | Move IPA storage to the self-hosted Garage S3 object store | P2 | M–L | MED | 005, 008 | **DONE (code)** — merged as `5a636b5`. 39→48 tests. `STORAGE_BACKEND` defaults to `local`, so nothing changed at runtime. Migration run and cutover are operator tasks — see below. |
 
 Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (with a one-line reason) | `REJECTED` (with a one-line rationale)
