@@ -14,6 +14,8 @@ Three facts shape every plan here:
 2. **Four routes must never require authentication** — `/source.json`, `/ipas/<bundle_id>/<filename>`, `/icons/<bundle_id>/icon.<ext>`, `/qr`. iOS clients fetch them with no credentials. Gating any one breaks every user's device.
 3. **The repo's stated contract diverged from its behaviour everywhere.** `.env` declared five keys that nothing read; `requirements.txt` declared `atomicwrites` and `Flask-Limiter` that were never imported; `Dockerfile` health-checked with a credential for auth that did not exist; `data/backups/` was referenced by zero code. Plans 001, 006, and 010 close those gaps.
 
+> **New here?** Read [HANDOFF.md](HANDOFF.md) first — current state, outstanding operator tasks, and the traps that cost real debugging time.
+
 ## Execution order & status
 
 | Plan | Title | Priority | Effort | Risk | Depends on | Status |
