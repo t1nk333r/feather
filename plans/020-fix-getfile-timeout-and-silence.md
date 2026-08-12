@@ -15,61 +15,64 @@
 
 ## Status
 
-- **Priority**: P1 — the feature does not work at all in its intended use
+- **Priority**: P1 — the feature does not work at all, and it leaks a live credential into logs
 - **Effort**: S
 - **Risk**: LOW
+- **Supersedes the original diagnosis**: this plan first blamed a `getFile` timeout. Production logs disproved that — the real cause is `--local` never reaching the server. The timeout fix is retained because it becomes necessary once local mode works.
 - **Depends on**: 013 (DONE)
 - **Category**: bug
 - **Planned at**: 2026-08-12
 
 ## Why this matters
 
-**Observed in production.** The operator forwarded a 31.1 MB IPA to the bot twice. The bot answered `/start` and `/add` normally but replied **nothing at all** to either forward — then answered `/add` with "No pending file".
+**Diagnosed from production logs (2026-08-12).** The operator forwarded a 31.1 MB IPA; the bot replied nothing and logged:
 
-Two independent defects, both mine, both introduced by Plan 013.
-
-### Defect 1 — `getFile` times out
-
-`scripts/telegram_bot_ingest.py`:
-
-```python
-    def get_file(self, file_id):
-        resp = self.session.get(
-            self._url("getFile"), params={"file_id": file_id}, timeout=30
-        )
+```
+requests.exceptions.HTTPError: 400 Client Error: Bad Request for url:
+http://telegram-bot-api:8081/bot<REDACTED>/getFile?file_id=...
 ```
 
-On the **cloud** Bot API, `getFile` returns metadata instantly. On a **`--local`** server it does not: the server must download the file from Telegram's datacenters into its working directory before it can return an absolute path. `getFile` therefore blocks for the whole transfer.
+### Root cause — `--local` never took effect
 
-Plan 013 specified `timeout=30` without accounting for that. 30 seconds is marginal for 31 MB and hopeless for the 83–353 MB files this exists to handle. The operator reported a transfer sitting at `0B` after four minutes.
+The `telegram-bot-api` container logs its own command line at startup:
 
-When it times out, `requests` raises, and Defect 2 turns that into silence.
-
-### Defect 2 — every failure is invisible to the user
-
-`handle_document` performs both blocking calls **before** it sends anything:
-
-```python
-    file_info = bot.get_file(file_id)
-    local_path = resolve_local_path(
-        file_info.get("file_path"), config["bot_api_file_root"]
-    )
-
-    try:
-        validate_ipa_file(local_path, filename, declared_size)
-    except ValidationError as e:
-        ...
-        bot.send_message(chat_id, f"Rejected: {e}")
+```
+telegram-bot-api --dir=/var/lib/telegram-bot-api --temp-dir=/tmp/telegram-bot-api
+                 --username=telegram-bot-api --groupname=telegram-bot-api --http-port=8081
 ```
 
-Only `ValidationError` is caught and reported. A `get_file` timeout or a `MountMismatchError` propagates to the polling loop, which does exactly what Plan 013 told it to:
+**`--local` is absent.** The reason is in the image's entrypoint, which ends:
 
-```python
-            except Exception:
-                logger.exception("Error handling update %s", update.get("update_id"))
+```sh
+append_arg_from_env "TELEGRAM_HTTP_PORT" "--http-port" "8081"
+append_flag_from_env "TELEGRAM_LOCAL" "--local"
+...
+exec $COMMAND
 ```
 
-That is right for keeping the worker alive, and wrong for the operator, who sees nothing. The design has no way to say "I am working on it" or "that failed".
+`exec $COMMAND` — **the entrypoint never passes `"$@"` through**, so `compose.yml`'s `command: ["--local", "--http-port=8081"]` is silently ignored in its entirety. The `--http-port=8081` in the running process came from the entrypoint's own default, not from our override. Local mode is settable **only** via the `TELEGRAM_LOCAL` environment variable.
+
+So the server has been running in **cloud-proxy mode**, where `getFile` still enforces the cloud API's **20 MB download cap**. A 31 MB file is rejected with `400 Bad Request` — immediately, not after a timeout.
+
+This is the exact limit Plan 013 existed to lift. The design was right; the flag never reached the process.
+
+### Second defect — the bot token is logged in full
+
+`requests` includes the request URL in its exception text, and the Bot API puts the token in the **path**:
+
+```
+http://telegram-bot-api:8081/bot<TOKEN>/getFile?file_id=...
+```
+
+Every `logger.exception` therefore writes a live credential to the container log, where it reaches Dockge, `docker logs`, and any log shipper. **The operator's token was disclosed this way and must be rotated via @BotFather `/revoke`.**
+
+### Third defect — failures are invisible to the user
+
+`handle_document` performs both blocking calls **before** it sends anything, and only `ValidationError` is caught and reported. A `400`, a timeout, or a `MountMismatchError` propagates to the polling loop, which logs and continues — correct for keeping the worker alive, wrong for the operator, who sees total silence. That is why this took four exchanges to diagnose.
+
+### Fourth — the timeout is still wrong, just not the cause
+
+`get_file` uses `timeout=30`. That was **not** what failed here, but it will fail once local mode works: in `--local` mode `getFile` blocks for the entire download, and 30 s is hopeless for the 83–353 MB files this feature targets. Fix it while here.
 
 ## Current state
 
@@ -98,7 +101,8 @@ Fetching Immich_vv3.1.0-AppAssassin.ipa (31.1 MB) from Telegram — this can tak
 ## Scope
 
 **In scope**:
-- `scripts/telegram_bot_ingest.py`
+- `compose.yml` — the `telegram-bot-api` service: add `TELEGRAM_LOCAL=true`, drop the inert `command:`
+- `scripts/telegram_bot_ingest.py` — timeout, token redaction, acknowledge-before-blocking, user-facing errors
 - `.env.example` — one optional key name
 - `tests/test_telegram_bot_ingest.py`
 
@@ -111,6 +115,25 @@ Fetching Immich_vv3.1.0-AppAssassin.ipa (31.1 MB) from Telegram — this can tak
 - The 78 existing tests. If one needs editing to pass, report.
 
 ## Steps
+
+### Step 0: Actually enable local mode — the root cause
+
+In `compose.yml`, `telegram-bot-api`:
+
+- **Add** `TELEGRAM_LOCAL=true` to its `environment:` block, alongside the existing `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`.
+- **Delete** the `command: ["--local", "--http-port=8081"]` line. It is inert — the entrypoint ends in `exec $COMMAND` and never forwards `"$@"` — and leaving it implies a control that does not exist. The entrypoint already defaults `--http-port` to 8081.
+- Leave `profiles:`, `volumes:`, `restart:` and everything else untouched.
+
+**Verify** — the assertion that proves the fix, and the one this plan exists for:
+
+```
+docker compose --profile telegram up -d telegram-bot-api
+sleep 5
+docker logs telegram-bot-api 2>&1 | head -3
+```
+The logged command line **must now contain `--local`**. If it does not, STOP — nothing downstream will work.
+
+Then confirm the size cap is actually gone by re-forwarding the 31 MB file after the worker is rebuilt.
 
 ### Step 1: Configurable timeout
 
@@ -125,6 +148,16 @@ Add the key name to `.env.example` with **no value**.
 In `handle_document`, send the "Fetching …" message **before** `bot.get_file(...)`. Include the filename and the declared size.
 
 Guard it: if `send_message` fails, log and continue to the fetch anyway — a failed courtesy message must not block the actual work.
+
+### Step 2b: Redact the token from all logging
+
+The Bot API places the token in the URL path, and `requests` puts the URL into every exception message, so `logger.exception` writes a live credential to the container log.
+
+Add a `_redact(text)` helper that replaces the token wherever it appears with `<REDACTED>`, and route **every** log line and user-facing message that could contain a URL or exception text through it. Cover at least: the `getUpdates` failure handler, the per-update catch-all, and any new error replies from Step 3.
+
+Do **not** rely on catching the one known site — the token is in `self._url(...)`, so any future request that raises will leak it too. Redact centrally.
+
+**Verify**: a test that constructs an exception whose message embeds the token and asserts the logged/returned text contains `<REDACTED>` and **not** the token.
 
 ### Step 3: Make failures visible
 
@@ -152,6 +185,10 @@ No test may touch the network. Reuse the existing fake-client pattern.
 
 ALL must hold:
 
+- [ ] `grep -c "TELEGRAM_LOCAL" compose.yml` returns `1`
+- [ ] `grep -c "command:" compose.yml` returns `0` for the `telegram-bot-api` service — the inert override is gone
+- [ ] `docker logs telegram-bot-api` shows a command line **containing `--local`**
+- [ ] No log line or user-facing message can contain the bot token — proven by the redaction test
 - [ ] `get_file` uses the configurable timeout, defaulting to 900
 - [ ] `grep -c "BOT_API_GETFILE_TIMEOUT" .env.example` returns `1`, with no value
 - [ ] `BOT_API_GETFILE_TIMEOUT` is **not** in `REQUIRED_VARS`
@@ -167,6 +204,7 @@ ALL must hold:
 
 ## STOP conditions
 
+- `docker logs telegram-bot-api` still shows no `--local` after Step 0. Nothing else in this plan matters until that is true — report rather than working around it.
 - You are tempted to add an HTTP-download fallback when the local path is missing. That reintroduces the 20 MB cap the whole feature exists to avoid.
 - You are tempted to move or weaken the allowlist check.
 - You are tempted to add `BOT_API_GETFILE_TIMEOUT` to `REQUIRED_VARS`. That would break the operator's running deployment on next restart.
@@ -175,6 +213,8 @@ ALL must hold:
 
 ## Maintenance notes
 
+- **`command:` in compose does nothing for this image.** Its entrypoint ends in `exec $COMMAND` and ignores `"$@"` entirely; every option is set through `TELEGRAM_*` environment variables. Anyone adding a flag here must add an env var, and should verify against the command line the container logs at startup rather than assuming.
+- **The token lives in the URL path**, so it leaks through any library that echoes URLs — exceptions, retries, debug logging. Redaction has to be central rather than per-call-site.
 - **`getFile` is synchronous over the download in `--local` mode.** That single fact is what made a 30-second timeout wrong, and it is not obvious from the Bot API docs, which describe the cloud behaviour. Anyone tuning timeouts here should start from expected file size ÷ realistic throughput.
 - **The acknowledge-then-work shape matters more than the timeout.** Even with a correct timeout, a several-minute silent gap is indistinguishable from a dead bot. Any future long operation in this worker should follow the same pattern.
 - **Progress reporting is deliberately not included.** The Bot API gives no download-progress callback in `--local` mode, so a percentage would have to be faked. A single honest "this can take a few minutes" beats an invented progress bar.
