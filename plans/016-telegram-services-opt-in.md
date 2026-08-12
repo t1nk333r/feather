@@ -132,7 +132,7 @@ ALL must hold:
 - [ ] `grep -c 'profiles: \["telegram"\]' compose.yml` returns `2`
 - [ ] `docker compose config --services` lists exactly one service: `altstore-manager`
 - [ ] `docker compose --profile telegram config --services` lists all three
-- [ ] `docker compose config 2>&1 | grep -c "TELEGRAM_API_ID.*not set"` returns `0`
+- [x] `docker compose config 2>&1 | grep -c "variable is not set"` returns `0` — **but not from the profile alone.** Compose interpolates every service in the file *before* filtering by profile, so the warning survives a profile-only change; the executor caught that this criterion could not hold as written. Silencing it needs `${TELEGRAM_API_ID:-}` / `${TELEGRAM_API_HASH:-}` defaults, which change nothing when the variables are set.
 - [ ] `git diff compose.yml` touches only the two Telegram service blocks — the `altstore-manager` block is unchanged
 - [ ] `git diff --name-only` shows only `compose.yml`
 - [ ] `ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q` → 78, unchanged (this plan touches no Python)
