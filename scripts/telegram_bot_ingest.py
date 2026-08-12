@@ -163,12 +163,15 @@ def _chat_id_from_update(update):
 
 
 def load_config(env=None):
-    """Read and validate the eight required variables, plus one optional one.
+    """Read and validate the eight required variables, plus two optional ones.
 
     Refuses to start (raises ConfigError) if any required variable is
     missing -- naming only the missing *names*, never a value -- or if the
     allowlist is empty. BOT_API_GETFILE_TIMEOUT is optional and defaults to
-    DEFAULT_GETFILE_TIMEOUT; it is deliberately not in REQUIRED_VARS.
+    DEFAULT_GETFILE_TIMEOUT; TELEGRAM_DEFAULT_DEVELOPER (plan 023) is
+    optional and defaults to "Unknown". Both are deliberately not in
+    REQUIRED_VARS -- an unset value must not break the running deployment
+    on restart.
     """
     env = os.environ if env is None else env
 
@@ -207,6 +210,8 @@ def load_config(env=None):
     else:
         getfile_timeout = DEFAULT_GETFILE_TIMEOUT
 
+    default_developer = env.get("TELEGRAM_DEFAULT_DEVELOPER") or "Unknown"
+
     return {
         "telegram_api_id": env["TELEGRAM_API_ID"],
         "telegram_api_hash": env["TELEGRAM_API_HASH"],
@@ -217,6 +222,7 @@ def load_config(env=None):
         "feather_base_url": env["FEATHER_BASE_URL"].rstrip("/"),
         "feather_admin_password": env["FEATHER_ADMIN_PASSWORD"],
         "bot_api_getfile_timeout": getfile_timeout,
+        "telegram_default_developer": default_developer,
     }
 
 
@@ -280,16 +286,23 @@ _APP_INFO_PLIST = re.compile(r"^Payload/[^/]+\.app/Info\.plist$")
 
 
 def extract_ipa_metadata(path, config=None):
-    """Read (bundle_id, version) from an IPA's top-level Info.plist.
+    """Read (bundle_id, version, name) from an IPA's top-level Info.plist.
 
-    Returns (None, None) if anything is unreadable -- a missing or odd
-    plist is not a validation failure, it just means the operator must
+    Returns (None, None, None) if anything is unreadable -- a missing or
+    odd plist is not a validation failure, it just means the operator must
     supply the values explicitly.
 
     The regex is deliberately exact: an IPA contains an Info.plist for
     every bundled framework and app extension (235 of them in one of the
     IPAs on disk), and a loose match would return a framework's identifier
     instead of the app's.
+
+    `name` (plan 023) is CFBundleDisplayName, falling back to
+    CFBundleName -- the display name is the user-facing one
+    ("YouTube" vs "anymex"). A missing name is not a failure: bundle id
+    and version are what matter, and `name` is simply None when absent.
+    It is only used at app-creation time, when the bot must invent a
+    catalogue entry that didn't exist before.
 
     `config`, if given, is used only to redact secrets out of the warning
     logged on failure -- it is never required for a successful read, which
@@ -300,18 +313,20 @@ def extract_ipa_metadata(path, config=None):
         with zipfile.ZipFile(path) as zf:
             names = [name for name in zf.namelist() if _APP_INFO_PLIST.match(name)]
             if len(names) != 1:
-                return None, None
+                return None, None, None
             plist = plistlib.loads(zf.read(names[0]))
 
         bundle_id = plist.get("CFBundleIdentifier")
         version = plist.get("CFBundleShortVersionString") or plist.get("CFBundleVersion")
+        name = plist.get("CFBundleDisplayName") or plist.get("CFBundleName")
 
         bundle_id = str(bundle_id).strip() if bundle_id else None
         version = str(version).strip() if version else None
+        name = (str(name).strip() or None) if name else None
         if not bundle_id or not version:
-            return None, None
+            return None, None, None
 
-        return bundle_id, version
+        return bundle_id, version, name
     except Exception as e:
         secrets = []
         if config:
@@ -321,7 +336,7 @@ def extract_ipa_metadata(path, config=None):
                 config.get("bot_api_file_root"),
             ]
         logger.warning(_redact(f"Failed to extract metadata from IPA {path}: {e}", *secrets))
-        return None, None
+        return None, None, None
 
 
 class BotAPIClient:
@@ -411,11 +426,56 @@ class FeatherClient:
             "message"
         )
 
+    def add_app(self, bundle_id, version, name, developer, path):
+        # Plan 023: called only when add_version fails with the exact
+        # message "App not found" -- creates the catalogue entry. Sends
+        # the IPA (ipaFile) exactly like add_version does; a created app
+        # with no binary would point at nothing. Never send an icon here
+        # -- /api/add-app's multipart branch reads ipaFile only and drops
+        # icon_file on the floor; /api/update-app is the endpoint that
+        # accepts one (see set_icon).
+        with open(path, "rb") as fh:
+            files = {"ipaFile": (os.path.basename(path), fh)}
+            data = {
+                "bundleIdentifier": bundle_id,
+                "version": version,
+                "name": name,
+                "developerName": developer,
+            }
+            resp = self.session.post(
+                f"{self.base_url}/api/add-app", data=data, files=files
+            )
+        if resp.status_code == 401:
+            raise FeatherAuthError("feather /api/add-app returned 401")
+        payload = resp.json()
+        return bool(payload.get("success")), payload.get("error") or payload.get(
+            "message"
+        )
+
+    def set_icon(self, bundle_id, path):
+        # Plan 023: only ever called right after add_app, on the creation
+        # path -- never when merely appending a version, so an operator's
+        # hand-chosen icon is never reverted by a later forward. Callers
+        # must treat any failure here as non-fatal to the publish.
+        with open(path, "rb") as fh:
+            files = {"iconFile": (os.path.basename(path), fh)}
+            data = {"bundleIdentifier": bundle_id}
+            resp = self.session.post(
+                f"{self.base_url}/api/update-app", data=data, files=files
+            )
+        if resp.status_code == 401:
+            raise FeatherAuthError("feather /api/update-app returned 401")
+        payload = resp.json()
+        return bool(payload.get("success")), payload.get("error") or payload.get(
+            "message"
+        )
+
 
 def handle_document(user_id, chat_id, document, config, bot, pending):
     filename = document.get("file_name") or ""
     declared_size = document.get("file_size")
     file_id = document.get("file_id")
+    thumbnail = document.get("thumbnail")
 
     # Acknowledge before the blocking call: getFile can take minutes for a
     # large file in --local mode, and without this a slow download is
@@ -443,7 +503,20 @@ def handle_document(user_id, chat_id, document, config, bot, pending):
         return
 
     digest = sha256_of_file(local_path)
-    bundle_id, version = extract_ipa_metadata(local_path, config)
+    bundle_id, version, name = extract_ipa_metadata(local_path, config)
+
+    # Plan 023: the icon source is Telegram's own thumbnail on the
+    # forwarded document, fetched the same way as the main file --
+    # getFile, then resolve_local_path. No HTTP fallback, same rule as
+    # the IPA. Absence is not an error: a missing thumbnail just means
+    # the created app (if any) gets no icon.
+    thumb_path = None
+    if thumbnail and thumbnail.get("file_id"):
+        thumb_info = bot.get_file(thumbnail["file_id"])
+        thumb_path = resolve_local_path(
+            thumb_info.get("file_path"), config["bot_api_file_root"]
+        )
+
     pending[user_id] = {
         "path": local_path,
         "filename": filename,
@@ -451,6 +524,8 @@ def handle_document(user_id, chat_id, document, config, bot, pending):
         "sha256": digest,
         "bundle_id": bundle_id,
         "version": version,
+        "name": name,
+        "thumb_path": thumb_path,
     }
 
     header = f"Got {filename} — {declared_size:,} bytes, sha256 {digest}."
@@ -501,9 +576,41 @@ def handle_add_command(user_id, chat_id, text, config, bot, feather, pending):
     else:
         _, bundle_id, version = parts
 
+    created = False
+    icon_note = None
+
     try:
         feather.login()
         ok, message = feather.add_version(bundle_id, version, doc["path"])
+
+        # Plan 023: create the app only on the exact message "App not
+        # found" -- anything looser (a bare `if not ok`, or a substring
+        # match) would turn an unrelated failure, e.g. "Failed to save
+        # source data", into a spurious catalogue entry. See test 5.
+        if not ok and message == "App not found":
+            app_name = doc.get("name") or bundle_id
+            developer = config["telegram_default_developer"]
+            ok, message = feather.add_app(
+                bundle_id, version, app_name, developer, doc["path"]
+            )
+            if ok:
+                created = True
+                # Icon is set only on creation, never on a plain version
+                # append -- otherwise an operator's hand-chosen icon
+                # would be reverted by the next forward (test 9).
+                thumb_path = doc.get("thumb_path")
+                if thumb_path:
+                    try:
+                        feather.set_icon(bundle_id, thumb_path)
+                        icon_note = "Icon set."
+                    except Exception:
+                        # The binary is the point; the icon is
+                        # decoration -- a failure here must never fail
+                        # the publish (test 10).
+                        _log_exception(
+                            config, f"Failed to set icon for {bundle_id}"
+                        )
+                        icon_note = "Could not set the icon."
     except FeatherAuthError:
         bot.send_message(
             chat_id, "Login to feather failed (401) -- check FEATHER_ADMIN_PASSWORD."
@@ -514,9 +621,16 @@ def handle_add_command(user_id, chat_id, text, config, bot, feather, pending):
         return
 
     if ok:
-        bot.send_message(
-            chat_id, f"Published {bundle_id} {version} ({doc['size']:,} bytes)."
-        )
+        lines = []
+        if created:
+            app_name = doc.get("name") or bundle_id
+            lines.append(
+                f'{bundle_id} is not in the catalog — creating it as "{app_name}".'
+            )
+        lines.append(f"Published {bundle_id} {version} ({doc['size']:,} bytes).")
+        if icon_note:
+            lines.append(icon_note)
+        bot.send_message(chat_id, "\n".join(lines))
         pending.pop(user_id, None)
     else:
         bot.send_message(chat_id, f"Publish failed: {message}")
