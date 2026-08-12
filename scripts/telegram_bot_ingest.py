@@ -32,6 +32,8 @@ without a network connection. See plans/013-telegram-bot-ingest.md.
 import hashlib
 import logging
 import os
+import plistlib
+import re
 import sys
 import time
 import traceback
@@ -274,6 +276,54 @@ def validate_ipa_file(path, filename, declared_size):
         )
 
 
+_APP_INFO_PLIST = re.compile(r"^Payload/[^/]+\.app/Info\.plist$")
+
+
+def extract_ipa_metadata(path, config=None):
+    """Read (bundle_id, version) from an IPA's top-level Info.plist.
+
+    Returns (None, None) if anything is unreadable -- a missing or odd
+    plist is not a validation failure, it just means the operator must
+    supply the values explicitly.
+
+    The regex is deliberately exact: an IPA contains an Info.plist for
+    every bundled framework and app extension (235 of them in one of the
+    IPAs on disk), and a loose match would return a framework's identifier
+    instead of the app's.
+
+    `config`, if given, is used only to redact secrets out of the warning
+    logged on failure -- it is never required for a successful read, which
+    is why the standalone verification command in plans/021 can call this
+    with just a path.
+    """
+    try:
+        with zipfile.ZipFile(path) as zf:
+            names = [name for name in zf.namelist() if _APP_INFO_PLIST.match(name)]
+            if len(names) != 1:
+                return None, None
+            plist = plistlib.loads(zf.read(names[0]))
+
+        bundle_id = plist.get("CFBundleIdentifier")
+        version = plist.get("CFBundleShortVersionString") or plist.get("CFBundleVersion")
+
+        bundle_id = str(bundle_id).strip() if bundle_id else None
+        version = str(version).strip() if version else None
+        if not bundle_id or not version:
+            return None, None
+
+        return bundle_id, version
+    except Exception as e:
+        secrets = []
+        if config:
+            secrets = [
+                config.get("bot_token"),
+                config.get("feather_admin_password"),
+                config.get("bot_api_file_root"),
+            ]
+        logger.warning(_redact(f"Failed to extract metadata from IPA {path}: {e}", *secrets))
+        return None, None
+
+
 class BotAPIClient:
     """Thin wrapper over the self-hosted Bot API's HTTP surface.
 
@@ -393,27 +443,43 @@ def handle_document(user_id, chat_id, document, config, bot, pending):
         return
 
     digest = sha256_of_file(local_path)
+    bundle_id, version = extract_ipa_metadata(local_path, config)
     pending[user_id] = {
         "path": local_path,
         "filename": filename,
         "size": declared_size,
         "sha256": digest,
+        "bundle_id": bundle_id,
+        "version": version,
     }
-    bot.send_message(
-        chat_id,
-        f"Got {filename} — {declared_size:,} bytes, sha256 {digest}.\n"
-        + USAGE_HINT,
-    )
+
+    header = f"Got {filename} — {declared_size:,} bytes, sha256 {digest}."
+    if bundle_id and version:
+        bot.send_message(
+            chat_id,
+            f"{header}\n"
+            f"Detected: {bundle_id}  {version}\n\n"
+            "Send /add to publish that, or /add <bundleIdentifier> <version> "
+            "to override.",
+        )
+    else:
+        bot.send_message(
+            chat_id,
+            f"{header}\n"
+            "Could not read the bundle identifier from the IPA.\n"
+            + USAGE_HINT,
+        )
 
 
 def handle_add_command(user_id, chat_id, text, config, bot, feather, pending):
     parts = text.split()
-    if len(parts) != 3:
+    if len(parts) not in (1, 3):
         bot.send_message(chat_id, f"Usage: {USAGE_HINT.split(':', 1)[1].strip()}")
         return
 
-    _, bundle_id, version = parts
-
+    # Pending existence is checked before either branch reads values off of
+    # it, so a bare /add with nothing pending gets "No pending file" rather
+    # than a crash on `doc["bundle_id"]`.
     doc = pending.get(user_id)
     if doc is None:
         bot.send_message(
@@ -421,6 +487,19 @@ def handle_add_command(user_id, chat_id, text, config, bot, feather, pending):
             "No pending file. Forward an IPA first, then " + USAGE_HINT.strip(),
         )
         return
+
+    if len(parts) == 1:
+        bundle_id = doc.get("bundle_id")
+        version = doc.get("version")
+        if not bundle_id or not version:
+            bot.send_message(
+                chat_id,
+                "No bundle identifier/version was detected for this file. "
+                f"Usage: {USAGE_HINT.split(':', 1)[1].strip()}",
+            )
+            return
+    else:
+        _, bundle_id, version = parts
 
     try:
         feather.login()
