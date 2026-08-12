@@ -20,14 +20,15 @@ Three facts shape every plan here:
 |------|-------|----------|--------|------|------------|--------|
 | [001](001-configurable-paths-and-config.md) | Make data paths and configuration environment-driven | P1 | S | LOW | — | **DONE** — `bdcf5da`, merged to `main` as `26451c4`, pushed |
 | [002](002-version-control.md) | Put the repository under version control | P1 | S | LOW | — | **DONE** — `2fe1d2c` on `main`, pushed to `d7eeem/feather` (private) |
-| [003](003-delete-dead-copies.md) | Delete the two dead copies of the application | P1 | S | LOW | 002, 004 | TODO |
+| [003](003-delete-dead-copies.md) | Delete the two dead copies of the application | P1 | S | LOW | 002, 004 | **DONE** — `04d3893`, merged. 3,792 lines deleted, pure subtraction, 48 tests unchanged. |
 | [004](004-restore-pillow-qr.md) | Restore Pillow so the QR endpoint works | P1 | S | LOW | — | **DONE** — `cec6ae4`, merged as `facf9c1`. Pinned `pillow==11.3.0`, **not** the harvested `10.1.0` (no cp314 wheel — see the plan). Verified on both interpreters; see "Plan 004 verification" below. |
 | [005](005-smoke-test-suite.md) | Establish a one-command smoke-test suite | P1 | S | LOW | 001 | **DONE** — `901699e`, merged as `41c417a`. Host venv path; 21 tests, all 13 routes covered. |
 | [006](006-atomic-catalog-writes.md) | Make catalog writes atomic and serialized | P1 | S | LOW | 005 | **DONE** — `65dccfb`, merged as `a65c6bc`. 29→34 tests. Both guarantees proven by breaking them; see "Plan 006 verification" below. |
 | [007](007-fail-loudly.md) | Report failures instead of silently reporting success | P1 | S–M | LOW–MED | 005 (006 recommended) | **DONE** — `7b36d0a`..`d6d32bc` (5 defects, one commit each), merged as `4de7fed`. 21→29 tests. Container checks run during review; see "Plan 007 verification" below. |
 | [008](008-public-base-url.md) | Derive published URLs from configuration, not the `Host` header | P2 | S | LOW | 001, 005 | **DONE** — `f575e71`, merged as `309f882`. 34→39 tests. Two operator tasks remain: set `PUBLIC_BASE_URL` in `.env`, and hand-fix the one `<nas-ip>:7000` catalog entry. |
 | [009](009-extract-html-template.md) | Extract the embedded HTML template to `templates/index.html` | P2 | S | LOW–MED | 005 | **DONE** — `367c036`, merged as `1f815b0`. Byte-for-byte move of 1,493 lines; `app.py` 2986 → 1491. Dockerfile `COPY` verified both directions. |
-| [010](010-login-session-auth.md) | Gate the mutating routes behind a login form | P2 | M | MED | 001, 005, 009 | TODO |
+| [010](010-login-session-auth.md) | Gate the mutating routes behind a login form | P2 | M | MED | 001, 005, 009 | **DONE** — `1f95005`, merged as `632f40f`. 48→70 tests. Six routes gated, four public routes proven ungated. **`ADMIN_PASSWORD` is now required to boot.** |
+| [012](012-telegram-ipa-ingest.md) | Ingest IPAs from a Telegram channel | P3 | M | MED | 005, 010 | TODO |
 | [011](011-garage-s3-ipa-storage.md) | Move IPA storage to the self-hosted Garage S3 object store | P2 | M–L | MED | 005, 008 | **DONE (code)** — merged as `5a636b5`. 39→48 tests. `STORAGE_BACKEND` defaults to `local`, so nothing changed at runtime. Migration run and cutover are operator tasks — see below. |
 
 Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (with a one-line reason) | `REJECTED` (with a one-line rationale)
@@ -223,6 +224,38 @@ without COPY templates/ ./templates/  ->  GET / 500 TemplateNotFound
 `redirect` survived the import rewrite (Plan 011 needs it for `serve_ipa`) and `render_template_string` is gone. 48 tests pass, unmodified. The pre-existing `SyntaxWarning` about the `\/` escape disappeared on its own now that Python no longer parses that JS regex — as predicted.
 
 **Now unblocked**: Plan 010 can edit the login modal in a real `.html` file.
+
+## Plan 010 verification (2026-08-12)
+
+The constraint that mattered — four routes must stay reachable with no credentials, or every subscribed iOS device breaks — was proven in both directions rather than assumed:
+
+```
+gated /source.json by hand      -> FAILED test_source_json_ok (401 == 200)
+                                   FAILED test_public_routes_never_require_auth[/source.json]
+removed @requires_auth from     -> FAILED test_mutating_routes_require_auth[/api/delete-app]
+  /api/delete-app
+```
+
+Container check on the real image, no session:
+
+| | |
+|---|---|
+| `/source.json` `/qr` `/` | `200` |
+| `/ipas/...` `/icons/...` | `404` — file-not-found, **not** an auth wall |
+| all six `/api/*` mutating | `401` |
+| boot with no `ADMIN_PASSWORD` | refuses, with a clear message |
+| healthcheck | `["CMD-SHELL","curl -f http://localhost:5000/source.json \|\| exit 1"]` — credential gone |
+
+Accepted one documented deviation: `tests/test_storage.py` was edited though it is outside the plan's scope list. Plan 011's fixtures import `app.py` directly and could not import it at all once `ADMIN_PASSWORD` became mandatory; the fix is mechanical and identical in kind to the one the plan mandates for `test_routes.py`.
+
+## Why Plan 012 does not use a Telegram bot
+
+Recorded so it is not re-proposed. Two facts from `core.telegram.org/bots/api`:
+
+- **The cloud Bot API caps `getFile` downloads at 20 MB.** These IPAs are 83–353 MB. Only a self-hosted local Bot API server lifts it ("Download files without a size limit"), which means an extra container.
+- **Bots cannot read channel history** — no `getMessages`; a bot only sees messages posted after it joins. The target is an existing message.
+
+And the operator is **not an admin of that channel**, so a bot cannot be added to it at all. MTProto via Telethon is the only approach that works.
 
 ## Findings considered and rejected
 
