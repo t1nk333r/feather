@@ -204,6 +204,129 @@ def test_source_json_ok(client):
     assert "com.example.app" in bundle_ids
 
 
+# ---------------------------------------------------------------------------
+# Plan 024: AltStore-required fields, filled in at serve time
+# ---------------------------------------------------------------------------
+
+
+def test_source_json_has_required_top_level_fields(client):
+    """AltStore requires 'nsfw' at the top level; normalize_source must add
+    it when the stored catalog lacks it."""
+    resp = client.get("/source.json")
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    for key in ("name", "apps", "news", "nsfw"):
+        assert key in body
+    assert body["nsfw"] is False
+
+
+def test_source_json_apps_have_app_permissions(client):
+    """Every app in the served document must carry 'appPermissions' with
+    the shape AltStore expects, even though the seeded catalog has none."""
+    resp = client.get("/source.json")
+    body = json.loads(resp.data)
+    assert body["apps"], "seed_source() must produce at least one app"
+    for app_entry in body["apps"]:
+        assert "appPermissions" in app_entry
+        perms = app_entry["appPermissions"]
+        assert isinstance(perms["entitlements"], list)
+        assert isinstance(perms["privacy"], dict)
+
+
+def test_source_json_versions_have_build_version(client):
+    """Every version in the served document must carry a string
+    'buildVersion', defaulting to the version string when absent."""
+    resp = client.get("/source.json")
+    body = json.loads(resp.data)
+    for app_entry in body["apps"]:
+        assert app_entry["versions"], "seed_source() must produce at least one version"
+        for version_entry in app_entry["versions"]:
+            assert isinstance(version_entry.get("buildVersion"), str)
+
+
+def test_normalize_does_not_overwrite_existing_values(client):
+    """A catalog that already has real appPermissions / buildVersion must
+    keep them unchanged -- normalize_source only fills absences."""
+    app_module = client.app_module
+    source = {
+        "name": "x",
+        "apps": [
+            {
+                "bundleIdentifier": "a.b",
+                "appPermissions": {
+                    "entitlements": ["com.apple.developer.something"],
+                    "privacy": {"NSCameraUsageDescription": "reason"},
+                },
+                "versions": [
+                    {"version": "1.0.0", "buildVersion": "25"},
+                ],
+            }
+        ],
+        "news": [],
+        "nsfw": True,
+    }
+    out = app_module.normalize_source(source)
+    assert out["nsfw"] is True
+    app_entry = out["apps"][0]
+    assert app_entry["appPermissions"] == {
+        "entitlements": ["com.apple.developer.something"],
+        "privacy": {"NSCameraUsageDescription": "reason"},
+    }
+    assert app_entry["versions"][0]["buildVersion"] == "25"
+
+
+def test_normalize_does_not_mutate_input(client):
+    """normalize_source must work on a deep copy and leave its argument
+    untouched -- a future cache would turn mutation into silent corruption."""
+    app_module = client.app_module
+    source = {
+        "name": "x",
+        "apps": [{"bundleIdentifier": "a.b", "versions": [{"version": "1.0"}]}],
+        "news": [],
+    }
+    before = json.loads(json.dumps(source))
+    app_module.normalize_source(source)
+    assert source == before
+    assert "nsfw" not in source
+    assert "appPermissions" not in source["apps"][0]
+    assert "buildVersion" not in source["apps"][0]["versions"][0]
+
+
+def test_normalize_tolerates_malformed_catalog(client):
+    """A malformed catalog -- an app missing 'versions', a version that is
+    a string rather than a dict, a missing 'apps' key -- must not raise,
+    and /source.json must still return 200. Every subscribed device polls
+    this route; it must never 500."""
+    app_module = client.app_module
+
+    # A version that is not a dict, and an app missing 'versions' entirely.
+    malformed = {
+        "name": "x",
+        "apps": [
+            {"bundleIdentifier": "a.b"},
+            {"bundleIdentifier": "c.d", "versions": ["not-a-dict"]},
+        ],
+        "news": [],
+    }
+    out = app_module.normalize_source(malformed)
+    assert out["nsfw"] is False
+    assert out["apps"][0]["appPermissions"] == {"entitlements": [], "privacy": {}}
+    assert out["apps"][1]["versions"] == ["not-a-dict"]
+
+    # A missing 'apps' key entirely.
+    no_apps = {"name": "x", "news": []}
+    out2 = app_module.normalize_source(no_apps)
+    assert out2["nsfw"] is False
+
+    # And end to end: seed the on-disk catalog with the malformed shape
+    # and confirm the route survives it.
+    data_dir = app_module.DATA_DIR
+    with open(os.path.join(data_dir, "source.json"), "w") as f:
+        f.write(json.dumps(malformed))
+    resp = client.get("/source.json")
+    assert resp.status_code == 200
+
+
 def test_ipas_serves_existing_file(client, tmp_path):
     ipa_dir = tmp_path / "ipas" / "com.example.app"
     ipa_dir.mkdir(parents=True)
