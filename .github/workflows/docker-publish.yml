@@ -93,8 +93,16 @@ jobs:
         run: |
           set -euo pipefail
           IMAGE="$(echo '${{ steps.meta.outputs.tags }}' | head -n1)"
+          # Plan 010: the app must refuse to boot without ADMIN_PASSWORD.
+          # Assert that, so a regression that silently re-allows an
+          # unauthenticated boot fails the build.
+          if docker run --rm -e DATA_DIR=/tmp/feather-data "$IMAGE" python -c "import app" 2>/dev/null; then
+            echo "FAIL: image booted without ADMIN_PASSWORD"; exit 1
+          fi
+          echo "ok: refuses to boot without ADMIN_PASSWORD"
           docker run -d --rm --name feather-smoke -p 5000:5000 \
-            -e DATA_DIR=/tmp/feather-data "$IMAGE"
+            -e DATA_DIR=/tmp/feather-data \
+            -e ADMIN_PASSWORD=ci-smoke-test-not-a-real-password "$IMAGE"
           for i in $(seq 1 30); do
             if curl -fsS -o /dev/null http://localhost:5000/source.json; then break; fi
             sleep 1
