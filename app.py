@@ -44,6 +44,20 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL")
 PORT = int(os.environ.get("PORT", "5000"))
 MAX_CONTENT_LENGTH = int(os.environ.get("MAX_CONTENT_LENGTH", 2 * 1024 * 1024 * 1024))
 
+# Added by plan 014 -- optional Telegram notification on catalog changes.
+# Disabled unless both TELEGRAM_BOT_TOKEN and TELEGRAM_NOTIFY_CHAT_ID are
+# set; see notify() below. TELEGRAM_BOT_TOKEN and BOT_API_BASE_URL are
+# shared with plan 013's bot ingest script where that has landed --
+# neither is redeclared in .env.example for this plan.
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_NOTIFY_CHAT_ID = os.environ.get("TELEGRAM_NOTIFY_CHAT_ID")
+TELEGRAM_API_BASE = os.environ.get("BOT_API_BASE_URL", "https://api.telegram.org")
+TELEGRAM_NOTIFY_EVENTS = set(
+    event.strip()
+    for event in os.environ.get("TELEGRAM_NOTIFY_EVENTS", "add_app,add_version,delete_app").split(",")
+    if event.strip()
+)
+
 # IPA storage backend (Plan 011). Defaults to "local" -- today's behaviour,
 # unchanged -- so merging this is a no-op until the flag is deliberately
 # flipped. See GarageIpaStorage below for the "refuse to start" validation.
@@ -146,6 +160,49 @@ def normalize_source(source_data):
                         version_entry['buildVersion'] = str(version_entry.get('version', ''))
 
     return data
+
+
+def notify(event, text):
+    """Fire-and-forget Telegram message. Never raises, never blocks the caller.
+
+    Plan 014. Call this from the route layer only, after SourceManager has
+    already returned -- never from inside SourceManager, which holds
+    self._lock across its whole read-modify-write and would otherwise
+    serialise every publish behind Telegram's latency.
+
+    Returns immediately with no network call at all if notifications are
+    disabled (TELEGRAM_BOT_TOKEN / TELEGRAM_NOTIFY_CHAT_ID unset) or if
+    `event` is not in the configured TELEGRAM_NOTIFY_EVENTS set. Otherwise
+    the request is sent on a daemon thread, so the caller never waits on
+    Telegram, and any failure is swallowed and logged at warning -- no
+    notification problem may ever reach the HTTP response.
+    """
+    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_NOTIFY_CHAT_ID):
+        return
+    if event not in TELEGRAM_NOTIFY_EVENTS:
+        return
+
+    def _send():
+        try:
+            requests.post(
+                f"{TELEGRAM_API_BASE}/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={
+                    "chat_id": TELEGRAM_NOTIFY_CHAT_ID,
+                    "text": text,
+                    "disable_web_page_preview": True,
+                },
+                timeout=10,
+            )
+        except Exception as e:
+            logging.warning(f"Telegram notification failed: {str(e)}")
+
+    threading.Thread(target=_send, daemon=True).start()
+
+
+if TELEGRAM_BOT_TOKEN and TELEGRAM_NOTIFY_CHAT_ID:
+    logging.info("Telegram notifications enabled for events: %s", TELEGRAM_NOTIFY_EVENTS)
+else:
+    logging.info("Telegram notifications disabled (TELEGRAM_BOT_TOKEN / TELEGRAM_NOTIFY_CHAT_ID not set)")
 
 
 def _require_garage_config():
