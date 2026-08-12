@@ -1,5 +1,10 @@
 services:
   altstore-manager:
+    # image + build kept together -- `docker compose pull` fetches the
+    # CI-built image (the one that was actually smoke-tested), while
+    # `docker compose build` still works locally and tags the result as
+    # this name.
+    image: ghcr.io/d7eeem/feather:latest
     build: .
     container_name: altstore-source-manager
     ports:
@@ -53,6 +58,11 @@ services:
   # publishes to feather through the existing /api/add-version HTTP API.
   ipa-ingest-bot:
     profiles: ["telegram"]
+    # image + build kept together -- `docker compose pull` fetches the
+    # CI-built image (the one that was actually smoke-tested), while
+    # `docker compose build` still works locally and tags the result as
+    # this name.
+    image: ghcr.io/d7eeem/feather-bot:latest
     build:
       context: .
       dockerfile: Dockerfile.bot
