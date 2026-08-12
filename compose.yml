@@ -31,6 +31,10 @@ services:
   # plans/013-telegram-bot-ingest.md for what self-hosting does and does
   # not change.
   telegram-bot-api:
+    # Opt-in (Plan 016): not started by a plain `docker compose up -d`.
+    # Enable with `docker compose --profile telegram up -d` once the
+    # TELEGRAM_* variables are set in .env.
+    profiles: ["telegram"]
     image: aiogram/telegram-bot-api:latest
     container_name: telegram-bot-api
     command: ["--local", "--http-port=8081"]
@@ -48,6 +52,7 @@ services:
   # server wrote off the shared volume directly (no HTTP download), and
   # publishes to feather through the existing /api/add-version HTTP API.
   ipa-ingest-bot:
+    profiles: ["telegram"]
     build:
       context: .
       dockerfile: Dockerfile.bot
