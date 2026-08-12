@@ -8,6 +8,7 @@
 !requirements.txt
 !app.py
 !templates/
+!static/
 
 # Dockerfile.bot needs this one script -- do NOT blanket-exclude scripts/
 !scripts/telegram_bot_ingest.py

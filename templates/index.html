@@ -2,6 +2,8 @@
 <html>
 <head>
     <title>AltStore Source Manager</title>
+    <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
+    <link rel="alternate icon" href="/static/favicon.png">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -500,7 +502,8 @@
 </head>
 <body>
     <div class="container">
-        <h1>🚀 AltStore Source Manager</h1>
+        <h1><img src="/static/icon.svg" alt="" width="40" height="40"
+                 style="vertical-align: -6px; margin-right: 10px; border-radius: 8px;">AltStore Source Manager</h1>
         <p class="subtitle">Manage your custom iOS app repository</p>
         
         <div class="tabs">
@@ -512,7 +515,7 @@
         </div>
 
         <div id="add-app" class="tab-content active">
-            <h2 style="margin-bottom: 20px;">➕ Add New App</h2>
+            <h2 style="margin-bottom: 20px;">Add New App</h2>
             <form id="addAppForm">
                 <div id="manualFields">
                     <div class="form-group">
@@ -568,10 +571,9 @@
         </div>
 
         <div id="manage-apps" class="tab-content">
-            <h2 style="margin-bottom: 20px;">📱 Installed Apps</h2>
+            <h2 style="margin-bottom: 20px;">Installed Apps</h2>
             <div class="search-filter-bar">
                 <div class="search-box">
-                    <span class="search-icon">🔍</span>
                     <input type="text" id="searchInput" placeholder="Search apps by name or bundle ID..." oninput="filterApps()">
                 </div>
                 <select id="filterDeveloper" class="filter-select" onchange="filterApps()">
@@ -595,7 +597,7 @@
         <div id="editAppModal" class="modal">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h2>✏️ Edit App</h2>
+                    <h2>Edit App</h2>
                     <button class="close" onclick="closeEditModal()">&times;</button>
                 </div>
                 <form id="editAppForm">
@@ -632,11 +634,11 @@
                     </div>
                     
                     <div class="version-list">
-                        <h3 style="margin-bottom: 15px;">📦 Versions</h3>
+                        <h3 style="margin-bottom: 15px;">Versions</h3>
                         <div id="versionsList"></div>
                         
                         <div class="add-version-section">
-                            <h4 style="margin-bottom: 15px; color: #667eea;">➕ Add New Version</h4>
+                            <h4 style="margin-bottom: 15px; color: #667eea;">Add New Version</h4>
                             <div class="form-group">
                                 <label>Version:</label>
                                 <input type="text" id="newVersion" name="version" placeholder="1.0.0">
@@ -672,7 +674,7 @@
         <div id="loginModal" class="modal">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h2>🔒 Sign in</h2>
+                    <h2>Sign in</h2>
                 </div>
                 <form id="loginForm">
                     <div class="form-group">
@@ -687,7 +689,7 @@
 
         <div id="qr-code" class="tab-content">
             <div class="qr-container">
-                <h2 style="margin-bottom: 20px;">📱 Add to Feather</h2>
+                <h2 style="margin-bottom: 20px;">Add to Feather</h2>
                 <p style="margin-bottom: 20px;">Scan this QR code with Feather to instantly add this source:</p>
                 <img id="qrImage" src="/qr" alt="QR Code">
                 <div class="source-url">
@@ -695,7 +697,7 @@
                     <span id="featherUrl"></span>
                 </div>
                 <div class="info-box">
-                    <strong>💡 Pro Tip:</strong> The QR code uses the <code>feather://</code> URL scheme for one-tap source addition in the Feather app.
+                    <strong>Pro Tip:</strong> The QR code uses the <code>feather://</code> URL scheme for one-tap source addition in the Feather app.
                 </div>
                 <div class="source-url">
                     <strong>Alternative URL (for AltStore):</strong><br>
@@ -705,7 +707,7 @@
         </div>
 
         <div id="source-info" class="tab-content">
-            <h2 style="margin-bottom: 20px;">⚙️ Source Information</h2>
+            <h2 style="margin-bottom: 20px;">Source Information</h2>
             <form id="sourceInfoForm">
                 <div class="form-group">
                     <label>Source Name:</label>
@@ -762,13 +764,6 @@
             const toast = document.createElement('div');
             toast.className = `toast ${type}`;
             
-            const icons = {
-                success: '✅',
-                error: '❌',
-                warning: '⚠️',
-                info: 'ℹ️'
-            };
-            
             const titles = {
                 success: 'Success',
                 error: 'Error',
@@ -777,7 +772,6 @@
             };
             
             toast.innerHTML = `
-                <span class="toast-icon">${icons[type] || icons.info}</span>
                 <div class="toast-content">
                     ${title ? `<div class="toast-title">${title}</div>` : ''}
                     <div class="toast-message">${escapeHtml(message)}</div>
@@ -994,7 +988,7 @@
                 }
                 
                 if (apps.length === 0) {
-                    appsList.innerHTML = '<p style="color: #666; text-align: center; padding: 40px;">No apps added yet. Go to the "Add App" tab to add your first app! 📱</p>';
+                    appsList.innerHTML = '<p style="color: #666; text-align: center; padding: 40px;">No apps added yet. Go to the "Add App" tab to add your first app!</p>';
                     setLoadingOverlay(false);
                     return;
                 }
@@ -1186,7 +1180,7 @@
                         <div class="form-group" style="margin-top: 10px;">
                             <label style="font-size: 0.9em;">Download URL:</label>
                             <input type="url" class="version-download" data-version="${escapeHtml(version.version)}" value="${escapeHtml(version.downloadURL || '')}" placeholder="https://example.com/app.ipa" style="margin-top: 5px;">
-                            <small style="display: block; margin-top: 5px; color: #666; font-size: 0.85em;">💡 Edit the URL above and click "Update Version" to change it</small>
+                            <small style="display: block; margin-top: 5px; color: #666; font-size: 0.85em;">Edit the URL above and click "Update Version" to change it</small>
                         </div>
                         <div class="form-group" style="margin-top: 10px;">
                             <label style="font-size: 0.9em;">Or Upload New IPA File (optional):</label>

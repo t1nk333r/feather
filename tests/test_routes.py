@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import importlib
+import re
 import threading
 
 import pytest
@@ -21,6 +22,12 @@ import pytest
 # Obviously-fake credentials -- never a real password. Plan 010.
 TEST_ADMIN_PASSWORD = "test-password-not-a-real-secret"
 TEST_SECRET_KEY = "test-secret-key"
+
+# Regression guard for Plan 025: matches the emoji characters removed from
+# templates/index.html. Kept in sync with the identical pattern used in
+# that plan's done-criteria check.
+EMOJI = re.compile("[\U0001F300-\U0001FAFF←-⇿☀-➿"
+                   "⬀-⯿️✅❌❤ℹ]")
 
 
 def seed_source():
@@ -482,6 +489,34 @@ def test_index_page_ok(client):
     # Stable marker: the id of the <img> tag the QR code is loaded into.
     # This becomes the guard for Plan 009's template extraction.
     assert b"qrImage" in resp.data
+
+
+def test_static_icon_is_served(client):
+    resp = client.get("/static/icon.svg")
+    assert resp.status_code == 200
+    assert b"#d02828" in resp.data
+
+
+def test_static_favicon_is_served(client):
+    resp = client.get("/static/favicon.png")
+    assert resp.status_code == 200
+
+
+def test_index_references_the_icon(client):
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert b"/static/icon.svg" in resp.data
+
+
+def test_index_contains_no_emoji(client):
+    """Regression guard (Plan 025): the admin UI's 21 emoji were removed
+    deliberately. Without this test, the next person adding a button puts
+    an emoji straight back in.
+    """
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.data.decode("utf-8")
+    assert EMOJI.findall(body) == []
 
 
 # ---------------------------------------------------------------------------
