@@ -150,4 +150,12 @@ ALL must hold:
 
 - **The rule this encodes**: anything added to `compose.yml` for an optional feature gets a profile, and anything added to `app.py` for an optional feature gets a default-off environment flag. Plan 011 followed the second; Plan 013 followed neither, which is what caused this. Apply it to Plan 014 (`TELEGRAM_NOTIFY_*`) too — it is already designed disabled-by-default, so it only needs to stay that way.
 - Once Plan 013's Step 0 is confirmed and the operator wants ingest, the switch is `docker compose --profile telegram up -d`. Nothing else changes.
+- **Dockge cannot pass `--profile`.** This deployment is managed by Dockge, which runs a plain `docker compose up -d`, so the CLI flag is unreachable from its UI. Use the environment form instead — Compose reads `COMPOSE_PROFILES` from the project `.env`:
+
+  ```
+  COMPOSE_PROFILES=telegram
+  ```
+
+  Verified: with that line absent, `docker compose config --services` lists only `altstore-manager`; with it present, all three. This keeps the inert-by-default property for a fresh clone while letting the operator opt in through the same `.env` they already manage.
+- **Do not add `COMPOSE_PROFILES=telegram` before the eight `TELEGRAM_*`/`BOT_API_*`/`FEATHER_*` variables are set.** The worker refuses to start unconfigured (correctly), and `restart: unless-stopped` turns that into a crash loop. Configure first, enable second.
 - **Deployments track `main`.** Any change to `compose.yml` reaches the live stack on the next pull, so compose changes should be treated as deployment changes and default to inert.
