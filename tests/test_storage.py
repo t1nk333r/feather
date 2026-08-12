@@ -20,6 +20,13 @@ import pytest
 from botocore.exceptions import ClientError
 
 
+# Obviously-fake credentials -- never a real password. Plan 010: app.py now
+# refuses to import at all without ADMIN_PASSWORD set, and a stable
+# SECRET_KEY is needed for a login session to survive across requests.
+TEST_ADMIN_PASSWORD = "test-password-not-a-real-secret"
+TEST_SECRET_KEY = "test-secret-key"
+
+
 # ---------------------------------------------------------------------------
 # Fake S3 client -- records calls, keeps objects in memory, never touches
 # the network. Good enough to exercise GarageIpaStorage's put / exists /
@@ -82,6 +89,8 @@ def client(tmp_path):
     conftest.py, and this suite intentionally doesn't add one).
     """
     os.environ["DATA_DIR"] = str(tmp_path)
+    os.environ["ADMIN_PASSWORD"] = TEST_ADMIN_PASSWORD
+    os.environ["SECRET_KEY"] = TEST_SECRET_KEY
 
     import app as app_module
     importlib.reload(app_module)
@@ -114,6 +123,8 @@ def garage_client(tmp_path, monkeypatch):
     test_routes.py) must see STORAGE_BACKEND back to unset/local.
     """
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ADMIN_PASSWORD", TEST_ADMIN_PASSWORD)
+    monkeypatch.setenv("SECRET_KEY", TEST_SECRET_KEY)
     for key, value in GARAGE_ENV.items():
         monkeypatch.setenv(key, value)
 
@@ -268,6 +279,8 @@ def test_garage_public_url(garage_client, monkeypatch):
 
 def test_garage_backend_refuses_to_start_unconfigured(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ADMIN_PASSWORD", TEST_ADMIN_PASSWORD)
+    monkeypatch.setenv("SECRET_KEY", TEST_SECRET_KEY)
     monkeypatch.setenv("STORAGE_BACKEND", "garage")
     # Some vars set (and must never be echoed back)...
     monkeypatch.setenv("GARAGE_S3_ACCESS_KEY_ID", "AKIA_TEST_KEY_ID_DO_NOT_LEAK")
@@ -348,6 +361,9 @@ def test_update_version_preserves_original_on_failed_upload(garage_client, plain
     garage_client.fake_client.objects[("test-bucket", key)] = original_size
 
     garage_client.fake_client.fail_uploads = True
+
+    login_resp = garage_client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD})
+    assert login_resp.status_code == 200
 
     resp = garage_client.post(
         "/api/update-version",

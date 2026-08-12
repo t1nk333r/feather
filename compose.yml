@@ -19,14 +19,9 @@ services:
       resources:
         limits:
           memory: 4096m
-    healthcheck:
-      test:
-        - CMD
-        - curl
-        - -f
-        - http://localhost:5000/source.json
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+    # Healthcheck now lives solely in the Dockerfile (Plan 010) -- this
+    # duplicate definition previously silently overrode it at runtime, and
+    # the two had drifted (the Dockerfile's still carried a since-removed
+    # `-u "admin:${ADMIN_PASSWORD}"` credential). One definition, in one
+    # place, so they cannot disagree again.
 networks: {}

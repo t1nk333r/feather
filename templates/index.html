@@ -508,6 +508,7 @@
             <button class="tab" onclick="switchTab('manage-apps', this)">Manage Apps</button>
             <button class="tab" onclick="switchTab('qr-code', this)">QR Code</button>
             <button class="tab" onclick="switchTab('source-info', this)">Source Info</button>
+            <button class="tab" onclick="logout()" style="margin-left: auto;">Sign out</button>
         </div>
 
         <div id="add-app" class="tab-content active">
@@ -667,6 +668,23 @@
             </div>
         </div>
 
+        <!-- Login Modal -->
+        <div id="loginModal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>🔒 Sign in</h2>
+                </div>
+                <form id="loginForm">
+                    <div class="form-group">
+                        <label for="loginPassword">Admin password</label>
+                        <input type="password" id="loginPassword" name="password" autocomplete="current-password" required>
+                    </div>
+                    <div id="loginError" style="display:none; color:#d02828;"></div>
+                    <button type="submit" class="btn">Sign in</button>
+                </form>
+            </div>
+        </div>
+
         <div id="qr-code" class="tab-content">
             <div class="qr-container">
                 <h2 style="margin-bottom: 20px;">📱 Add to Feather</h2>
@@ -718,6 +736,18 @@
     <div id="toastContainer" class="toast-container"></div>
 
     <script>
+        // Intercept every fetch() call: if any response comes back 401
+        // (session missing/expired), pop the login modal. This is one
+        // interception point instead of editing all 13 call sites.
+        const _origFetch = window.fetch;
+        window.fetch = async function (...args) {
+            const response = await _origFetch(...args);
+            if (response.status === 401) {
+                showLogin();
+            }
+            return response;
+        };
+
         let currentHost = window.location.origin;
         let sourceUrl = currentHost + '/source.json';
         let featherUrl = sourceUrl.replace('https://', 'feather://').replace('http://', 'feather://');
@@ -1003,7 +1033,7 @@
                                     <h3>${escapeHtml(app.name)}</h3>
                                     <p><strong>Bundle ID:</strong> ${escapeHtml(app.bundleIdentifier)}</p>
                                     <div class="version-info">
-                                        <strong>Latest:</strong> ${app.versions?.[0]?.version || 'N/A'} | 
+                                        <strong>Latest:</strong> ${escapeHtml(app.versions?.[0]?.version || 'N/A')} |
                                         <strong>Developer:</strong> ${escapeHtml(app.developerName || 'Unknown')} |
                                         <strong>Added:</strong> ${app.addedDate ? new Date(app.addedDate).toLocaleDateString() : 'N/A'} |
                                         <strong>Versions:</strong> ${app.versions?.length || 0}
@@ -1183,7 +1213,63 @@
             document.getElementById('newDownloadURL').value = '';
             document.getElementById('newMinOSVersion').value = '';
         }
-        
+
+        // Login / session handling
+        function showLogin() {
+            document.getElementById('loginModal').style.display = 'block';
+        }
+
+        function hideLogin() {
+            document.getElementById('loginModal').style.display = 'none';
+            document.getElementById('loginError').style.display = 'none';
+            document.getElementById('loginForm').reset();
+        }
+
+        async function checkSession() {
+            try {
+                const response = await _origFetch('/api/session');
+                const result = await response.json();
+                if (!result.authed) {
+                    showLogin();
+                } else {
+                    hideLogin();
+                }
+            } catch (error) {
+                // If the session check itself fails, err on the side of
+                // showing the login form rather than leaving it hidden.
+                showLogin();
+            }
+        }
+
+        async function logout() {
+            await fetch('/api/logout', { method: 'POST' });
+            showLogin();
+        }
+
+        document.getElementById('loginForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const password = document.getElementById('loginPassword').value;
+            const errorBox = document.getElementById('loginError');
+            errorBox.style.display = 'none';
+            try {
+                const response = await _origFetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: password })
+                });
+                if (response.ok) {
+                    hideLogin();
+                    loadApps();
+                } else {
+                    errorBox.textContent = 'Invalid password';
+                    errorBox.style.display = 'block';
+                }
+            } catch (error) {
+                errorBox.textContent = 'Login failed: ' + error.message;
+                errorBox.style.display = 'block';
+            }
+        });
+
         async function updateVersion(version, button) {
             const bundleId = document.getElementById('editBundleId').value;
             
@@ -1484,6 +1570,7 @@
 
         // Load apps on initial page load if on manage apps tab
         document.addEventListener('DOMContentLoaded', function() {
+            checkSession();
             if (document.getElementById('manage-apps').classList.contains('active')) {
                 loadApps();
             }
