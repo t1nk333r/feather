@@ -39,6 +39,7 @@ Three facts shape every plan here:
 | [020](020-fix-getfile-timeout-and-silence.md) | Enable `--local`, redact tokens, surface failures | P1 | S | LOW | 013 | **DONE** — `aee7a19`, merged. Root cause: `--local` never reached the server, because that image's entrypoint ignores compose's `command:`. 78→83 tests. **Rotate the bot token** — it was logged in full. |
 | [021](021-extract-ipa-metadata.md) | Read the bundle identifier and version out of the IPA | P2 | S | LOW | 013, 020 | **DONE** — `d8a40da`, merged. Bare `/add` uses detected values; `/add <id> <ver>` still overrides. 83→91 tests. Verified against all 11 real IPAs. |
 | [022](022-narrow-redaction.md) | Narrow the redaction to actual secrets | P2 | XS | LOW | 020 | TODO — Plan 020 scrubs `BOT_API_FILE_ROOT`, which is a mountpoint, not a secret. It made a real `MountMismatchError` undiagnosable. |
+| [023](023-create-app-on-first-publish.md) | Create the app when it isn't in the catalog yet | P1 | S | LOW–MED | 013, 020, 021 | TODO — **the bot cannot publish to an empty catalog**, which is its current state. `/add` only calls `add-version`, which needs the app to exist. |
 | [011](011-garage-s3-ipa-storage.md) | Move IPA storage to the self-hosted Garage S3 object store | P2 | M–L | MED | 005, 008 | **DONE (code)** — merged as `5a636b5`. 39→48 tests. `STORAGE_BACKEND` defaults to `local`, so nothing changed at runtime. Migration run and cutover are operator tasks — see below. |
 
 Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (with a one-line reason) | `REJECTED` (with a one-line rationale)
@@ -332,6 +333,29 @@ Found while planning 021, by reading `Info.plist` out of every IPA in `data/ipas
 Versions drift too: `YT_20.49.5_KP.ipa` and `YT_20.49.5_KP_Cracked.ipa` are catalogued as `20.49.5` but both declare `CFBundleShortVersionString = 20.47.3`. **The filename lies; the plist does not.**
 
 Some of this may be deliberate — renaming a patched Instagram build lets it install beside the real one — but it should be a decision rather than an accident, because AltStore keys update-tracking on the bundle identifier. **Not fixed by any plan; this is a hand edit of `data/source.json` and an operator call.**
+
+## Telegram ingest — end-to-end status (2026-08-12)
+
+Every stage of Plan 013's pipeline is now confirmed working in production except the final publish:
+
+| Stage | Status |
+|---|---|
+| Forward from the source channel | works (Step 0 resolved) |
+| `getFile` under `--local` | works — 31 MB, well past the cloud API's 20 MB cap |
+| Shared-volume read | works — needed `user: "101:101"` on the worker |
+| Five validation checks | works |
+| Metadata extraction (Plan 021) | works — `Detected: app.alextran.immich 3.1.0` |
+| Login to feather | works — `POST /api/login 200` |
+| **Publish** | **fails — `App not found`** (Plan 023) |
+
+**The uid fix is not yet in the repo's `compose.yml`.** `telegram-bot-api` chowns its work dir to uid 101 and the worker image defaults to uid 999, so the worker cannot traverse into it. `os.path.exists()` returns `False` on permission-denied, which surfaces misleadingly as `MountMismatchError: shared volume mounts disagree`. Reproduced directly:
+
+```
+same file, same mount --  as uid 999: False
+                          as uid 101: True
+```
+
+The operator applied `user: "101:101"` to their Dockge copy. **The repo's `compose.yml` still lacks it** and should gain it, or the two will keep diverging.
 
 ## Findings considered and rejected
 
