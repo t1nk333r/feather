@@ -44,8 +44,20 @@ def make_env(**overrides):
 
 
 class FakeBotAPI:
-    def __init__(self, get_file_result=None, get_file_error=None, send_message_error=None):
+    def __init__(
+        self,
+        get_file_result=None,
+        get_file_results=None,
+        get_file_error=None,
+        send_message_error=None,
+    ):
         self.get_file_result = get_file_result or {}
+        # Plan 023: per-file_id results, so a thumbnail getFile can return
+        # something different from the main document's getFile in the
+        # same test. Falls back to get_file_result when a file_id isn't
+        # in the map -- existing tests that only ever fetch one file_id
+        # are unaffected.
+        self.get_file_results = get_file_results or {}
         self.get_file_error = get_file_error
         self.send_message_error = send_message_error
         self.sent_messages = []  # (chat_id, text)
@@ -55,7 +67,7 @@ class FakeBotAPI:
         self.calls.append("get_file")
         if self.get_file_error is not None:
             raise self.get_file_error
-        return self.get_file_result
+        return self.get_file_results.get(file_id, self.get_file_result)
 
     def send_message(self, chat_id, text):
         self.calls.append("send_message")
@@ -98,10 +110,20 @@ class _FakeSession:
 
 
 class FakeFeatherClient:
-    def __init__(self, add_version_result=(True, "ok")):
+    def __init__(
+        self,
+        add_version_result=(True, "ok"),
+        add_app_result=(True, "ok"),
+        set_icon_error=None,
+    ):
         self.login_calls = 0
         self.add_version_calls = []
         self.add_version_result = add_version_result
+        # Plan 023: app creation and icon-setting.
+        self.add_app_calls = []
+        self.add_app_result = add_app_result
+        self.set_icon_calls = []
+        self.set_icon_error = set_icon_error
 
     def login(self):
         self.login_calls += 1
@@ -109,6 +131,15 @@ class FakeFeatherClient:
     def add_version(self, bundle_id, version, path):
         self.add_version_calls.append((bundle_id, version, path))
         return self.add_version_result
+
+    def add_app(self, bundle_id, version, name, developer, path):
+        self.add_app_calls.append((bundle_id, version, name, developer, path))
+        return self.add_app_result
+
+    def set_icon(self, bundle_id, path):
+        self.set_icon_calls.append((bundle_id, path))
+        if self.set_icon_error is not None:
+            raise self.set_icon_error
 
 
 # ---------------------------------------------------------------------------
@@ -152,17 +183,20 @@ def write_gzip_html(path):
     return path
 
 
-def document_update(user_id, file_id="file123", update_id=1):
+def document_update(user_id, file_id="file123", update_id=1, thumbnail=None):
+    document = {
+        "file_id": file_id,
+        "file_name": "Beegram.ipa",
+        "file_size": 0,
+    }
+    if thumbnail is not None:
+        document["thumbnail"] = thumbnail
     return {
         "update_id": update_id,
         "message": {
             "from": {"id": user_id},
             "chat": {"id": CHAT_ID},
-            "document": {
-                "file_id": file_id,
-                "file_name": "Beegram.ipa",
-                "file_size": 0,
-            },
+            "document": document,
         },
     }
 
@@ -472,7 +506,7 @@ def test_extract_reads_bundle_id_and_version(tmp_path):
         },
     )
 
-    assert ingest.extract_ipa_metadata(str(path)) == ("com.example.app", "1.2.3")
+    assert ingest.extract_ipa_metadata(str(path)) == ("com.example.app", "1.2.3", None)
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +532,7 @@ def test_extract_ignores_nested_plists(tmp_path):
         },
     )
 
-    bundle_id, _ = ingest.extract_ipa_metadata(str(path))
+    bundle_id, _, _ = ingest.extract_ipa_metadata(str(path))
     assert bundle_id == "com.example.app"
 
 
@@ -519,7 +553,7 @@ def test_extract_prefers_short_version_string(tmp_path):
         },
     )
 
-    assert ingest.extract_ipa_metadata(str(path)) == ("com.example.app", "1.2.3")
+    assert ingest.extract_ipa_metadata(str(path)) == ("com.example.app", "1.2.3", None)
 
 
 # ---------------------------------------------------------------------------
@@ -538,7 +572,7 @@ def test_extract_falls_back_to_bundle_version(tmp_path):
         },
     )
 
-    assert ingest.extract_ipa_metadata(str(path)) == ("com.example.app", "434010")
+    assert ingest.extract_ipa_metadata(str(path)) == ("com.example.app", "434010", None)
 
 
 # ---------------------------------------------------------------------------
@@ -553,7 +587,7 @@ def test_extract_returns_none_on_unreadable_plist(tmp_path):
     )
 
     # Must not raise.
-    assert ingest.extract_ipa_metadata(str(path)) == (None, None)
+    assert ingest.extract_ipa_metadata(str(path)) == (None, None, None)
 
 
 # ---------------------------------------------------------------------------
@@ -645,3 +679,324 @@ def test_add_with_no_args_and_no_detection_refuses(tmp_path):
     assert ALLOWED_USER_ID in pending  # nothing consumed
     assert len(bot.sent_messages) == 1
     assert "Usage" in bot.sent_messages[0][1]
+
+
+# ---------------------------------------------------------------------------
+# Plan 023: create the app when it isn't in the catalog yet, and set its
+# icon from Telegram's own thumbnail. See plans/023.
+# ---------------------------------------------------------------------------
+
+
+def _pending_doc(ipa_path, **overrides):
+    doc = {
+        "path": str(ipa_path),
+        "filename": "Beegram.ipa",
+        "size": ipa_path.stat().st_size,
+        "sha256": "deadbeef",
+        "bundle_id": "app.alextran.immich",
+        "version": "3.1.0",
+        "name": "Immich",
+        "thumb_path": None,
+    }
+    doc.update(overrides)
+    return doc
+
+
+# ---------------------------------------------------------------------------
+# 22. test_extract_returns_display_name
+# ---------------------------------------------------------------------------
+
+
+def test_extract_returns_display_name(tmp_path):
+    path = write_ipa_with_plists(
+        tmp_path / "App.ipa",
+        {
+            "Payload/App.app/Info.plist": {
+                "CFBundleIdentifier": "com.example.app",
+                "CFBundleShortVersionString": "1.2.3",
+                "CFBundleDisplayName": "Example App",
+            }
+        },
+    )
+
+    assert ingest.extract_ipa_metadata(str(path)) == (
+        "com.example.app",
+        "1.2.3",
+        "Example App",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 23. test_extract_prefers_display_name_over_bundle_name
+# ---------------------------------------------------------------------------
+
+
+def test_extract_prefers_display_name_over_bundle_name(tmp_path):
+    path = write_ipa_with_plists(
+        tmp_path / "App.ipa",
+        {
+            "Payload/App.app/Info.plist": {
+                "CFBundleIdentifier": "com.example.app",
+                "CFBundleShortVersionString": "1.2.3",
+                "CFBundleDisplayName": "Example App",
+                "CFBundleName": "exampleapp",
+            }
+        },
+    )
+
+    _, _, name = ingest.extract_ipa_metadata(str(path))
+    assert name == "Example App"
+
+
+# ---------------------------------------------------------------------------
+# 24. test_extract_name_none_when_absent
+# ---------------------------------------------------------------------------
+
+
+def test_extract_name_none_when_absent(tmp_path):
+    path = write_ipa_with_plists(
+        tmp_path / "App.ipa",
+        {
+            "Payload/App.app/Info.plist": {
+                "CFBundleIdentifier": "com.example.app",
+                "CFBundleShortVersionString": "1.2.3",
+            }
+        },
+    )
+
+    assert ingest.extract_ipa_metadata(str(path)) == ("com.example.app", "1.2.3", None)
+
+
+# ---------------------------------------------------------------------------
+# 25. test_add_creates_app_when_not_found
+# ---------------------------------------------------------------------------
+
+
+def test_add_creates_app_when_not_found(tmp_path):
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    ipa_path = write_minimal_ipa(tmp_path / "Beegram.ipa")
+
+    bot = FakeBotAPI()
+    feather = FakeFeatherClient(add_version_result=(False, "App not found"))
+    pending = {ALLOWED_USER_ID: _pending_doc(ipa_path)}
+
+    ingest.handle_update(text_update(ALLOWED_USER_ID, "/add"), config, bot, feather, pending)
+
+    assert feather.add_app_calls == [
+        ("app.alextran.immich", "3.1.0", "Immich", "Unknown", str(ipa_path))
+    ]
+    assert ALLOWED_USER_ID not in pending
+    assert any(
+        "not in the catalog" in text and "creating" in text
+        for _, text in bot.sent_messages
+    )
+
+
+# ---------------------------------------------------------------------------
+# 26. test_add_does_not_create_app_on_other_errors -- proves the branch
+#     discriminates on the exact message. See the executor's report for the
+#     demonstration that loosening the match breaks this test.
+# ---------------------------------------------------------------------------
+
+
+def test_add_does_not_create_app_on_other_errors(tmp_path):
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    ipa_path = write_minimal_ipa(tmp_path / "Beegram.ipa")
+
+    bot = FakeBotAPI()
+    feather = FakeFeatherClient(add_version_result=(False, "Failed to save source data"))
+    pending = {ALLOWED_USER_ID: _pending_doc(ipa_path)}
+
+    ingest.handle_update(text_update(ALLOWED_USER_ID, "/add"), config, bot, feather, pending)
+
+    assert feather.add_app_calls == []
+    assert ALLOWED_USER_ID in pending  # publish failed, nothing consumed
+    assert bot.sent_messages == [(CHAT_ID, "Publish failed: Failed to save source data")]
+
+
+# ---------------------------------------------------------------------------
+# 27. test_created_app_uses_bundle_id_when_name_missing
+# ---------------------------------------------------------------------------
+
+
+def test_created_app_uses_bundle_id_when_name_missing(tmp_path):
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    ipa_path = write_minimal_ipa(tmp_path / "Beegram.ipa")
+
+    bot = FakeBotAPI()
+    feather = FakeFeatherClient(add_version_result=(False, "App not found"))
+    pending = {ALLOWED_USER_ID: _pending_doc(ipa_path, name=None)}
+
+    ingest.handle_update(text_update(ALLOWED_USER_ID, "/add"), config, bot, feather, pending)
+
+    assert feather.add_app_calls == [
+        ("app.alextran.immich", "3.1.0", "app.alextran.immich", "Unknown", str(ipa_path))
+    ]
+
+
+# ---------------------------------------------------------------------------
+# 28. test_default_developer_is_configurable
+# ---------------------------------------------------------------------------
+
+
+def test_default_developer_is_configurable(tmp_path):
+    ipa_path = write_minimal_ipa(tmp_path / "Beegram.ipa")
+
+    # -- configured --
+    config = ingest.load_config(
+        make_env(BOT_API_FILE_ROOT=str(tmp_path), TELEGRAM_DEFAULT_DEVELOPER="Acme Inc")
+    )
+    bot = FakeBotAPI()
+    feather = FakeFeatherClient(add_version_result=(False, "App not found"))
+    pending = {ALLOWED_USER_ID: _pending_doc(ipa_path)}
+    ingest.handle_update(text_update(ALLOWED_USER_ID, "/add"), config, bot, feather, pending)
+    assert feather.add_app_calls[0][3] == "Acme Inc"
+
+    # -- unset --
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    bot = FakeBotAPI()
+    feather = FakeFeatherClient(add_version_result=(False, "App not found"))
+    pending = {ALLOWED_USER_ID: _pending_doc(ipa_path)}
+    ingest.handle_update(text_update(ALLOWED_USER_ID, "/add"), config, bot, feather, pending)
+    assert feather.add_app_calls[0][3] == "Unknown"
+
+
+# ---------------------------------------------------------------------------
+# 29. test_icon_set_after_app_creation -- exercises the full pipeline: a
+#     forwarded document carrying a Telegram thumbnail, handle_document
+#     resolving it into thumb_path, then creation wiring it through to
+#     set_icon.
+# ---------------------------------------------------------------------------
+
+
+def test_icon_set_after_app_creation(tmp_path):
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    ipa_path = write_ipa_with_plists(
+        tmp_path / "Beegram.ipa",
+        {
+            "Payload/App.app/Info.plist": {
+                "CFBundleIdentifier": "app.alextran.immich",
+                "CFBundleShortVersionString": "3.1.0",
+                "CFBundleDisplayName": "Immich",
+            }
+        },
+    )
+    thumb_path = tmp_path / "thumb.jpg"
+    thumb_path.write_bytes(b"fake jpeg bytes")
+
+    bot = FakeBotAPI(
+        get_file_results={
+            "file123": {"file_path": str(ipa_path)},
+            "thumb123": {"file_path": str(thumb_path)},
+        }
+    )
+    feather = FakeFeatherClient(add_version_result=(False, "App not found"))
+    pending = {}
+
+    update = document_update(
+        ALLOWED_USER_ID, file_id="file123", thumbnail={"file_id": "thumb123"}
+    )
+    update["message"]["document"]["file_size"] = ipa_path.stat().st_size
+
+    ingest.handle_update(update, config, bot, feather, pending)
+    assert pending[ALLOWED_USER_ID]["thumb_path"] == str(thumb_path)
+
+    ingest.handle_update(
+        text_update(ALLOWED_USER_ID, "/add", update_id=3), config, bot, feather, pending
+    )
+
+    assert feather.add_app_calls == [
+        ("app.alextran.immich", "3.1.0", "Immich", "Unknown", str(ipa_path))
+    ]
+    assert feather.set_icon_calls == [("app.alextran.immich", str(thumb_path))]
+    assert any("Icon set" in text for _, text in bot.sent_messages)
+
+
+# ---------------------------------------------------------------------------
+# 30. test_icon_not_set_when_only_adding_a_version -- guards an operator's
+#     hand-chosen icon from being reverted by a later forward.
+# ---------------------------------------------------------------------------
+
+
+def test_icon_not_set_when_only_adding_a_version(tmp_path):
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    ipa_path = write_minimal_ipa(tmp_path / "Beegram.ipa")
+
+    bot = FakeBotAPI()
+    feather = FakeFeatherClient(add_version_result=(True, "ok"))
+    pending = {
+        ALLOWED_USER_ID: _pending_doc(ipa_path, thumb_path=str(tmp_path / "thumb.jpg"))
+    }
+
+    ingest.handle_update(text_update(ALLOWED_USER_ID, "/add"), config, bot, feather, pending)
+
+    assert feather.add_app_calls == []
+    assert feather.set_icon_calls == []
+
+
+# ---------------------------------------------------------------------------
+# 31. test_icon_failure_does_not_fail_publish -- the binary is the point;
+#     the icon is decoration.
+# ---------------------------------------------------------------------------
+
+
+def test_icon_failure_does_not_fail_publish(tmp_path, caplog):
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    ipa_path = write_minimal_ipa(tmp_path / "Beegram.ipa")
+    thumb_path = tmp_path / "thumb.jpg"
+    thumb_path.write_bytes(b"fake jpeg bytes")
+
+    bot = FakeBotAPI()
+    feather = FakeFeatherClient(
+        add_version_result=(False, "App not found"),
+        set_icon_error=RuntimeError("update-app unreachable"),
+    )
+    pending = {ALLOWED_USER_ID: _pending_doc(ipa_path, thumb_path=str(thumb_path))}
+
+    with caplog.at_level("ERROR"):
+        ingest.handle_update(
+            text_update(ALLOWED_USER_ID, "/add"), config, bot, feather, pending
+        )
+
+    assert feather.set_icon_calls == [("app.alextran.immich", str(thumb_path))]
+    assert ALLOWED_USER_ID not in pending  # publish still succeeded
+    reply = bot.sent_messages[-1][1]
+    assert "Published" in reply
+    assert "could not set the icon" in reply.lower()
+
+
+# ---------------------------------------------------------------------------
+# 32. test_no_thumbnail_publishes_without_icon
+# ---------------------------------------------------------------------------
+
+
+def test_no_thumbnail_publishes_without_icon(tmp_path):
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    ipa_path = write_ipa_with_plists(
+        tmp_path / "Beegram.ipa",
+        {
+            "Payload/App.app/Info.plist": {
+                "CFBundleIdentifier": "com.example.app",
+                "CFBundleShortVersionString": "1.0.0",
+            }
+        },
+    )
+
+    bot = FakeBotAPI(get_file_result={"file_path": str(ipa_path)})
+    feather = FakeFeatherClient(add_version_result=(False, "App not found"))
+    pending = {}
+
+    update = document_update(ALLOWED_USER_ID)
+    update["message"]["document"]["file_size"] = ipa_path.stat().st_size
+
+    ingest.handle_update(update, config, bot, feather, pending)
+    assert pending[ALLOWED_USER_ID]["thumb_path"] is None
+
+    ingest.handle_update(
+        text_update(ALLOWED_USER_ID, "/add", update_id=3), config, bot, feather, pending
+    )
+
+    assert feather.add_app_calls  # app created
+    assert feather.set_icon_calls == []
+    assert any("Published" in text for _, text in bot.sent_messages)
+    assert not any("could not" in text.lower() for _, text in bot.sent_messages)
