@@ -226,8 +226,15 @@ test -f README.md && wc -l README.md            # between 100 and 200 lines
 # 2. no infrastructure disclosure
 grep -cE "example|<lan-ip>|/path/to|truenas|dockge" README.md   # 0
 
-# 3. no secret-shaped content
-grep -ciE "ADMIN_PASSWORD=[^\s]|BOT_TOKEN=[0-9]|SECRET_KEY=[A-Za-z0-9]{8}" README.md   # 0
+# 3. no secret-shaped content.
+# CORRECTED 2026-08-14: this criterion originally read
+#   grep -ciE "ADMIN_PASSWORD=[^\s]|..." README.md   # 0
+# which was wrong. Sections 4 and 5 of this plan REQUIRE the literal command
+# `ADMIN_PASSWORD=x ...`, so that pattern can never be 0 and the criterion was
+# unsatisfiable. `x` is a placeholder, not a secret. The corrected pattern
+# ignores single-character and angle-bracket placeholders and looks for values
+# long enough to be real:
+grep -ciE "ADMIN_PASSWORD=[^<[:space:]]{6,}|BOT_TOKEN=[0-9]|SECRET_KEY=[A-Za-z0-9]{8}" README.md   # 0
 
 # 4. the load-bearing facts are present
 grep -c "ADMIN_PASSWORD" README.md              # >= 2
