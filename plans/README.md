@@ -46,6 +46,7 @@ Three facts shape every plan here:
 | [011](011-garage-s3-ipa-storage.md) | Move IPA storage to the self-hosted Garage S3 object store | P2 | M–L | MED | 005, 008 | **DONE (code)** — merged as `5a636b5`. 39→48 tests. `STORAGE_BACKEND` defaults to `local`, so nothing changed at runtime. Migration run and cutover are operator tasks — see below. |
 | [025](025-embed-source-icon-and-remove-emoji.md) | Embed the source icon and remove every UI emoji | P3 | S | LOW | 005, 009 | **DONE** — `eb98dd8`, merged as `51bcf8e`. New `static/` served by Flask; 21 emoji removed across 17 lines. 113→117 tests. **Operator task: repoint `iconURL` off Riley Testut's placeholder** — see below. |
 | [026](026-theme-aware-favicon.md) | Theme-aware favicon | P3 | XS | LOW | 025 | **DONE** — `af9cad1`, merged as `de473a8`. Adds `static/icon-dark.svg` for dark browser chrome; the published source icon is unchanged. 117→119 tests. Red-on-slate was rejected at 2.1:1 contrast. |
+| [027](027-write-readme.md) | Write the repository README | P2 | S | LOW | — | TODO — the repo has no README; `plans/README.md` is the plan index, not a front page. Docs only, touches no code. Retires the long-standing "No README" deferred finding. |
 
 Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (with a one-line reason) | `REJECTED` (with a one-line rationale)
 
