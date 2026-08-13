@@ -502,10 +502,23 @@ def test_static_favicon_is_served(client):
     assert resp.status_code == 200
 
 
+def test_static_dark_icon_is_served(client):
+    resp = client.get("/static/icon-dark.svg")
+    assert resp.status_code == 200
+    assert b"#1F2937" in resp.data
+
+
 def test_index_references_the_icon(client):
     resp = client.get("/")
     assert resp.status_code == 200
     assert b"/static/icon.svg" in resp.data
+
+
+def test_index_offers_both_favicon_themes(client):
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert b"prefers-color-scheme: light" in resp.data
+    assert b"prefers-color-scheme: dark" in resp.data
 
 
 def test_index_contains_no_emoji(client):
