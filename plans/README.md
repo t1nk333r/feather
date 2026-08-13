@@ -45,6 +45,7 @@ Three facts shape every plan here:
 | [024](024-altstore-schema-required-fields.md) | Emit the AltStore-required fields so the source imports | P1 | S | LOW | 005 | **DONE** — `1f4c8a5`, merged. Serve-time normalisation adds `nsfw`, `appPermissions`, `buildVersion`. 102→108 tests. **On-device import not yet retested.** |
 | [011](011-garage-s3-ipa-storage.md) | Move IPA storage to the self-hosted Garage S3 object store | P2 | M–L | MED | 005, 008 | **DONE (code)** — merged as `5a636b5`. 39→48 tests. `STORAGE_BACKEND` defaults to `local`, so nothing changed at runtime. Migration run and cutover are operator tasks — see below. |
 | [025](025-embed-source-icon-and-remove-emoji.md) | Embed the source icon and remove every UI emoji | P3 | S | LOW | 005, 009 | **DONE** — `eb98dd8`, merged as `51bcf8e`. New `static/` served by Flask; 21 emoji removed across 17 lines. 113→117 tests. **Operator task: repoint `iconURL` off Riley Testut's placeholder** — see below. |
+| [026](026-theme-aware-favicon.md) | Theme-aware favicon | P3 | XS | LOW | 025 | **DONE** — `af9cad1`, merged as `de473a8`. Adds `static/icon-dark.svg` for dark browser chrome; the published source icon is unchanged. 117→119 tests. Red-on-slate was rejected at 2.1:1 contrast. |
 
 Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (with a one-line reason) | `REJECTED` (with a one-line rationale)
 
