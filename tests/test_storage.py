@@ -12,6 +12,7 @@ Reuses the `client` fixture pattern from tests/test_routes.py:54-80.
 
 import http.server
 import importlib
+import io
 import json
 import os
 import threading
@@ -133,6 +134,7 @@ def garage_client(tmp_path, monkeypatch):
 
     fake_client = FakeS3Client()
     app_module.ipa_storage._client = fake_client
+    app_module.icon_storage._client = fake_client
 
     app_module.app.config["TESTING"] = True
     with app_module.app.test_client() as c:
@@ -332,6 +334,133 @@ def test_serve_ipa_uses_send_file_when_backend_is_local(client, tmp_path):
     assert resp.status_code == 200
     assert resp.data == payload
     assert "Location" not in resp.headers
+
+
+def test_local_icon_storage_roundtrip(client, tmp_path):
+    storage = client.app_module.icon_storage
+    src = tmp_path / "icon.webp"
+    src.write_bytes(b"icon bytes")
+    assert storage.put(str(src), "com.example.icon", "webp") is True
+    assert storage.exists("com.example.icon", "webp") is True
+    assert (tmp_path / "icons" / "com.example.icon" / "icon.webp").read_bytes() == b"icon bytes"
+    assert storage.delete("com.example.icon") is True
+    assert storage.exists("com.example.icon", "webp") is False
+
+
+def test_garage_icon_key_and_content_type(garage_client, tmp_path):
+    storage = garage_client.app_module.icon_storage
+    src = tmp_path / "icon.png"
+    src.write_bytes(b"png bytes")
+    assert storage.put(str(src), "com.example.icon", "png") is True
+    assert ("test-bucket", "icons/com.example.icon/icon.png") in garage_client.fake_client.objects
+    upload = [call for call in garage_client.fake_client.calls if call[0] == "upload_file"][-1]
+    assert upload[3] == "icons/com.example.icon/icon.png"
+    assert upload[4] == {"ContentType": "image/png"}
+
+
+def test_garage_icon_public_url(garage_client):
+    assert garage_client.app_module.icon_storage.public_url("com.example.icon", "webp") == (
+        "https://garage-web.example.invalid/icons/com.example.icon/icon.webp"
+    )
+
+
+def test_serve_icon_redirects_for_garage(garage_client):
+    garage_client.fake_client.objects[("test-bucket", "icons/com.example.app/icon.png")] = 4
+    response = garage_client.get("/icons/com.example.app/icon.png")
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/icons/com.example.app/icon.png")
+
+
+def test_serve_icon_404_when_garage_object_missing(garage_client):
+    assert garage_client.get("/icons/com.example.app/icon.png").status_code == 404
+
+
+def _seed_garage_catalog(app_module):
+    path = os.path.join(app_module.DATA_DIR, "source.json")
+    with open(path, "w") as f:
+        json.dump(seed_source_with_app(), f)
+    return path
+
+
+def test_update_app_icon_upload_writes_garage_and_stable_catalog_url(garage_client):
+    app_module = garage_client.app_module
+    _seed_garage_catalog(app_module)
+    assert garage_client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+    response = garage_client.post(
+        "/api/update-app",
+        data={
+            "bundleIdentifier": "com.example.app",
+            "name": "Example App",
+            "developerName": "Example Dev",
+            "iconFile": (io.BytesIO(b"webp bytes"), "icon.webp"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 200
+    assert ("test-bucket", "icons/com.example.app/icon.webp") in garage_client.fake_client.objects
+    app_entry = app_module.source_manager.get_app("com.example.app")
+    assert app_entry["iconURL"].startswith("http://localhost/icons/")
+
+
+def test_update_app_icon_replacement_removes_old_extension_after_success(garage_client):
+    app_module = garage_client.app_module
+    _seed_garage_catalog(app_module)
+    garage_client.fake_client.objects[("test-bucket", "icons/com.example.app/icon.png")] = 3
+    assert garage_client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+    response = garage_client.post(
+        "/api/update-app",
+        data={"bundleIdentifier": "com.example.app", "iconFile": (io.BytesIO(b"webp"), "icon.webp")},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 200
+    assert ("test-bucket", "icons/com.example.app/icon.png") not in garage_client.fake_client.objects
+
+
+def test_failed_icon_upload_preserves_previous_object_and_catalog_url(garage_client):
+    app_module = garage_client.app_module
+    source_path = _seed_garage_catalog(app_module)
+    source = json.load(open(source_path))
+    source["apps"][0]["iconURL"] = "http://localhost/icons/com.example.app/icon.png"
+    json.dump(source, open(source_path, "w"))
+    garage_client.fake_client.objects[("test-bucket", "icons/com.example.app/icon.png")] = 3
+    garage_client.fake_client.fail_uploads = True
+    assert garage_client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+    response = garage_client.post(
+        "/api/update-app",
+        data={"bundleIdentifier": "com.example.app", "iconFile": (io.BytesIO(b"new"), "icon.webp")},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 400
+    assert garage_client.fake_client.objects[("test-bucket", "icons/com.example.app/icon.png")] == 3
+    assert app_module.source_manager.get_app("com.example.app")["iconURL"].endswith("icon.png")
+
+
+def test_failed_catalog_save_preserves_old_icon_and_catalog_url(garage_client, monkeypatch):
+    app_module = garage_client.app_module
+    source_path = _seed_garage_catalog(app_module)
+    source = json.load(open(source_path))
+    source["apps"][0]["iconURL"] = "http://localhost/icons/com.example.app/icon.png"
+    json.dump(source, open(source_path, "w"))
+    garage_client.fake_client.objects[("test-bucket", "icons/com.example.app/icon.png")] = 3
+    monkeypatch.setattr(app_module.source_manager, "save_source", lambda _: False)
+    assert garage_client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+    response = garage_client.post(
+        "/api/update-app",
+        data={"bundleIdentifier": "com.example.app", "iconFile": (io.BytesIO(b"new"), "icon.webp")},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 400
+    assert garage_client.fake_client.objects[("test-bucket", "icons/com.example.app/icon.png")] == 3
+    assert json.load(open(source_path))["apps"][0]["iconURL"].endswith("icon.png")
+
+
+def test_delete_app_removes_garage_icon(garage_client):
+    app_module = garage_client.app_module
+    _seed_garage_catalog(app_module)
+    garage_client.fake_client.objects[("test-bucket", "icons/com.example.app/icon.png")] = 3
+    assert garage_client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+    assert garage_client.post("/api/delete-app", json={"bundleIdentifier": "com.example.app"}).status_code == 200
+    assert ("test-bucket", "icons/com.example.app/icon.png") not in garage_client.fake_client.objects
 
 
 # ---------------------------------------------------------------------------
