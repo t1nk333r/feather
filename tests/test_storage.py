@@ -40,6 +40,7 @@ class FakeS3Client:
         self.objects = {}  # (bucket, key) -> size in bytes
         self.calls = []
         self.fail_uploads = False
+        self.head_size_override = None
 
     def _upload_error(self):
         return ClientError(
@@ -73,6 +74,8 @@ class FakeS3Client:
                 },
                 "HeadObject",
             )
+        if self.head_size_override is not None:
+            size = self.head_size_override
         return {"ContentLength": size}
 
     def delete_object(self, Bucket, Key):
@@ -356,6 +359,11 @@ def test_garage_icon_key_and_content_type(garage_client, tmp_path):
     upload = [call for call in garage_client.fake_client.calls if call[0] == "upload_file"][-1]
     assert upload[3] == "icons/com.example.icon/icon.png"
     assert upload[4] == {"ContentType": "image/png"}
+    garage_client.fake_client.head_size_override = 999
+    replacement = tmp_path / "replacement.png"
+    replacement.write_bytes(b"replacement")
+    assert storage.put(str(replacement), "com.example.icon", "png") is False
+    garage_client.fake_client.head_size_override = None
 
 
 def test_garage_icon_public_url(garage_client):
@@ -413,7 +421,9 @@ def test_update_app_icon_replacement_removes_old_extension_after_success(garage_
         content_type="multipart/form-data",
     )
     assert response.status_code == 200
+    assert ("test-bucket", "icons/com.example.app/icon.webp") in garage_client.fake_client.objects
     assert ("test-bucket", "icons/com.example.app/icon.png") not in garage_client.fake_client.objects
+    assert app_module.source_manager.get_app("com.example.app")["iconURL"].endswith("icon.webp")
 
 
 def test_failed_icon_upload_preserves_previous_object_and_catalog_url(garage_client):

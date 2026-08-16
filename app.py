@@ -478,11 +478,35 @@ class GarageIconStorage:
     def _key(self, bundle_id, ext):
         return garage_icon_key(bundle_id, ext)
 
+    @staticmethod
+    def _remaining_size(src):
+        """Return remaining bytes without consuming a file-like source."""
+        if isinstance(src, (str, bytes, os.PathLike)):
+            return os.path.getsize(src)
+        stream = getattr(src, "stream", src)
+        try:
+            position = stream.tell()
+            stream.seek(0, os.SEEK_END)
+            end = stream.tell()
+            stream.seek(position, os.SEEK_SET)
+            return end - position
+        except (AttributeError, OSError, ValueError):
+            content_length = getattr(src, "content_length", None)
+            return content_length if content_length and content_length >= 0 else None
+
     def put(self, src, bundle_id, ext):
         key = self._key(bundle_id, ext)
         extra_args = {"ContentType": ICON_MIME_TYPES[secure_filename(ext)]}
         try:
-            if hasattr(src, "save"):
+            expected_size = self._remaining_size(src)
+        except OSError as e:
+            logging.error(f"Could not determine icon size ({key}): {e}")
+            return False
+        if expected_size is None:
+            logging.error(f"Could not determine icon size ({key})")
+            return False
+        try:
+            if hasattr(src, "save") or hasattr(src, "read"):
                 self._client.upload_fileobj(src, GARAGE_BUCKET, key, ExtraArgs=extra_args)
             else:
                 self._client.upload_file(src, GARAGE_BUCKET, key, ExtraArgs=extra_args)
@@ -494,7 +518,13 @@ class GarageIconStorage:
             logging.error(f"Error uploading icon to Garage ({key}): {str(e)}")
             return False
         try:
-            self._client.head_object(Bucket=GARAGE_BUCKET, Key=key)
+            head = self._client.head_object(Bucket=GARAGE_BUCKET, Key=key)
+            actual_size = head.get("ContentLength")
+            if actual_size != expected_size:
+                logging.error(
+                    f"Garage icon size mismatch ({key}): expected {expected_size}, got {actual_size}"
+                )
+                return False
             return True
         except ClientError as e:
             code = e.response.get("Error", {}).get("Code", "unknown")
