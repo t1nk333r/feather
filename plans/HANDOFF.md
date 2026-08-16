@@ -10,13 +10,13 @@ A self-hosted AltStore/Feather iOS app-source manager. It serves a `source.json`
 - `templates/index.html` — the frontend, extracted in Plan 009
 - `scripts/telegram_bot_ingest.py` — the Telegram ingest worker
 - `scripts/migrate_ipas_to_garage.py` — one-shot local-disk → Garage S3 migration
-- `tests/` — 119 tests, ~4 s, no external network, no Docker (six tests bind loopback-only HTTP stubs)
+- `tests/` — 134 tests, ~4 s, no external network, no Docker (six tests bind loopback-only HTTP stubs)
 - `plans/` — 28 numbered plans, each self-contained; `README.md` is the index and the record of findings
 
 **Test command** (the `ADMIN_PASSWORD` prefix is mandatory — the app refuses to import without it):
 
 ```bash
-ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q     # 119 passed
+ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q     # 134 passed
 ```
 
 ## State
