@@ -10,13 +10,13 @@ A self-hosted AltStore/Feather iOS app-source manager. It serves a `source.json`
 - `templates/index.html` — the frontend, extracted in Plan 009
 - `scripts/telegram_bot_ingest.py` — the Telegram ingest worker
 - `scripts/migrate_ipas_to_garage.py` — one-shot local-disk → Garage S3 migration
-- `tests/` — 108 tests, ~4 s, no network, no Docker
-- `plans/` — 24 numbered plans, each self-contained; `README.md` is the index and the record of findings
+- `tests/` — 119 tests, ~4 s, no external network, no Docker (six tests bind loopback-only HTTP stubs)
+- `plans/` — 28 numbered plans, each self-contained; `README.md` is the index and the record of findings
 
 **Test command** (the `ADMIN_PASSWORD` prefix is mandatory — the app refuses to import without it):
 
 ```bash
-ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q     # 108 passed
+ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q     # 119 passed
 ```
 
 ## State
@@ -59,6 +59,7 @@ Ordered by urgency. None of these are code.
 4. **Three catalog bundle IDs disagree with their binaries** — `com.instagram.theta` and `com.instagram.ifgram` both ship `com.burbn.instagram`; `com.michael-128.qBitControl` ships `MikeMichael225.qBitControl`. May be deliberate (a renamed patched build installs beside the real app), but AltStore keys update-tracking on the bundle identifier, so it should be a decision rather than an accident.
 5. **Garage is configured but not in use.** `STORAGE_BACKEND` defaults to `local`. To switch: fill the Garage keys, run the migration **dry-run first** (expect 8 uploadable / 3 corrupt-skipped / 2 orphans), then `--apply`, *then* set `STORAGE_BACKEND=garage`. Doing it in the other order makes every existing app un-installable on restart.
 6. **`developerName` is `"Unknown"`** on anything the bot created (Plan 023's default), and `localizedDescription` is empty. Cosmetic; fix in the web UI.
+7. **The published source icon still needs its one-time update after Plan 028 lands.** Set only the source-level `iconURL` to `https://f002.backblazeb2.com/file/S30000PUBLIC/MEDIA-PUBLIC/feather-tinker-1024.png` through Source Information. Leave `headerURL` and every app's own `iconURL` alone.
 
 ## Traps
 

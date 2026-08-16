@@ -287,17 +287,23 @@ invisible until deployment.
 
 ## Operator task — NOT part of this plan, do not do it
 
-Serving the icon does not make Feather display it. The catalog's `iconURL` still points at
-Riley Testut's example artwork and must be repointed by hand, once, through the running
-app's **Source Information** form:
+Serving the embedded icon does not make Feather display it as the published source icon.
+The catalog's source-level `iconURL` still points at Riley Testut's example artwork and
+must be repointed once to the operator-supplied public PNG:
 
 ```
-iconURL:  https://feather.example.com/static/icon.png
+iconURL:  https://f002.backblazeb2.com/file/S30000PUBLIC/MEDIA-PUBLIC/feather-tinker-1024.png
 ```
 
-Use the `.png`, not the `.svg` — AltStore-family client support for SVG source icons is not
-guaranteed, and the PNG is the safe choice. This is one field in a web form; it is not a
-code change, not a migration, and must not be scripted against `data/source.json`.
+Use this exact `.png` URL, not the embedded `.svg` or `/static/icon.png`. AltStore-family
+client support for SVG source icons is not guaranteed, and this public PNG is the requested
+canonical source artwork. Do not change `headerURL`, and do not apply this source-level URL
+to the `apps[*].iconURL` fields.
+
+**Correction recorded 2026-08-16:** the current Source Information form does not actually
+expose `iconURL`, and `SourceManager.update_source_info()` does not accept it. Plan 028 adds
+that missing field and the regression tests. Perform this operator update after Plan 028
+lands; do not hand-edit or script a rewrite of `data/source.json`.
 
 ---
 

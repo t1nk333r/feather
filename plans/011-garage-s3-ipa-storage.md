@@ -216,7 +216,7 @@ MAX_CONTENT_LENGTH = int(os.environ.get("MAX_CONTENT_LENGTH", 2 * 1024 * 1024 * 
 - A new `scripts/migrate_ipas_to_garage.py`
 
 **Out of scope — do NOT touch**:
-- **Icons.** `data/icons/` is 268 KB and its own code path. The ask was IPA storage. Moving icons later is easy once this abstraction exists; doing both at once doubles the review surface for 0.02% of the bytes.
+- **Icons.** `data/icons/` is 268 KB and its own code path. The ask was IPA storage. Moving icons later is easy once this abstraction exists; doing both at once doubles the review surface for 0.02% of the bytes. **Follow-up now tracked in Plan 028; do not fold it retroactively into this completed plan.**
 - **Deleting anything from `data/ipas/`.** Not in this plan, not "just the corrupt ones", not as cleanup. Local disk is the rollback.
 - **Repairing the three corrupt catalog entries.** Step 5 *reports* them; fixing them is a hand edit of `data/source.json` plus re-uploading real binaries, which is a data task, not a code change.
 - **Bundle-ID case normalisation.** Deferred migration; never add `.lower()`.
@@ -445,5 +445,5 @@ Stop and report back (do not improvise) if:
 - **Local and Garage will drift once the flag is flipped.** New uploads go only to Garage. If you flip back to `local` after that, recently added apps will 404. Worth a line in the README when the switch is made permanent.
 - **This plan makes the app's dependency on Garage's availability a hard one.** Today a dead disk breaks installs; afterwards, a dead Garage or a dead openresty vhost does. That is a better trade (replicated storage vs one ext4 directory) but it is a real change in failure modes, not a pure win.
 - **The three corrupt catalog entries remain corrupt.** Plan 007 stopped the code from creating new ones; this plan stops them being copied into the object store; nothing has repaired the live catalog. Repairing means sourcing real binaries for `com.instagram.theta 408.1.0_TH`, `com.instagram.ifgram 408.1.0_IF`, and `com.fouadraheb.watusi B_25.36.10_WC`, or removing those three versions from `data/source.json`. Track it separately.
-- **Icons are the obvious follow-up** and become nearly free once this abstraction exists — same interface, `ICON_FOLDER`, an `icons/` key prefix.
+- **Icons are the obvious follow-up** and become nearly free once this abstraction exists — same interface, `ICON_FOLDER`, an `icons/` key prefix. This is now specified by Plan 028.
 - **Reviewer should scrutinise**: that `secure_filename` is still applied to both URL segments in `serve_ipa`; that the default backend really is `local` and the 29 existing tests were not edited to accommodate the change; and that `update_version` still cannot destroy an existing object before its replacement is confirmed complete.
