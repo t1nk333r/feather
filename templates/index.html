@@ -727,6 +727,10 @@
                     <input type="url" name="website" id="sourceWebsite">
                 </div>
                 <div class="form-group">
+                    <label>Icon URL:</label>
+                    <input type="url" name="iconURL" id="sourceIconURL">
+                </div>
+                <div class="form-group">
                     <label>Tint Color (hex):</label>
                     <input type="text" name="tintColor" id="sourceTintColor" placeholder="#4185A9">
                 </div>
@@ -1534,6 +1538,7 @@
                 document.getElementById('sourceSubtitle').value = source.subtitle || '';
                 document.getElementById('sourceDescription').value = source.description || '';
                 document.getElementById('sourceWebsite').value = source.website || '';
+                document.getElementById('sourceIconURL').value = source.iconURL || '';
                 document.getElementById('sourceTintColor').value = source.tintColor || '';
             } catch (error) {
                 console.error('Error loading source info:', error);

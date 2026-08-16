@@ -65,7 +65,7 @@ Summary:
   unset, the app falls back to the client-supplied `Host` header and logs a warning),
   `DATA_DIR`, `PORT`, `SECRET_KEY`, `MAX_CONTENT_LENGTH`.
 - **Optional — S3 storage:** `STORAGE_BACKEND` plus `GARAGE_*`. Defaults to local disk
-  storage; unset means today's behavior is unchanged.
+  storage for IPAs and owned app icons; unset means today's behavior is unchanged.
 - **Optional — Telegram ingest and notifications:** `TELEGRAM_*`, `BOT_API_*`,
   `FEATHER_*`. Off unless explicitly configured.
 
@@ -96,9 +96,11 @@ already built and smoke-tested — `docker compose build` silently bypasses that
 
 ## Optional features
 
-**Garage S3 storage.** IPAs and icons can be stored in an S3-compatible bucket (Garage)
-instead of on local disk. Off by default (`STORAGE_BACKEND=local`). See
-`plans/011-garage-s3-ipa-storage.md`.
+**Garage S3 storage.** IPAs and owned app icons can be stored in an S3-compatible bucket
+(Garage) instead of on local disk. Off by default (`STORAGE_BACKEND=local`). See
+`plans/011-garage-s3-ipa-storage.md` and `plans/028-source-and-garage-app-icons.md`.
+Before switching an existing deployment, run the dry-run-first
+`scripts/migrate_icons_to_garage.py` migration (then `--apply`).
 
 **Telegram ingest and notifications.** IPAs can be forwarded to a Telegram bot and
 published automatically, and the catalog can post a Telegram message on add/update/delete.
@@ -113,6 +115,7 @@ templates/index.html            the admin UI
 static/                         source icon and favicons
 scripts/telegram_bot_ingest.py  optional: forward-an-IPA-to-a-bot ingest worker
 scripts/migrate_ipas_to_garage.py  one-shot local-disk -> Garage S3 migration
+scripts/migrate_icons_to_garage.py  one-shot local app-icon -> Garage migration
 tests/                          the test suite; no network, no Docker
 plans/                          numbered implementation plans; plans/README.md is the index
 ```
