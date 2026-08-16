@@ -629,6 +629,31 @@ def test_update_source_persists_name(authed_client):
     assert body["name"] == "Renamed Source"
 
 
+def test_fresh_source_uses_feather_tinker_icon(client, tmp_path):
+    path = tmp_path / "fresh-source.json"
+    manager = client.app_module.SourceManager(str(path))
+    source = json.loads(path.read_text())
+    assert source["iconURL"] == "https://f002.backblazeb2.com/file/S30000PUBLIC/MEDIA-PUBLIC/feather-tinker-1024.png"
+    assert source["headerURL"].endswith("OceanHeader.png")
+    assert manager.load_source()["iconURL"] == source["iconURL"]
+
+
+def test_update_source_persists_icon_url_and_preserves_header(authed_client):
+    before = authed_client.get("/source.json").get_json()["headerURL"]
+    icon = "https://f002.backblazeb2.com/file/S30000PUBLIC/MEDIA-PUBLIC/feather-tinker-1024.png"
+    response = authed_client.post("/api/update-source", json={"iconURL": icon})
+    assert response.status_code == 200
+    source = authed_client.get("/source.json").get_json()
+    assert source["iconURL"] == icon
+    assert source["headerURL"] == before
+
+
+def test_source_info_form_exposes_icon_url(client):
+    html = client.get("/").get_data(as_text=True)
+    assert 'type="url" name="iconURL" id="sourceIconURL"' in html
+    assert "document.getElementById('sourceIconURL').value = source.iconURL || '';" in html
+
+
 # ---------------------------------------------------------------------------
 # Validation: missing bundleIdentifier -> 400 with a JSON error
 # ---------------------------------------------------------------------------

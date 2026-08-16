@@ -31,6 +31,13 @@ ICON_FOLDER = os.path.join(DATA_DIR, "icons")
 BACKUP_FOLDER = os.path.join(DATA_DIR, "backups")
 ALLOWED_EXTENSIONS = {'ipa'}
 ALLOWED_ICON_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp', 'gif'}
+ICON_MIME_TYPES = {
+    'png': 'image/png',
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'webp': 'image/webp',
+    'gif': 'image/gif',
+}
 
 # Environment-driven configuration
 SECRET_KEY = os.environ.get("SECRET_KEY")
@@ -387,6 +394,153 @@ class GarageIpaStorage:
         return f"{GARAGE_PUBLIC_BASE_URL.rstrip('/')}/{key}"
 
 
+def garage_icon_key(bundle_id, ext):
+    """Return the stable Garage key for an app-owned icon."""
+    return f"icons/{secure_filename(bundle_id)}/icon.{secure_filename(ext)}"
+
+
+class LocalIconStorage:
+    """Atomic app-icon storage on the local filesystem."""
+
+    def _path(self, bundle_id, ext):
+        return os.path.join(ICON_FOLDER, secure_filename(bundle_id), f"icon.{secure_filename(ext)}")
+
+    def put(self, src, bundle_id, ext):
+        destination = self._path(bundle_id, ext)
+        temporary = None
+        try:
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            fd, temporary = tempfile.mkstemp(dir=os.path.dirname(destination), prefix=".icon-")
+            os.close(fd)
+            if hasattr(src, "save"):
+                src.save(temporary)
+            else:
+                os.replace(src, temporary)
+            os.replace(temporary, destination)
+            temporary = None
+            return True
+        except Exception as e:
+            logging.error(f"Error saving icon file: {str(e)}")
+            if temporary and os.path.exists(temporary):
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
+            return False
+
+    def delete(self, bundle_id):
+        deleted = False
+        for ext in ALLOWED_ICON_EXTENSIONS:
+            path = self._path(bundle_id, ext)
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                    deleted = True
+            except OSError as e:
+                logging.warning(f"Could not delete icon file {path}: {e}")
+        bundle_folder = os.path.dirname(self._path(bundle_id, "png"))
+        try:
+            if os.path.isdir(bundle_folder) and not os.listdir(bundle_folder):
+                os.rmdir(bundle_folder)
+        except OSError as e:
+            logging.warning(f"Could not remove empty icon folder {bundle_folder}: {e}")
+        return deleted
+
+    def cleanup_variants(self, bundle_id, keep_ext):
+        for ext in ALLOWED_ICON_EXTENSIONS - {secure_filename(keep_ext)}:
+            path = self._path(bundle_id, ext)
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError as e:
+                logging.warning(f"Could not clean stale icon {path}: {e}")
+
+    def exists(self, bundle_id, ext):
+        return os.path.exists(self._path(bundle_id, ext))
+
+    def public_url(self, bundle_id, ext):
+        return None
+
+
+class GarageIconStorage:
+    """App-icon storage in Garage, using the literal ``icons/`` prefix."""
+
+    def __init__(self):
+        _require_garage_config()
+        self._client = boto3.client(
+            "s3",
+            endpoint_url=GARAGE_S3_ENDPOINT,
+            region_name=GARAGE_S3_REGION,
+            aws_access_key_id=GARAGE_S3_ACCESS_KEY_ID,
+            aws_secret_access_key=GARAGE_S3_SECRET_ACCESS_KEY,
+        )
+
+    def _key(self, bundle_id, ext):
+        return garage_icon_key(bundle_id, ext)
+
+    def put(self, src, bundle_id, ext):
+        key = self._key(bundle_id, ext)
+        extra_args = {"ContentType": ICON_MIME_TYPES[secure_filename(ext)]}
+        try:
+            if hasattr(src, "save"):
+                self._client.upload_fileobj(src, GARAGE_BUCKET, key, ExtraArgs=extra_args)
+            else:
+                self._client.upload_file(src, GARAGE_BUCKET, key, ExtraArgs=extra_args)
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "unknown")
+            logging.error(f"Error uploading icon to Garage ({key}): {code}")
+            return False
+        except Exception as e:
+            logging.error(f"Error uploading icon to Garage ({key}): {str(e)}")
+            return False
+        try:
+            self._client.head_object(Bucket=GARAGE_BUCKET, Key=key)
+            return True
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "unknown")
+            logging.error(f"Uploaded icon but could not verify it ({key}): {code}")
+            return False
+
+    def delete(self, bundle_id):
+        deleted = False
+        for ext in ALLOWED_ICON_EXTENSIONS:
+            key = self._key(bundle_id, ext)
+            existed = self.exists(bundle_id, ext)
+            try:
+                self._client.delete_object(Bucket=GARAGE_BUCKET, Key=key)
+                deleted = deleted or existed
+            except ClientError as e:
+                code = e.response.get("Error", {}).get("Code", "unknown")
+                logging.error(f"Error deleting icon object ({key}): {code}")
+        return deleted
+
+    def cleanup_variants(self, bundle_id, keep_ext):
+        for ext in ALLOWED_ICON_EXTENSIONS - {secure_filename(keep_ext)}:
+            key = self._key(bundle_id, ext)
+            try:
+                if self.exists(bundle_id, ext):
+                    self._client.delete_object(Bucket=GARAGE_BUCKET, Key=key)
+            except ClientError as e:
+                code = e.response.get("Error", {}).get("Code", "unknown")
+                logging.warning(f"Could not clean stale icon object ({key}): {code}")
+
+    def exists(self, bundle_id, ext):
+        key = self._key(bundle_id, ext)
+        try:
+            self._client.head_object(Bucket=GARAGE_BUCKET, Key=key)
+            return True
+        except ClientError as e:
+            status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            code = e.response.get("Error", {}).get("Code", "unknown")
+            if status == 404 or code in ("404", "NoSuchKey"):
+                return False
+            logging.error(f"Error checking icon existence ({key}): {code}")
+            return False
+
+    def public_url(self, bundle_id, ext):
+        return f"{GARAGE_PUBLIC_BASE_URL.rstrip('/')}/{self._key(bundle_id, ext)}"
+
+
 class SourceManager:
     """Manages the AltSource data and file operations"""
     
@@ -535,34 +689,23 @@ class SourceManager:
             return f"{base_url.rstrip('/')}{path}"
         return path
     
-    def get_icon_path(self, bundle_id):
-        """Get the file path for an icon file.
-
-        Read-only: does not create the bundle subdirectory (see
-        get_ipa_path's docstring for why). Not currently called by
-        save_icon_file/download_icon_from_url, which construct their own
-        paths and already create their own directories.
-        """
-        bundle_folder = os.path.join(ICON_FOLDER, secure_filename(bundle_id))
-        # Try to find existing icon or use default name
-        return os.path.join(bundle_folder, "icon.png")
-    
     def save_icon_file(self, file, bundle_id):
-        """Save uploaded icon file"""
+        """Save uploaded icon file and return its stored extension."""
         try:
-            # Get file extension
             ext = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else 'png'
-            filepath = os.path.join(ICON_FOLDER, secure_filename(bundle_id), f"icon.{ext}")
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            file.save(filepath)
-            logging.info(f"Saved icon file: {filepath}")
-            return filepath
+            if ext not in ALLOWED_ICON_EXTENSIONS:
+                return None
+            if icon_storage.put(file, bundle_id, ext):
+                logging.info(f"Saved icon file for {bundle_id} ({ext})")
+                return ext
+            return None
         except Exception as e:
             logging.error(f"Error saving icon file: {str(e)}")
             return None
     
     def download_icon_from_url(self, url, bundle_id):
         """Download icon file from URL and save it locally"""
+        filepath = None
         try:
             logging.info(f"Downloading icon from: {url}")
             response = requests.get(url, stream=True, timeout=30)
@@ -580,8 +723,8 @@ class SourceManager:
             elif url.lower().endswith(('.jpg', '.jpeg', '.webp', '.gif')):
                 ext = url.lower().rsplit('.', 1)[1]
             
-            filepath = os.path.join(ICON_FOLDER, secure_filename(bundle_id), f"icon.{ext}")
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            fd, filepath = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix=f".{ext}")
+            os.close(fd)
 
             total = 0
             limit = app.config.get("MAX_CONTENT_LENGTH") or (2 * 1024 * 1024 * 1024)
@@ -593,49 +736,34 @@ class SourceManager:
                     if total > limit:
                         f.close()
                         os.remove(filepath)
+                        filepath = None
                         raise ValueError(f"Download exceeded size limit of {limit} bytes")
                     f.write(chunk)
 
-            logging.info(f"Downloaded icon file: {filepath}")
-            return filepath
+            if icon_storage.put(filepath, bundle_id, ext):
+                logging.info(f"Downloaded icon file for {bundle_id} ({ext})")
+                return ext
+            return None
         except Exception as e:
             logging.error(f"Error downloading icon file: {str(e)}")
             return None
+        finally:
+            if filepath and os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
     
     def delete_icon_file(self, bundle_id):
-        """Delete icon file for an app"""
-        try:
-            bundle_folder = os.path.join(ICON_FOLDER, secure_filename(bundle_id))
-            if os.path.exists(bundle_folder):
-                for file in os.listdir(bundle_folder):
-                    if file.startswith('icon.'):
-                        os.remove(os.path.join(bundle_folder, file))
-                # Try to remove bundle folder if empty
-                try:
-                    if not os.listdir(bundle_folder):
-                        os.rmdir(bundle_folder)
-                except OSError as e:
-                    logging.warning(f"Could not remove empty bundle folder {bundle_folder}: {e}")
-                logging.info(f"Deleted icon file for: {bundle_id}")
-                return True
-            return False
-        except Exception as e:
-            logging.error(f"Error deleting icon file: {str(e)}")
-            return False
+        """Delete all icon variants for an app via the configured backend."""
+        return icon_storage.delete(bundle_id)
     
-    def get_local_icon_url(self, bundle_id, base_url=None):
-        """Get the URL path for serving a local icon file"""
-        # Check what icon file exists
-        bundle_folder = os.path.join(ICON_FOLDER, secure_filename(bundle_id))
-        if os.path.exists(bundle_folder):
-            for ext in ['png', 'jpg', 'jpeg', 'webp', 'gif']:
-                icon_path = os.path.join(bundle_folder, f"icon.{ext}")
-                if os.path.exists(icon_path):
-                    path = f"/icons/{secure_filename(bundle_id)}/icon.{ext}"
-                    if base_url:
-                        return f"{base_url.rstrip('/')}{path}"
-                    return path
-        return None
+    def get_hosted_icon_url(self, bundle_id, ext, base_url=None):
+        """Build the stable app-owned icon URL."""
+        path = f"/icons/{secure_filename(bundle_id)}/icon.{secure_filename(ext)}"
+        if base_url:
+            return f"{base_url.rstrip('/')}{path}"
+        return path
     
     def initialize_source(self):
         """Initialize source.json with default data if it doesn't exist"""
@@ -644,7 +772,7 @@ class SourceManager:
                 "name": "My AltStore Source",
                 "subtitle": "Custom iOS app repository",
                 "description": "A custom source for managing iOS apps with AltStore and Feather",
-                "iconURL": "https://f000.backblazeb2.com/file/rileytestut/ExampleSource/OctoSource.png",
+                "iconURL": "https://f002.backblazeb2.com/file/S30000PUBLIC/MEDIA-PUBLIC/feather-tinker-1024.png",
                 "headerURL": "https://f000.backblazeb2.com/file/rileytestut/ExampleSource/OceanHeader.png",
                 "website": "https://example.com",
                 "tintColor": "#4185A9",
@@ -780,18 +908,19 @@ class SourceManager:
                 file_size = 0
 
             # Handle icon file - upload, download, or use URL
+            stored_icon_ext = None
             if icon_file and allowed_icon_file(icon_file.filename):
                 # Upload icon file
-                filepath = self.save_icon_file(icon_file, bundle_id)
-                if filepath:
-                    icon_url = self.get_local_icon_url(bundle_id, base_url)
+                stored_icon_ext = self.save_icon_file(icon_file, bundle_id)
+                if stored_icon_ext:
+                    icon_url = self.get_hosted_icon_url(bundle_id, stored_icon_ext, base_url)
                 else:
                     return False, f"Failed to save uploaded icon for {bundle_id}"
             elif download_icon_from_url and icon_url:
                 # Download icon from URL
-                filepath = self.download_icon_from_url(icon_url, bundle_id)
-                if filepath:
-                    icon_url = self.get_local_icon_url(bundle_id, base_url)
+                stored_icon_ext = self.download_icon_from_url(icon_url, bundle_id)
+                if stored_icon_ext:
+                    icon_url = self.get_hosted_icon_url(bundle_id, stored_icon_ext, base_url)
                 else:
                     return False, f"Failed to download icon from {icon_url}"
 
@@ -829,6 +958,8 @@ class SourceManager:
                 logging.info(f"Added new app: {data['name']}")
         
             if self.save_source(source_data):
+                if stored_icon_ext:
+                    icon_storage.cleanup_variants(bundle_id, stored_icon_ext)
                 return True, "App added successfully"
             return False, "Failed to save source data"
 
@@ -1014,13 +1145,15 @@ class SourceManager:
             ]
         
             if len(source_data['apps']) < initial_count:
-                # Delete all IPA files and the icon for this app
+                # Delete IPA files before save (Plan 011 behavior), but only
+                # delete the icon after the catalog removal is committed.
                 if app_to_delete:
                     for version in app_to_delete.get('versions', []):
                         self.delete_ipa_file(bundle_identifier, version.get('version', ''))
-                    self.delete_icon_file(bundle_identifier)
 
                 success = self.save_source(source_data)
+                if success:
+                    self.delete_icon_file(bundle_identifier)
                 return success, "App deleted successfully" if success else "Failed to save source after deletion"
             else:
                 return False, "App not found"
@@ -1063,21 +1196,22 @@ class SourceManager:
             # Only update icon if a new one is provided
             icon_url = data.get('iconURL', '')
             icon_updated = False
-        
+            stored_icon_ext = None
+
             if icon_file and allowed_icon_file(icon_file.filename):
                 # Upload icon file
-                filepath = self.save_icon_file(icon_file, bundle_identifier)
-                if filepath:
-                    icon_url = self.get_local_icon_url(bundle_identifier, base_url)
+                stored_icon_ext = self.save_icon_file(icon_file, bundle_identifier)
+                if stored_icon_ext:
+                    icon_url = self.get_hosted_icon_url(bundle_identifier, stored_icon_ext, base_url)
                     app['iconURL'] = icon_url
                     icon_updated = True
                 else:
                     return False, f"Failed to save uploaded icon for {bundle_identifier}"
             elif download_icon_from_url and icon_url:
                 # Download icon from URL
-                filepath = self.download_icon_from_url(icon_url, bundle_identifier)
-                if filepath:
-                    icon_url = self.get_local_icon_url(bundle_identifier, base_url)
+                stored_icon_ext = self.download_icon_from_url(icon_url, bundle_identifier)
+                if stored_icon_ext:
+                    icon_url = self.get_hosted_icon_url(bundle_identifier, stored_icon_ext, base_url)
                     app['iconURL'] = icon_url
                     icon_updated = True
                 else:
@@ -1089,6 +1223,8 @@ class SourceManager:
             # If icon_updated is False, preserve existing icon (don't modify app['iconURL'])
         
             success = self.save_source(source_data)
+            if success and stored_icon_ext:
+                icon_storage.cleanup_variants(bundle_identifier, stored_icon_ext)
             return success, "App updated successfully" if success else "Failed to update app"
     
     def add_version(self, bundle_identifier, version_data, ipa_file=None, download_from_url=False, base_url=None):
@@ -1254,7 +1390,7 @@ class SourceManager:
             if not source_data:
                 return False, "Failed to load source data"
         
-            for key in ['name', 'subtitle', 'description', 'website', 'tintColor']:
+            for key in ['name', 'subtitle', 'description', 'website', 'tintColor', 'iconURL']:
                 if key in data and data[key]:
                     source_data[key] = data[key]
         
@@ -1269,8 +1405,10 @@ source_manager = SourceManager(SOURCE_FILE)
 # "garage" -- see _require_garage_config for the refuse-to-start check.
 if STORAGE_BACKEND == "garage":
     ipa_storage = GarageIpaStorage()
+    icon_storage = GarageIconStorage()
 else:
     ipa_storage = LocalIpaStorage()
+    icon_storage = LocalIconStorage()
 
 
 def requires_auth(f):
@@ -1349,29 +1487,27 @@ def serve_ipa(bundle_id, filename):
 
 @app.route('/icons/<bundle_id>/icon.<ext>')
 def serve_icon(bundle_id, ext):
-    """Serve icon files"""
+    """Serve app icons through the configured storage backend."""
     try:
         # Security: ensure bundle_id and extension are safe
         safe_bundle_id = secure_filename(bundle_id)
         safe_ext = secure_filename(ext)
+
+        if not safe_bundle_id or safe_bundle_id != bundle_id or not safe_ext or safe_ext != ext:
+            return jsonify({"error": "Invalid icon path"}), 400
         
         if safe_ext not in ALLOWED_ICON_EXTENSIONS:
             return jsonify({"error": "Invalid icon format"}), 400
         
-        filepath = os.path.join(ICON_FOLDER, safe_bundle_id, f"icon.{safe_ext}")
-        
-        if not os.path.exists(filepath):
+        if not icon_storage.exists(safe_bundle_id, safe_ext):
             return jsonify({"error": "Icon file not found"}), 404
-        
-        # Determine MIME type
-        mime_types = {
-            'png': 'image/png',
-            'jpg': 'image/jpeg',
-            'jpeg': 'image/jpeg',
-            'webp': 'image/webp',
-            'gif': 'image/gif'
-        }
-        mimetype = mime_types.get(safe_ext, 'image/png')
+
+        url = icon_storage.public_url(safe_bundle_id, safe_ext)
+        if url:
+            return redirect(url, code=302)
+
+        filepath = os.path.join(ICON_FOLDER, safe_bundle_id, f"icon.{safe_ext}")
+        mimetype = ICON_MIME_TYPES.get(safe_ext, 'image/png')
         
         return send_file(filepath, mimetype=mimetype)
     except Exception as e:
