@@ -17,6 +17,12 @@ COPY app.py .
 COPY templates/ ./templates/
 COPY static/ ./static/
 
+# Plan 029: opt-in cron release importer. Copied (not COPY scripts/) so
+# this image only ever gains the one script it needs, matching the
+# .dockerignore re-admission above. It is never invoked by CMD below --
+# only by the release-import Compose service / host crontab.
+COPY scripts/release_source_ingest.py ./scripts/release_source_ingest.py
+
 # Create non-root user for security
 RUN groupadd -r altstore && useradd -r -g altstore altstore \
     && mkdir -p /app/data \
