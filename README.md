@@ -68,6 +68,9 @@ Summary:
   storage for IPAs and owned app icons; unset means today's behavior is unchanged.
 - **Optional — Telegram ingest and notifications:** `TELEGRAM_*`, `BOT_API_*`,
   `FEATHER_*`. Off unless explicitly configured.
+- **Optional — cron release importer:** `RELEASE_IMPORT_*`, `GITHUB_TOKEN`,
+  `GITLAB_TOKEN` (reuses `FEATHER_BASE_URL` / `FEATHER_ADMIN_PASSWORD`). Off
+  unless explicitly scheduled; see below.
 
 ## Routes
 
@@ -107,6 +110,46 @@ published automatically, and the catalog can post a Telegram message on add/upda
 Both are off unless the relevant `TELEGRAM_*` variables are set. See
 `plans/013-telegram-bot-ingest.md` and `plans/014-telegram-notifications.md`.
 
+**Cron release importer.** A one-shot importer (`scripts/release_source_ingest.py`,
+the `release-import` Compose service) can poll a configured GitHub or GitLab
+repository's releases and publish new IPAs to feather automatically, without a
+Telegram bot in the loop. It never touches `data/source.json`, `data/ipas/`, or
+`data/icons/` directly -- it publishes through the same `/api/login` +
+`/api/add-version` / `/api/add-app` HTTP API the admin UI uses. See
+`plans/029-cron-release-imports.md` for the full design. Off unless you set it up:
+
+```bash
+# One-time setup
+mkdir -p data/release-import
+cp release-sources.example.json data/release-import/release-sources.json
+# edit data/release-import/release-sources.json -- at minimum set each job's
+# "project" and "bundleIdentifier"
+chown -R 999:999 data/release-import
+
+# Dry-run first: queries GitHub/GitLab + feather's public app endpoint, but
+# never downloads, logs in, publishes, or writes state.
+docker compose run --rm -T release-import
+
+# Then apply. Run it twice in a row to see the idempotency: the first
+# publishes, the second reports the job as skipped (already published).
+docker compose run --rm -T release-import --apply
+docker compose run --rm -T release-import --apply
+```
+
+Only `owner/repository` GitHub projects and `namespace/project` GitLab projects
+are supported -- no self-hosted GitHub/GitLab, no branch/nightly builds, no CI
+job artifacts. `--job <id>` restricts a run to one configured job (useful for
+testing one entry without waiting on the others). To disable scheduling, remove
+the crontab line below (or never add it) -- the Compose service is inert under
+plain `docker compose up -d` regardless.
+
+Host crontab example (adjust the path and `docker` binary for your host; do not
+assume this path matches your deployment):
+
+```cron
+17 */6 * * * cd /path/to/feather && /usr/bin/docker compose run --rm -T release-import --apply >> /var/log/feather-release-import.log 2>&1
+```
+
 ## Repository layout
 
 ```
@@ -114,8 +157,10 @@ app.py                          the entire Flask app
 templates/index.html            the admin UI
 static/                         source icon and favicons
 scripts/telegram_bot_ingest.py  optional: forward-an-IPA-to-a-bot ingest worker
+scripts/release_source_ingest.py  optional: cron-driven GitHub/GitLab release importer
 scripts/migrate_ipas_to_garage.py  one-shot local-disk -> Garage S3 migration
 scripts/migrate_icons_to_garage.py  one-shot local app-icon -> Garage migration
+release-sources.example.json    template for the release importer's manifest
 tests/                          the test suite; no network, no Docker
 plans/                          numbered implementation plans; plans/README.md is the index
 ```
