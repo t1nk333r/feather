@@ -627,7 +627,7 @@ def handle_add_command(user_id, chat_id, text, config, bot, feather, pending):
     if ok:
         lines = []
         if created:
-            app_name = doc.get("name") or bundle_id
+            app_name = name_override or doc.get("name") or bundle_id
             lines.append(
                 f'{bundle_id} is not in the catalog — creating it as "{app_name}".'
             )
