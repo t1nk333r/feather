@@ -1567,3 +1567,56 @@ def test_notify_sends_no_parse_mode(client_with_telegram, monkeypatch):
 
     assert len(calls) == 1
     assert "parse_mode" not in calls[0]
+
+
+# ---------------------------------------------------------------------------
+# Plan 032: /api/add-app must honor the icon the Add-App form sends
+# ---------------------------------------------------------------------------
+
+
+def test_add_app_icon_upload_sets_hosted_icon_url(authed_client):
+    """Regression for Plan 032: /api/add-app must honor an uploaded iconFile.
+    Before the fix the route dropped it and the app was created icon-less."""
+    import io
+
+    resp = authed_client.post(
+        "/api/add-app",
+        data={
+            "name": "Iconic",
+            "bundleIdentifier": "com.example.iconic",
+            "developerName": "Dev",
+            "version": "1.0",
+            "downloadURL": "http://example.test/x.ipa",
+            "iconFile": (io.BytesIO(b"\x89PNG fake bytes"), "icon.png"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 200
+    assert json.loads(resp.data)["success"] is True
+
+    app_entry = json.loads(authed_client.get("/api/app/com.example.iconic").data)
+    assert app_entry["iconURL"].endswith("/icons/com.example.iconic/icon.png")
+
+
+def test_add_app_icon_download_from_url_sets_hosted_icon_url(authed_client, gzip_ipa_server):
+    """Plan 032: the downloadIconFromUrl flag must also be honored on add-app.
+    Reuses gzip_ipa_server (an in-process loopback HTTP stub) as a stand-in
+    downloadable body, exactly as the update-app icon tests do."""
+    resp = authed_client.post(
+        "/api/add-app",
+        data={
+            "name": "Fetched",
+            "bundleIdentifier": "com.example.fetched",
+            "developerName": "Dev",
+            "version": "1.0",
+            "downloadURL": "http://example.test/x.ipa",
+            "iconURL": gzip_ipa_server,
+            "downloadIconFromUrl": "true",
+        },
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 200
+    assert json.loads(resp.data)["success"] is True
+
+    app_entry = json.loads(authed_client.get("/api/app/com.example.fetched").data)
+    assert "/icons/com.example.fetched/" in app_entry["iconURL"]
