@@ -101,6 +101,14 @@ jobs:
         run: |
           set -euo pipefail
           IMAGE="$(echo '${{ steps.meta.outputs.tags }}' | head -n1)"
+          # Plan 029: the opt-in cron release importer must be present and
+          # runnable in the main image. --help touches no network and
+          # needs no config, so this also proves the script and its
+          # imports (stdlib + pinned requests) actually work in the image.
+          OUT="$(docker run --rm "$IMAGE" python scripts/release_source_ingest.py --help)"
+          echo "$OUT" | grep -q -- "--apply" \
+            || { echo "FAIL: release importer --help did not mention --apply"; exit 1; }
+          echo "ok: release importer --help works and mentions --apply"
           # Plan 010: the app must refuse to boot without ADMIN_PASSWORD.
           # Assert that, so a regression that silently re-allows an
           # unauthenticated boot fails the build.

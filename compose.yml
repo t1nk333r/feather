@@ -77,6 +77,35 @@ services:
       # business modifying that directory.
       - telegram-bot-api-data:/var/lib/telegram-bot-api:ro
     restart: unless-stopped
+
+  # Plan 029: one-shot GitHub/GitLab release importer, launched by host
+  # crontab (`docker compose run --rm -T release-import --apply`). Opt-in
+  # (profile, not started by a plain `docker compose up -d`) and one-shot
+  # (restart: "no" -- it is not a daemon). It never mounts app.py's data
+  # directory: the only writable mount is its own config/state directory,
+  # and it publishes through feather's HTTP API like ipa-ingest-bot does.
+  release-import:
+    profiles: ["release-import"]
+    image: ghcr.io/d7eeem/feather:latest
+    build: .
+    container_name: feather-release-import
+    entrypoint: ["python", "/app/scripts/release_source_ingest.py"]
+    # Dry-run by default -- append --apply on the crontab invocation, e.g.
+    # `docker compose run --rm -T release-import --apply`.
+    env_file:
+      - .env
+    environment:
+      - RELEASE_IMPORT_CONFIG=/var/lib/feather-release-import/release-sources.json
+      - RELEASE_IMPORT_STATE=/var/lib/feather-release-import/state.json
+    depends_on:
+      - altstore-manager
+    volumes:
+      # The only writable mount: config/state/lock for this importer.
+      # Never the app's data/ipas/ or data/icons/ -- feather remains the
+      # only writer of the catalog.
+      - ./data/release-import:/var/lib/feather-release-import
+    restart: "no"
+    # No `ports:` -- this is a one-shot CLI invocation, not a server.
 networks: {}
 
 volumes:

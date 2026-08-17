@@ -13,6 +13,10 @@
 # Dockerfile.bot needs this one script -- do NOT blanket-exclude scripts/
 !scripts/telegram_bot_ingest.py
 
+# Dockerfile (main image) needs this one script for the opt-in release
+# importer (Plan 029) -- same rule, do NOT blanket-exclude scripts/
+!scripts/release_source_ingest.py
+
 # Belt and braces: even if something above is loosened later, these must
 # never enter a build context.
 .env
