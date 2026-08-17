@@ -15,7 +15,7 @@ env:
 jobs:
   test:
     name: Tests (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     strategy:
       fail-fast: false
       matrix:
@@ -51,7 +51,7 @@ jobs:
   build:
     name: Build and push
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
       packages: write
@@ -127,7 +127,7 @@ jobs:
   build-bot:
     name: Build and push (bot)
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
       packages: write
