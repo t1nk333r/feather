@@ -13,7 +13,7 @@ import threading
 import boto3
 from functools import wraps
 from botocore.exceptions import ClientError
-from datetime import datetime
+from datetime import datetime, timezone
 from werkzeug.utils import secure_filename
 
 # Configure logging
@@ -862,7 +862,7 @@ class SourceManager:
             return
         try:
             os.makedirs(BACKUP_FOLDER, exist_ok=True)
-            timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             counter = 0
             while True:
                 suffix = f".{counter:03d}" if counter else ""
@@ -916,7 +916,7 @@ class SourceManager:
     
     def get_current_dates(self):
         """Get properly formatted dates for Feather compatibility"""
-        current_date = datetime.now()
+        current_date = datetime.now(timezone.utc)
         return {
             'feather_date': current_date.strftime("%Y-%m-%d"),
             'version_date': current_date.strftime("%Y-%m-%dT%H:%M:%SZ")
