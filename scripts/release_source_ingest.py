@@ -531,7 +531,9 @@ def _host_allowed(provider, host, job):
     return False
 
 
-def stream_download(session, candidate, job, dest_path, tokens, timeout, max_bytes):
+def stream_download(
+    session, candidate, job, dest_path, tokens, timeout, max_bytes, progress_cb=None
+):
     """Stream `candidate`'s asset to `dest_path`, enforcing every trust rule.
 
     Explicit redirect handling (never `allow_redirects=True`): validates
@@ -625,6 +627,8 @@ def stream_download(session, candidate, job, dest_path, tokens, timeout, max_byt
                     )
                 digest.update(chunk)
                 fh.write(chunk)
+                if progress_cb is not None:
+                    progress_cb(total, candidate.declared_size)
     finally:
         resp.close()
 
@@ -637,12 +641,17 @@ def stream_download(session, candidate, job, dest_path, tokens, timeout, max_byt
     return total, digest.hexdigest()
 
 
-def validate_and_extract_metadata(path, filename, job, candidate=None):
+def extract_ipa_metadata(path, filename, job, candidate=None):
     """The six hard checks (contract Step 3), then (bundle_id, version, name).
 
     The regex is deliberately exact: an IPA contains an Info.plist for every
     bundled framework/extension, and a loose match would return one of
     those instead of the app's own identifier and version.
+
+    Does NOT compare the extracted bundle identifier against any configured
+    `job.bundle_identifier` -- that comparison lives in
+    `validate_and_extract_metadata` so callers that want to auto-detect the
+    bundle id (e.g. the UI import route) can call this directly.
     """
     release_ref = ""
     if candidate is not None:
@@ -690,6 +699,17 @@ def validate_and_extract_metadata(path, filename, job, candidate=None):
             f"job {job.id}{release_ref}: IPA plist is missing a bundle identifier "
             "or version"
         )
+
+    return bundle_id, version, name
+
+
+def validate_and_extract_metadata(path, filename, job, candidate=None):
+    """`extract_ipa_metadata` plus the configured-bundle-id match check."""
+    bundle_id, version, name = extract_ipa_metadata(path, filename, job, candidate)
+
+    release_ref = ""
+    if candidate is not None:
+        release_ref = f" (release {candidate.release_tag or candidate.release_id})"
 
     if bundle_id != job.bundle_identifier:
         raise ValidationError(
