@@ -1567,3 +1567,26 @@ def test_notify_sends_no_parse_mode(client_with_telegram, monkeypatch):
 
     assert len(calls) == 1
     assert "parse_mode" not in calls[0]
+
+
+def test_get_current_dates_stamps_utc_not_local_time(client, monkeypatch):
+    """Regression for Plan 031: version_date carries a literal 'Z' (UTC), so
+    the value must be real UTC regardless of the process timezone. Under a
+    non-UTC TZ, the pre-fix datetime.now() (naive local time) would be off by
+    the offset."""
+    import time
+    from datetime import datetime, timezone
+
+    app_module = client.app_module
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    try:
+        dates = app_module.source_manager.get_current_dates()
+        stamped = datetime.strptime(
+            dates["version_date"], "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        assert abs((now - stamped).total_seconds()) < 120
+    finally:
+        monkeypatch.delenv("TZ", raising=False)
+        time.tzset()
