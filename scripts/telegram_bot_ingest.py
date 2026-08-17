@@ -57,7 +57,7 @@ REQUIRED_VARS = [
     "FEATHER_ADMIN_PASSWORD",
 ]
 
-USAGE_HINT = "Send:  /add <bundleIdentifier> <version>"
+USAGE_HINT = "Send:  /add <bundleIdentifier> <version> [name]"
 NOT_A_FILE_REPLY = (
     "That isn't a file. Forward an IPA, then send /add <bundleIdentifier> <version>."
 )
@@ -547,8 +547,8 @@ def handle_document(user_id, chat_id, document, config, bot, pending):
 
 
 def handle_add_command(user_id, chat_id, text, config, bot, feather, pending):
-    parts = text.split()
-    if len(parts) not in (1, 3):
+    parts = text.split(maxsplit=3)
+    if len(parts) not in (1, 3, 4):
         bot.send_message(chat_id, f"Usage: {USAGE_HINT.split(':', 1)[1].strip()}")
         return
 
@@ -563,6 +563,7 @@ def handle_add_command(user_id, chat_id, text, config, bot, feather, pending):
         )
         return
 
+    name_override = None
     if len(parts) == 1:
         bundle_id = doc.get("bundle_id")
         version = doc.get("version")
@@ -574,7 +575,10 @@ def handle_add_command(user_id, chat_id, text, config, bot, feather, pending):
             )
             return
     else:
-        _, bundle_id, version = parts
+        bundle_id = parts[1]
+        version = parts[2]
+        if len(parts) == 4:
+            name_override = parts[3].strip() or None
 
     created = False
     icon_note = None
@@ -588,7 +592,7 @@ def handle_add_command(user_id, chat_id, text, config, bot, feather, pending):
         # match) would turn an unrelated failure, e.g. "Failed to save
         # source data", into a spurious catalogue entry. See test 5.
         if not ok and message == "App not found":
-            app_name = doc.get("name") or bundle_id
+            app_name = name_override or doc.get("name") or bundle_id
             developer = config["telegram_default_developer"]
             ok, message = feather.add_app(
                 bundle_id, version, app_name, developer, doc["path"]
