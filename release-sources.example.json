@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "jobs": [
+    {
+      "id": "example-github-app",
+      "provider": "github",
+      "project": "owner/repository",
+      "bundleIdentifier": "com.example.app",
+      "assetGlob": "*.ipa",
+      "includePrereleases": false,
+      "createIfMissing": false
+    },
+    {
+      "id": "example-gitlab-app",
+      "provider": "gitlab",
+      "project": "group/project",
+      "bundleIdentifier": "com.example.other",
+      "assetGlob": "*.ipa",
+      "allowedDownloadHosts": ["gitlab.com"],
+      "createIfMissing": true,
+      "name": "Example Other",
+      "developerName": "Example Developer"
+    }
+  ]
+}
