@@ -15,6 +15,13 @@ from functools import wraps
 from botocore.exceptions import ClientError
 from datetime import datetime, timezone
 from werkzeug.utils import secure_filename
+from werkzeug.datastructures import FileStorage
+
+import sys
+_SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts")
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+import release_source_ingest as release_ingest
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -1612,6 +1619,124 @@ def add_version():
     except Exception as e:
         logging.error(f"Error adding version: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 400
+
+@app.route('/api/import-release', methods=['POST'])
+@requires_auth
+def import_release():
+    payload = request.get_json(silent=True) or {}
+    provider = (payload.get('provider') or '').strip().lower()
+    project = (payload.get('project') or '').strip()
+    bundle_id_in = (payload.get('bundleIdentifier') or '').strip()
+    asset_glob = (payload.get('assetGlob') or '*.ipa').strip()
+    include_pre = bool(payload.get('includePrereleases'))
+    create_if_missing = bool(payload.get('createIfMissing'))
+    name_in = (payload.get('name') or '').strip()
+    developer_in = (payload.get('developerName') or '').strip()
+    hosts_in = payload.get('allowedDownloadHosts') or []
+    base_url = resolve_base_url()
+
+    def event(**kw):
+        return json.dumps(kw) + "\n"
+
+    def run():
+        tmp_path = None
+        try:
+            if provider not in ('github', 'gitlab'):
+                yield event(stage="error", error="Provider must be github or gitlab")
+                return
+            if not project:
+                yield event(stage="error", error="Repository is required")
+                return
+            allowed = frozenset(h.strip().lower() for h in hosts_in if h.strip())
+            if provider == 'gitlab' and not allowed:
+                yield event(stage="error", error="GitLab imports require at least one allowed download host")
+                return
+            job = release_ingest.Job(
+                id="ui-import", provider=provider, project=project,
+                bundle_identifier=bundle_id_in or "", asset_glob=asset_glob,
+                include_prereleases=include_pre, create_if_missing=create_if_missing,
+                allowed_download_hosts=allowed, name=name_in or None, developer_name=developer_in or None,
+            )
+            tokens = {"github": os.environ.get("GITHUB_TOKEN"), "gitlab": os.environ.get("GITLAB_TOKEN")}
+            session_req = requests.Session()
+            yield event(stage="resolving")
+            candidate = release_ingest.select_candidate(job, session_req, tokens, timeout=30)
+            yield event(stage="resolved", asset=candidate.asset_name,
+                        release=candidate.release_tag or candidate.release_id, size=candidate.declared_size)
+            fd, tmp_path = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix=".ipa")
+            os.close(fd)
+
+            # ---- LIVE PROGRESS: queue + worker thread ----
+            import queue
+            q = queue.Queue()
+
+            def cb(total, declared):
+                q.put(("downloading", total, declared))
+
+            def worker():
+                try:
+                    release_ingest.stream_download(
+                        session_req, candidate, job, tmp_path, tokens,
+                        release_ingest.DEFAULT_TIMEOUT, release_ingest.DEFAULT_MAX_BYTES,
+                        progress_cb=cb,
+                    )
+                    q.put(("ok", None, None))
+                except Exception as e:
+                    q.put(("err", str(e), None))
+
+            t = threading.Thread(target=worker, daemon=True)
+            t.start()
+            while True:
+                kind, a, b = q.get()
+                if kind == "downloading":
+                    pct = int(a * 100 / b) if b else None
+                    yield event(stage="downloading", downloaded=a, total=b, pct=pct)
+                elif kind == "ok":
+                    break
+                else:
+                    yield event(stage="error", error=a)
+                    return
+            t.join()
+
+            yield event(stage="validating")
+            bundle_id, version, detected_name = release_ingest.extract_ipa_metadata(
+                tmp_path, candidate.asset_name, job, candidate)
+            if bundle_id_in and bundle_id != bundle_id_in:
+                yield event(stage="error", error=f"IPA bundle id {bundle_id} does not match the id you entered ({bundle_id_in})")
+                return
+            yield event(stage="publishing")
+            existing = source_manager.get_app(bundle_id)
+            fs = FileStorage(stream=open(tmp_path, "rb"), filename=f"{secure_filename(version)}.ipa")
+            if existing:
+                ok, message = source_manager.add_version(bundle_id, {"version": version}, ipa_file=fs, base_url=base_url)
+            elif create_if_missing:
+                if not (name_in and developer_in):
+                    yield event(stage="error", error="New apps need a name and developer name")
+                    return
+                ok, message = source_manager.add_app_manual(
+                    {"name": name_in, "bundleIdentifier": bundle_id, "developerName": developer_in, "version": version},
+                    ipa_file=fs, base_url=base_url)
+            else:
+                yield event(stage="error", error=f"App {bundle_id} is not in the catalog. Tick 'create if missing' with a name + developer to add it.")
+                return
+            if ok:
+                notify("add_version", f"Imported {bundle_id} {version} from {provider}:{project}\n{base_url}/source.json")
+                yield event(stage="done", success=True, message=message, bundleIdentifier=bundle_id, version=version)
+            else:
+                yield event(stage="error", error=message)
+        except (release_ingest.ProviderError, release_ingest.ValidationError, release_ingest.ConfigError) as e:
+            yield event(stage="error", error=str(e))
+        except Exception as e:
+            logging.exception("import-release failed")
+            yield event(stage="error", error=str(e))
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+    return app.response_class(run(), mimetype="application/x-ndjson")
 
 @app.route('/api/update-version', methods=['POST'])
 @requires_auth
