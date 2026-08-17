@@ -341,3 +341,127 @@ def test_import_provider_error_is_reported(authed_client):
     last = events[-1]
     assert last["stage"] == "error", events
     assert "no matching release" in last["error"]
+
+
+def test_import_normalizes_pasted_github_url(authed_client):
+    app_module = authed_client.app_module
+    release_ingest = app_module.release_ingest
+
+    ipa_bytes = build_ipa_bytes(bundle_id="com.example.app", version="2.0.0")
+    candidate = make_candidate(release_ingest, declared_size=len(ipa_bytes))
+
+    recorded = {}
+
+    def fake_select_candidate(job, session, tokens, timeout=30):
+        recorded["project"] = job.project
+        return candidate
+
+    status, events = post_and_collect(
+        authed_client,
+        {
+            "provider": "github",
+            "project": "https://github.com/Owner/Repo",
+            "bundleIdentifier": "",
+            "createIfMissing": False,
+        },
+        {
+            "select_candidate": fake_select_candidate,
+            "stream_download": make_fake_stream_download(ipa_bytes),
+        },
+    )
+
+    assert status == 200
+    last = events[-1]
+    assert last["stage"] == "done", events
+    assert recorded["project"] == "Owner/Repo"
+
+
+def test_import_rejects_unparseable_github_project(authed_client):
+    def boom(*args, **kwargs):
+        raise AssertionError("select_candidate must not be called for an unparseable project")
+
+    status, events = post_and_collect(
+        authed_client,
+        {
+            "provider": "github",
+            "project": "not a repo",
+            "createIfMissing": False,
+        },
+        {"select_candidate": boom},
+    )
+
+    assert status == 200
+    last = events[-1]
+    assert last["stage"] == "error", events
+    assert "owner/repo" in last["error"].lower()
+
+
+def test_import_new_app_auto_names_from_ipa(authed_client):
+    app_module = authed_client.app_module
+    release_ingest = app_module.release_ingest
+
+    ipa_bytes = build_ipa_bytes(bundle_id="com.new.app", version="1.0.0", name="AnymeX")
+    candidate = make_candidate(release_ingest, declared_size=len(ipa_bytes))
+
+    status, events = post_and_collect(
+        authed_client,
+        {
+            "provider": "github",
+            "project": "owner/repo",
+            "bundleIdentifier": "",
+            "createIfMissing": True,
+            "name": "",
+            "developerName": "",
+        },
+        {
+            "select_candidate": make_fake_select_candidate(candidate),
+            "stream_download": make_fake_stream_download(ipa_bytes),
+        },
+    )
+
+    assert status == 200
+    last = events[-1]
+    assert last["stage"] == "done", events
+
+    app_info = app_module.source_manager.get_app("com.new.app")
+    assert app_info is not None
+    assert app_info["name"] == "AnymeX"
+    assert app_info["developerName"] == "Unknown"
+
+
+def test_import_new_app_sets_icon_url(authed_client):
+    app_module = authed_client.app_module
+    release_ingest = app_module.release_ingest
+
+    ipa_bytes = build_ipa_bytes(bundle_id="com.icon.app", version="1.0.0", name="IconApp")
+    candidate = make_candidate(release_ingest, declared_size=len(ipa_bytes))
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(app_module.source_manager, "download_icon_from_url", lambda url, bundle_id: "png")
+    try:
+        status, events = post_and_collect(
+            authed_client,
+            {
+                "provider": "github",
+                "project": "owner/repo",
+                "bundleIdentifier": "",
+                "createIfMissing": True,
+                "name": "Icon App",
+                "developerName": "Icon Dev",
+                "iconURL": "https://example.test/icon.png",
+            },
+            {
+                "select_candidate": make_fake_select_candidate(candidate),
+                "stream_download": make_fake_stream_download(ipa_bytes),
+            },
+        )
+    finally:
+        mp.undo()
+
+    assert status == 200
+    last = events[-1]
+    assert last["stage"] == "done", events
+
+    app_info = app_module.source_manager.get_app("com.icon.app")
+    assert app_info is not None
+    assert app_info["iconURL"].endswith("/icons/com.icon.app/icon.png")
