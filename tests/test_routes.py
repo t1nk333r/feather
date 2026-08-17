@@ -629,13 +629,43 @@ def test_update_source_persists_name(authed_client):
     assert body["name"] == "Renamed Source"
 
 
-def test_fresh_source_uses_feather_tinker_icon(client, tmp_path):
+def test_fresh_source_uses_feather_tinker_artwork(client, tmp_path):
     path = tmp_path / "fresh-source.json"
     manager = client.app_module.SourceManager(str(path))
     source = json.loads(path.read_text())
-    assert source["iconURL"] == "https://f002.backblazeb2.com/file/S30000PUBLIC/MEDIA-PUBLIC/feather-tinker-1024.png"
-    assert source["headerURL"].endswith("OceanHeader.png")
+    expected = "https://f002.backblazeb2.com/file/S30000PUBLIC/MEDIA-PUBLIC/feather-tinker-1024.png"
+    assert source["iconURL"] == expected
+    assert source["headerURL"] == expected
     assert manager.load_source()["iconURL"] == source["iconURL"]
+
+
+def test_existing_source_replaces_only_legacy_template_artwork(client, tmp_path):
+    path = tmp_path / "legacy-source.json"
+    source = seed_source()
+    source["iconURL"] = "https://f000.backblazeb2.com/file/rileytestut/ExampleSource/OctoSource.png"
+    source["headerURL"] = "https://f000.backblazeb2.com/file/rileytestut/ExampleSource/OceanHeader.png"
+    path.write_text(json.dumps(source))
+
+    client.app_module.SourceManager(str(path))
+
+    migrated = json.loads(path.read_text())
+    expected = "https://f002.backblazeb2.com/file/S30000PUBLIC/MEDIA-PUBLIC/feather-tinker-1024.png"
+    assert migrated["iconURL"] == expected
+    assert migrated["headerURL"] == expected
+
+
+def test_existing_source_preserves_custom_artwork(client, tmp_path):
+    path = tmp_path / "custom-source.json"
+    source = seed_source()
+    source["iconURL"] = "https://example.test/custom-icon.png"
+    source["headerURL"] = "https://example.test/custom-header.png"
+    path.write_text(json.dumps(source))
+
+    client.app_module.SourceManager(str(path))
+
+    preserved = json.loads(path.read_text())
+    assert preserved["iconURL"] == source["iconURL"]
+    assert preserved["headerURL"] == source["headerURL"]
 
 
 def test_update_source_persists_icon_url_and_preserves_header(authed_client):

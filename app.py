@@ -29,6 +29,11 @@ UPLOAD_FOLDER = os.path.join(DATA_DIR, "uploads")
 IPA_FOLDER = os.path.join(DATA_DIR, "ipas")
 ICON_FOLDER = os.path.join(DATA_DIR, "icons")
 BACKUP_FOLDER = os.path.join(DATA_DIR, "backups")
+SOURCE_ARTWORK_URL = "https://f002.backblazeb2.com/file/S30000PUBLIC/MEDIA-PUBLIC/feather-tinker-1024.png"
+LEGACY_SOURCE_ARTWORK_URLS = {
+    "iconURL": "https://f000.backblazeb2.com/file/rileytestut/ExampleSource/OctoSource.png",
+    "headerURL": "https://f000.backblazeb2.com/file/rileytestut/ExampleSource/OceanHeader.png",
+}
 ALLOWED_EXTENSIONS = {'ipa'}
 ALLOWED_ICON_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp', 'gif'}
 ICON_MIME_TYPES = {
@@ -796,14 +801,14 @@ class SourceManager:
         return path
     
     def initialize_source(self):
-        """Initialize source.json with default data if it doesn't exist"""
+        """Initialize source.json, or replace untouched template artwork."""
         if not os.path.exists(self.source_file):
             initial_source = {
                 "name": "My AltStore Source",
                 "subtitle": "Custom iOS app repository",
                 "description": "A custom source for managing iOS apps with AltStore and Feather",
-                "iconURL": "https://f002.backblazeb2.com/file/S30000PUBLIC/MEDIA-PUBLIC/feather-tinker-1024.png",
-                "headerURL": "https://f000.backblazeb2.com/file/rileytestut/ExampleSource/OceanHeader.png",
+                "iconURL": SOURCE_ARTWORK_URL,
+                "headerURL": SOURCE_ARTWORK_URL,
                 "website": "https://example.com",
                 "tintColor": "#4185A9",
                 "featuredApps": [],
@@ -813,6 +818,23 @@ class SourceManager:
             }
             self.save_source(initial_source)
             logging.info("Initialized new source.json file")
+            return
+
+        source_data = self.load_source()
+        if not isinstance(source_data, dict):
+            return
+
+        updated_fields = []
+        for field, legacy_url in LEGACY_SOURCE_ARTWORK_URLS.items():
+            if source_data.get(field) == legacy_url:
+                source_data[field] = SOURCE_ARTWORK_URL
+                updated_fields.append(field)
+
+        if updated_fields and self.save_source(source_data):
+            logging.info(
+                "Replaced legacy source artwork: %s",
+                ", ".join(updated_fields),
+            )
     
     def load_source(self):
         """Load source data from JSON file"""
