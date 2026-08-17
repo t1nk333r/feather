@@ -512,6 +512,7 @@
             <button class="tab" onclick="switchTab('manage-apps', this)">Manage Apps</button>
             <button class="tab" onclick="switchTab('qr-code', this)">QR Code</button>
             <button class="tab" onclick="switchTab('source-info', this)">Source Info</button>
+            <button class="tab" onclick="switchTab('import-repo', this)">Import from Repo</button>
             <button class="tab" onclick="logout()" style="margin-left: auto;">Sign out</button>
         </div>
 
@@ -735,6 +736,60 @@
                     <input type="text" name="tintColor" id="sourceTintColor" placeholder="#4185A9">
                 </div>
                 <button type="submit" class="btn">Update Source Info</button>
+            </form>
+        </div>
+
+        <div id="import-repo" class="tab-content">
+            <h2 style="margin-bottom: 20px;">Import from Repo</h2>
+            <form id="importRepoForm">
+                <div class="form-group">
+                    <label>Provider:</label>
+                    <select name="provider" required>
+                        <option value="github">GitHub</option>
+                        <option value="gitlab">GitLab</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Repository:</label>
+                    <input type="text" name="project" required placeholder="owner/repo">
+                </div>
+                <div class="form-group">
+                    <label>Bundle Identifier:</label>
+                    <input type="text" name="bundleIdentifier" placeholder="leave blank to auto-detect">
+                </div>
+                <div class="form-group">
+                    <label>Asset Glob:</label>
+                    <input type="text" name="assetGlob" value="*.ipa">
+                </div>
+                <div class="form-group">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="includePrereleases" name="includePrereleases" style="width: auto; margin: 0; cursor: pointer;">
+                        <label for="includePrereleases" style="margin: 0; font-weight: normal; cursor: pointer; user-select: none;">Include prereleases</label>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="createIfMissing" name="createIfMissing" style="width: auto; margin: 0; cursor: pointer;">
+                        <label for="createIfMissing" style="margin: 0; font-weight: normal; cursor: pointer; user-select: none;">Create app if missing</label>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Allowed Download Hosts (required for GitLab):</label>
+                    <input type="text" name="allowedDownloadHosts" placeholder="gitlab.com, example.com">
+                </div>
+                <div class="form-group">
+                    <label>Name (for new apps):</label>
+                    <input type="text" name="name" placeholder="My Awesome App">
+                </div>
+                <div class="form-group">
+                    <label>Developer Name (for new apps):</label>
+                    <input type="text" name="developerName" placeholder="Developer Name">
+                </div>
+                <button type="submit" class="btn">Import</button>
+                <div id="importProgress" style="display:none; margin-top: 16px;">
+                    <progress id="importBar" max="100" value="0" style="width: 100%;"></progress>
+                    <span id="importStatus"></span>
+                </div>
             </form>
         </div>
     </div>
@@ -965,6 +1020,75 @@
                 }
             } catch (error) {
                 showToast('Error adding app: ' + error.message, 'error');
+            } finally {
+                setButtonLoading(submitBtn, false);
+            }
+        });
+
+        document.getElementById('importRepoForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const f = e.target;
+            const body = {
+                provider: f.provider.value,
+                project: f.project.value.trim(),
+                bundleIdentifier: f.bundleIdentifier.value.trim(),
+                assetGlob: f.assetGlob.value.trim() || '*.ipa',
+                includePrereleases: f.includePrereleases.checked,
+                createIfMissing: f.createIfMissing.checked,
+                name: f.name.value.trim(),
+                developerName: f.developerName.value.trim(),
+                allowedDownloadHosts: f.allowedDownloadHosts.value.split(',').map(s => s.trim()).filter(Boolean),
+            };
+            const prog = document.getElementById('importProgress');
+            const bar = document.getElementById('importBar');
+            const status = document.getElementById('importStatus');
+            const submitBtn = f.querySelector('button[type="submit"]');
+            setButtonLoading(submitBtn, true);
+            prog.style.display = '';
+            bar.value = 0;
+            status.textContent = 'Starting...';
+            try {
+                const resp = await fetch('/api/import-release', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(body),
+                });
+                const reader = resp.body.getReader();
+                const dec = new TextDecoder();
+                let buf = '';
+                while (true) {
+                    const {value, done} = await reader.read();
+                    if (done) break;
+                    buf += dec.decode(value, {stream: true});
+                    let nl;
+                    while ((nl = buf.indexOf('\n')) >= 0) {
+                        const line = buf.slice(0, nl).trim();
+                        buf = buf.slice(nl + 1);
+                        if (!line) continue;
+                        const ev = JSON.parse(line);
+                        if (ev.stage === 'downloading') {
+                            if (ev.pct != null) {
+                                bar.value = ev.pct;
+                                status.textContent = `Downloading ${ev.pct}%`;
+                            } else {
+                                bar.removeAttribute('value');
+                                status.textContent = `Downloading ${(ev.downloaded / 1048576).toFixed(1)} MB`;
+                            }
+                        } else if (ev.stage === 'error') {
+                            showToast(ev.error || 'Import failed', 'error');
+                            status.textContent = 'Failed';
+                        } else if (ev.stage === 'done') {
+                            bar.value = 100;
+                            showToast(ev.message || 'Imported', 'success');
+                            status.textContent = `Imported ${ev.bundleIdentifier} ${ev.version}`;
+                            f.reset();
+                        } else {
+                            status.textContent = ev.stage.charAt(0).toUpperCase() + ev.stage.slice(1) + '...';
+                        }
+                    }
+                }
+            } catch (err) {
+                showToast('Import failed: ' + err, 'error');
             } finally {
                 setButtonLoading(submitBtn, false);
             }
