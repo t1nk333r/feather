@@ -1620,18 +1620,35 @@ def add_version():
         logging.error(f"Error adding version: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 400
 
+def _normalize_repo_project(raw):
+    """Strip browser-URL chrome from a pasted repo reference -> 'Owner/Repo'."""
+    p = (raw or "").strip()
+    for prefix in ("https://", "http://"):
+        if p.lower().startswith(prefix):
+            p = p[len(prefix):]
+    if p.lower().startswith("www."):
+        p = p[4:]
+    for host in ("github.com/", "gitlab.com/"):
+        if p.lower().startswith(host):
+            p = p[len(host):]
+    p = p.strip("/")
+    if p.endswith(".git"):
+        p = p[:-4]
+    return p.strip("/")
+
 @app.route('/api/import-release', methods=['POST'])
 @requires_auth
 def import_release():
     payload = request.get_json(silent=True) or {}
     provider = (payload.get('provider') or '').strip().lower()
-    project = (payload.get('project') or '').strip()
+    project = _normalize_repo_project(payload.get('project') or '')
     bundle_id_in = (payload.get('bundleIdentifier') or '').strip()
     asset_glob = (payload.get('assetGlob') or '*.ipa').strip()
     include_pre = bool(payload.get('includePrereleases'))
     create_if_missing = bool(payload.get('createIfMissing'))
     name_in = (payload.get('name') or '').strip()
     developer_in = (payload.get('developerName') or '').strip()
+    icon_url_in = (payload.get('iconURL') or '').strip()
     hosts_in = payload.get('allowedDownloadHosts') or []
     base_url = resolve_base_url()
 
@@ -1646,6 +1663,9 @@ def import_release():
                 return
             if not project:
                 yield event(stage="error", error="Repository is required")
+                return
+            if provider == 'github' and not release_ingest._GITHUB_PROJECT_RE.match(project):
+                yield event(stage="error", error="GitHub repository must be owner/repo, e.g. RyanYuuki/AnymeX")
                 return
             allowed = frozenset(h.strip().lower() for h in hosts_in if h.strip())
             if provider == 'gitlab' and not allowed:
@@ -1710,12 +1730,15 @@ def import_release():
             if existing:
                 ok, message = source_manager.add_version(bundle_id, {"version": version}, ipa_file=fs, base_url=base_url)
             elif create_if_missing:
-                if not (name_in and developer_in):
-                    yield event(stage="error", error="New apps need a name and developer name")
-                    return
+                new_name = name_in or detected_name or bundle_id
+                new_developer = developer_in or "Unknown"
+                new_app = {"name": new_name, "bundleIdentifier": bundle_id,
+                           "developerName": new_developer, "version": version}
+                if icon_url_in:
+                    new_app["iconURL"] = icon_url_in
                 ok, message = source_manager.add_app_manual(
-                    {"name": name_in, "bundleIdentifier": bundle_id, "developerName": developer_in, "version": version},
-                    ipa_file=fs, base_url=base_url)
+                    new_app, ipa_file=fs,
+                    download_icon_from_url=bool(icon_url_in), base_url=base_url)
             else:
                 yield event(stage="error", error=f"App {bundle_id} is not in the catalog. Tick 'create if missing' with a name + developer to add it.")
                 return
