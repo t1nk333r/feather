@@ -169,13 +169,27 @@ def normalize_source(source_data):
             if 'appPermissions' not in app_entry:
                 app_entry['appPermissions'] = {"entitlements": [], "privacy": {}}
 
+            icon = app_entry.get('iconURL')
+            if not (isinstance(icon, str) and icon.strip()):
+                top_icon = data.get('iconURL')
+                app_entry['iconURL'] = top_icon if (isinstance(top_icon, str) and top_icon.strip()) else SOURCE_ARTWORK_URL
+
             versions = app_entry.get('versions')
             if isinstance(versions, list):
+                seen = set()
+                deduped = []
                 for version_entry in versions:
                     if not isinstance(version_entry, dict):
+                        deduped.append(version_entry)  # leave malformed entries untouched
                         continue
+                    v = version_entry.get('version')
+                    if v in seen:
+                        continue
+                    seen.add(v)
                     if 'buildVersion' not in version_entry:
                         version_entry['buildVersion'] = str(version_entry.get('version', ''))
+                    deduped.append(version_entry)
+                app_entry['versions'] = deduped
 
     return data
 
