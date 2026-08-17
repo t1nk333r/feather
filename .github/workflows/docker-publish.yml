@@ -116,18 +116,22 @@ jobs:
             echo "FAIL: image booted without ADMIN_PASSWORD"; exit 1
           fi
           echo "ok: refuses to boot without ADMIN_PASSWORD"
-          docker run -d --rm --name feather-smoke -p 5000:5000 \
+          # Self-hosted runners don't reliably expose a published container
+          # port at the host's localhost (rootless/containerized Docker), so
+          # curl from INSIDE the container over its own loopback -- the image
+          # ships curl for its healthcheck. No host port is published.
+          docker run -d --rm --name feather-smoke \
             -e DATA_DIR=/tmp/feather-data \
             -e ADMIN_PASSWORD=ci-smoke-test-not-a-real-password "$IMAGE"
           for i in $(seq 1 30); do
-            if curl -fsS -o /dev/null http://localhost:5000/source.json; then break; fi
+            if docker exec feather-smoke curl -fsS -o /dev/null http://localhost:5000/source.json; then break; fi
             sleep 1
           done
-          curl -fsS -o /dev/null -w 'source.json  %{http_code} %{content_type}\n' \
+          docker exec feather-smoke curl -fsS -o /dev/null -w 'source.json  %{http_code} %{content_type}\n' \
             http://localhost:5000/source.json
-          curl -fsS -o /dev/null -w 'qr           %{http_code} %{content_type}\n' \
+          docker exec feather-smoke curl -fsS -o /dev/null -w 'qr           %{http_code} %{content_type}\n' \
             http://localhost:5000/qr
-          curl -fsS -o /dev/null -w 'index        %{http_code}\n' \
+          docker exec feather-smoke curl -fsS -o /dev/null -w 'index        %{http_code}\n' \
             http://localhost:5000/
           docker logs feather-smoke
           docker stop feather-smoke
