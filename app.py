@@ -1169,6 +1169,9 @@ class SourceManager:
                 min_os = '14.0'
         
             version = version_data['version']
+            if any(isinstance(v, dict) and v.get('version') == version for v in app.get('versions', [])):
+                return True, f"Version {version} already exists; nothing to add"
+
             download_url = version_data.get('downloadURL', '')
             file_size = version_data.get('size', 0)
         
