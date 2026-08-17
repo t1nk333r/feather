@@ -48,8 +48,42 @@ Three facts shape every plan here:
 | [026](026-theme-aware-favicon.md) | Theme-aware favicon | P3 | XS | LOW | 025 | **DONE** — `af9cad1`, merged as `de473a8`. Adds `static/icon-dark.svg` for dark browser chrome; the published source icon is unchanged. 117→119 tests. Red-on-slate was rejected at 2.1:1 contrast. |
 | [027](027-write-readme.md) | Write the repository README | P2 | S | LOW | — | **DONE** — `4e2f2d6`, merged. 134 lines, no code touched, `example.com` placeholders throughout. Retires the "No README" deferred finding. The plan's criterion 3 was unsatisfiable as written and has been corrected in place — see below. |
 | [028](028-source-and-garage-app-icons.md) | Publish the supplied source icon and store app icons in Garage | P2 | M | MED | 011, 023, 025 | **DONE (code)** — `42f20c8`..`262e7ca` (4 commits), merged as `0bcc9c0`. 119→134 tests. Step 6 remains an operator task: migrate/cut over Garage icons, then update the live source icon through Source Information. |
+| [029](029-cron-release-imports.md) | Poll GitHub/GitLab releases from cron and publish new IPAs | P2 | L | MED | 006, 007, 010, 011, 019, 021, 023 | **DONE — merged to `main` (2026-08-17)** — 4 commits on `advisor/029-cron-release-imports` (HEAD `26868ac`). +2465 lines across 9 in-scope files; zero changes to `app.py`/telegram worker/`requirements`. Reviewer re-ran: 21 focused + 157 full pass; audited the security-critical code+tests (cross-host redirect strips `Authorization`+`PRIVATE-TOKEN`, HTTPS+host-allowlist per hop, dry-run does no network/login/state-write, state advances only after verified publish, create only on exact `App not found`); compose default startup unchanged. Not run: full `docker build` image smoke (CI runs it). Executor hit a session limit after committing (work intact). Not yet merged to `main`. |
+| [030](030-remove-dead-import-methods.md) | Delete the two dead catalog-import methods and drop `altparse` | P2 | S | LOW | — | **DONE — merged to `main` (2026-08-17)** — commit `32a8116` on branch `advisor/030-remove-dead-import-methods`. 163 deletions, 0 insertions; only `app.py` + `requirements.txt`. Reviewer re-ran all done criteria: 136 tests pass unchanged, greps empty, pure subtraction. Not yet merged to `main`. |
+| [031](031-utc-correct-dates.md) | Stamp catalog dates in real UTC; drop deprecated `datetime.utcnow()` | P2 | S | LOW | — | **DONE — merged to `main` (2026-08-17)** — commit `4f686c9` on branch `advisor/031-utc-correct-dates`. 3 one-line app.py changes + 1 new test; 136→137 pass. Reviewer independently confirmed the TZ test discriminates (buggy=14400s delta → fail, fixed=0.7s → pass). Not yet merged to `main`. |
+| [037](037-source-always-parseable.md) | Never publish an unparseable source — coerce empty `iconURL`, dedupe versions | P1 | S–M | LOW–MED | — | **DONE — merged to `main`** (`3eeb0cc`→`165bade`, pushed). 170→174 tests. Serve-time coerce + dedupe (fixes the live break with no migration) + `add_version` idempotency guard. Deploy the image to fix the live source. Was TODO — serve-time `normalize_source` coerces empty `iconURL` to a valid URL + dedupes versions (fixes the current "isn't in the correct format" break with no migration), plus an `add_version` guard so duplicates stop being stored. app.py + tests. |
+| [036](036-telegram-add-name-argument.md) | Telegram `/add <id> <ver> <name>` — set a custom app name for patched/same-name builds | P2 | S | LOW | — | **DONE — merged to `main`** (`165bade`→`b0b6c30`, pushed). Optional 3rd arg overrides the IPA-detected name on creation (+ the chat confirmation). Bot + tests; no server change. 174→178 tests. |
+| [035](035-import-repo-usability.md) | Repo-import UX: normalize pasted URLs, auto-name new apps, optional icon | P2 | M | LOW–MED | 034 | **DONE — merged to `main`** (fast-forward `5a2d10e`→`3eeb0cc`, pushed). Route+form+tests, engine untouched; 166→170 tests, new tests verified no-network (DNS-blocked). |
+| [034](034-ui-import-from-repo.md) | Admin-UI "Import from Repo" button (GitHub + GitLab) with live progress bar | P2 | L | MED–HIGH | 029 | **DONE — merged to `main`** (fast-forward `0da4a1b`→`5a2d10e`, pushed). 4 commits, +614 lines across the 4 in-scope files. +614 lines across the 4 in-scope files. Reviewer re-ran: engine 21 pass (backward-compat), full 166 pass; the 6 new route tests pass with **all real DNS blocked** (verified no-network); route reuses the 029 engine in-process, publishes under the lock, cleans up temp on every path, enforces GitLab allowlist. Not yet merged to `main`. |
+| [033](033-ci-self-hosted-runner.md) | Run the CI build/publish workflow on a self-hosted runner | P2 | XS | LOW–MED | — | **DONE — merged to `main`** (fast-forward `88e6a11`→`095231f`, 2026-08-17). All three jobs (`test`,`build`,`build-bot`) now `runs-on: self-hosted`; nothing else changed. |
+| [032](032-add-app-icon-upload.md) | Make `/api/add-app` honor the icon the Add-App form already sends | P3 | S | LOW–MED | — | **DONE — merged to `main` (2026-08-17)** — commit `688e4bf` on branch `advisor/032-add-app-icon-upload`. Route now reads `iconFile`/`downloadIconFromUrl` and passes them through; JSON branch unchanged. 136→138 pass; 2 new tests assert a self-hosted `/icons/...` URL and discriminate on the fix. Not yet merged to `main`. |
 
 Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (with a one-line reason) | `REJECTED` (with a one-line rationale)
+
+## 2026-08-17 audit addendum (Plans 029–032)
+
+`plans/README.md` was extended on 2026-08-17 after a fresh full audit against
+commit `88e6a11` (app.py 1,838 lines, plus the container/CI config and the
+Telegram/Garage scripts). Baseline: **136 tests pass**.
+
+Plan 029 (cron release imports) was authored separately and is now indexed
+above. Plans 030–032 come from the new audit. Most high-impact items were found
+to be **already recorded** in the "Deferred findings" and "considered and
+rejected" sections below and were **not** re-planned — they remain correctly
+gated on the private-network deployment assumption. The three new plans are the
+genuinely new, high-leverage findings:
+
+- **030** — dead code + a dead dependency (`altparse`). Deleting the dormant
+  `add_app_from_github` also retires the "Migrating off altparse" rejected entry
+  below: the dependency is being *removed*, not migrated. Note the interaction
+  with 029 — 029 deliberately reimplements GitHub/GitLab release polling through
+  the HTTP-API boundary and forbids reusing `add_app_from_github`; 030 deletes
+  that inferior dormant importer. They are complementary, no ordering required.
+- **031** — a latent timezone-correctness bug: `get_current_dates()` uses
+  `datetime.now()` (naive local) but formats with a literal `Z` (UTC).
+- **032** — a real user-facing bug: the Add-App form's icon picker is wired in
+  the frontend (`templates/index.html:541,945`) but `/api/add-app` never reads
+  `iconFile`, so the chosen icon is silently discarded.
 
 ```
 001 (DATA_DIR) ──> 005 (tests) ──> 006, 007, 008 ──┐
@@ -70,6 +104,8 @@ Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (with a one-line reas
 - **003 requires 004** (or 004's harvesting step) because `backup.old/requirements.txt` holds the only copy of the `qrcode[pil]` / `pillow` pins, and 003 deletes that file.
 - **010 requires 009.** Plan 010 edits the frontend markup; doing that in a real `.html` file rather than inside a 1,493-line Python string literal is materially safer.
 - **007 after 006** is a recommendation, not a hard requirement — both edit `SourceManager`, and 006 first avoids a merge conflict in `save_source`.
+- **029's dependencies are all DONE** — it builds on the atomic/serialized catalog writes (006, 007), the login-gated mutating routes (010), the storage backend (011), the Compose pull convention (019), and the `Info.plist` metadata rule + first-publish creation from the Telegram path (021, 023). It is nonetheless independently executable now; the dependency list records what its design assumes, not work still pending.
+- **030, 031, 032 are mutually independent** and depend on nothing else. Any order. Each is a small self-contained change with its own regression test.
 
 ## If you only do three things
 
@@ -379,7 +415,7 @@ Recorded so nobody re-audits them:
 - **Path traversal on `/ipas/<bundle_id>/<filename>` and `/icons/<bundle_id>/icon.<ext>`** — reported by an audit pass, then **verified false**. `app.py:2235-2238` applies `secure_filename` to *both* URL segments before `os.path.join`; `app.py:2253-2259` does the same plus an allowlist check on the extension. The write paths are equally covered (`get_ipa_path` sanitises both `bundle_id` and `version`; the icon writers sanitise `bundle_id` and constrain the extension to a fixed set). Not a finding.
 - **`debug=True` in production** — checked and not present. `app.py:2531` correctly sets `debug=False`.
 - **Splitting `SourceManager` into modules** — 25 cohesive methods over a single JSON document with one responsibility. The file is large because 59% of it is a *string* (Plan 009), not because the class is oversized. Re-evaluate after the template extraction.
-- **Migrating off `altparse==0.3.0`** — it works, the blast radius is ~140 lines across two methods, and abandonment could not be confirmed. Don't pre-emptively rewrite a working import path.
+- ~~**Migrating off `altparse==0.3.0`**~~ — **SUPERSEDED by Plan 030** (2026-08-17). The original verdict was "don't pre-emptively rewrite a working import path." The 2026-08-17 audit found the path is not working — it is *dead*: `add_app_from_github` (altparse's only user) has no route, caller, or test. So the answer is neither "migrate" nor "keep": *delete* it and drop the pin. Plan 030 does that.
 - **Adopting a frontend framework** — one page, ~770 lines of working vanilla JS. Extracting it to `static/app.js` (noted as a follow-up in Plan 009) captures nearly all the benefit at a fraction of the cost.
 
 ## Deferred findings — real, but out of scope
