@@ -1000,3 +1000,104 @@ def test_no_thumbnail_publishes_without_icon(tmp_path):
     assert feather.set_icon_calls == []
     assert any("Published" in text for _, text in bot.sent_messages)
     assert not any("could not" in text.lower() for _, text in bot.sent_messages)
+
+
+# ---------------------------------------------------------------------------
+# 33. test_add_command_name_argument_sets_created_app_name (plan 036)
+# ---------------------------------------------------------------------------
+
+
+def test_add_command_name_argument_sets_created_app_name(tmp_path):
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    ipa_path = write_minimal_ipa(tmp_path / "Beegram.ipa")
+
+    bot = FakeBotAPI()
+    feather = FakeFeatherClient(add_version_result=(False, "App not found"))
+    pending = {ALLOWED_USER_ID: _pending_doc(ipa_path, name="Twitter")}
+
+    ingest.handle_update(
+        text_update(ALLOWED_USER_ID, "/add com.custom.patched 12.17 My Patched Twitter"),
+        config,
+        bot,
+        feather,
+        pending,
+    )
+
+    assert feather.add_app_calls == [
+        ("com.custom.patched", "12.17", "My Patched Twitter", "Unknown", str(ipa_path))
+    ]
+
+
+# ---------------------------------------------------------------------------
+# 34. test_add_command_name_defaults_to_detected_when_omitted (plan 036)
+# ---------------------------------------------------------------------------
+
+
+def test_add_command_name_defaults_to_detected_when_omitted(tmp_path):
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    ipa_path = write_minimal_ipa(tmp_path / "Beegram.ipa")
+
+    bot = FakeBotAPI()
+    feather = FakeFeatherClient(add_version_result=(False, "App not found"))
+    pending = {ALLOWED_USER_ID: _pending_doc(ipa_path, name="Twitter")}
+
+    ingest.handle_update(
+        text_update(ALLOWED_USER_ID, "/add com.custom.patched 12.17"),
+        config,
+        bot,
+        feather,
+        pending,
+    )
+
+    assert feather.add_app_calls == [
+        ("com.custom.patched", "12.17", "Twitter", "Unknown", str(ipa_path))
+    ]
+
+
+# ---------------------------------------------------------------------------
+# 35. test_add_command_name_ignored_when_app_exists (plan 036)
+# ---------------------------------------------------------------------------
+
+
+def test_add_command_name_ignored_when_app_exists(tmp_path):
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    ipa_path = write_minimal_ipa(tmp_path / "Beegram.ipa")
+
+    bot = FakeBotAPI()
+    feather = FakeFeatherClient(add_version_result=(True, "ok"))
+    pending = {ALLOWED_USER_ID: _pending_doc(ipa_path)}
+
+    ingest.handle_update(
+        text_update(ALLOWED_USER_ID, "/add com.x 1.0 Some Name"),
+        config,
+        bot,
+        feather,
+        pending,
+    )
+
+    assert feather.add_app_calls == []
+    assert any("Published" in text for _, text in bot.sent_messages)
+
+
+# ---------------------------------------------------------------------------
+# 36. test_add_command_two_tokens_is_usage_error (plan 036)
+# ---------------------------------------------------------------------------
+
+
+def test_add_command_two_tokens_is_usage_error(tmp_path):
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    ipa_path = write_minimal_ipa(tmp_path / "Beegram.ipa")
+
+    bot = FakeBotAPI()
+    feather = FakeFeatherClient()
+    pending = {ALLOWED_USER_ID: _pending_doc(ipa_path)}
+
+    ingest.handle_update(
+        text_update(ALLOWED_USER_ID, "/add com.x"), config, bot, feather, pending
+    )
+
+    assert feather.add_version_calls == []
+    assert feather.add_app_calls == []
+    assert len(bot.sent_messages) == 1
+    assert "Usage" in bot.sent_messages[0][1]
+    assert ALLOWED_USER_ID in pending  # nothing was consumed
