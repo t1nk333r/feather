@@ -1446,6 +1446,8 @@ def add_app():
             # Form data request
             ipa_file = request.files.get('ipaFile')
             download_from_url = request.form.get('downloadFromUrl', 'false').lower() == 'true'
+            icon_file = request.files.get('iconFile')
+            download_icon_from_url = request.form.get('downloadIconFromUrl', 'false').lower() == 'true'
             data = {
                 'name': request.form.get('name'),
                 'bundleIdentifier': request.form.get('bundleIdentifier'),
@@ -1461,11 +1463,20 @@ def add_app():
             data = request.get_json() if request.is_json else {}
             ipa_file = None
             download_from_url = False
+            icon_file = None
+            download_icon_from_url = False
 
         if not data.get('bundleIdentifier'):
             return jsonify({"success": False, "error": "Bundle identifier is required"}), 400
 
-        success, message = source_manager.add_app_manual(data, ipa_file=ipa_file if ipa_file and ipa_file.filename else None, download_from_url=download_from_url, base_url=base_url)
+        success, message = source_manager.add_app_manual(
+            data,
+            ipa_file=ipa_file if ipa_file and ipa_file.filename else None,
+            download_from_url=download_from_url,
+            icon_file=icon_file if icon_file and icon_file.filename else None,
+            download_icon_from_url=download_icon_from_url,
+            base_url=base_url,
+        )
 
         if success:
             notify("add_app", f"New app published: {data.get('name')} ({data.get('bundleIdentifier')}) v{data.get('version')}\n{base_url}/source.json")
