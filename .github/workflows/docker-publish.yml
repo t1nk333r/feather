@@ -120,6 +120,10 @@ jobs:
           # port at the host's localhost (rootless/containerized Docker), so
           # curl from INSIDE the container over its own loopback -- the image
           # ships curl for its healthcheck. No host port is published.
+          # A prior failed run on a persistent self-hosted runner can leave
+          # this container behind (--rm only removes it on stop, which a failed
+          # step skips), so clear any stale one before starting.
+          docker rm -f feather-smoke 2>/dev/null || true
           docker run -d --rm --name feather-smoke \
             -e DATA_DIR=/tmp/feather-data \
             -e ADMIN_PASSWORD=ci-smoke-test-not-a-real-password "$IMAGE"
