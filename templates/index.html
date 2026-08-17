@@ -751,7 +751,7 @@
                 </div>
                 <div class="form-group">
                     <label>Repository:</label>
-                    <input type="text" name="project" required placeholder="owner/repo">
+                    <input type="text" name="project" required placeholder="owner/repo or a full repo URL">
                 </div>
                 <div class="form-group">
                     <label>Bundle Identifier:</label>
@@ -784,6 +784,10 @@
                 <div class="form-group">
                     <label>Developer Name (for new apps):</label>
                     <input type="text" name="developerName" placeholder="Developer Name">
+                </div>
+                <div class="form-group">
+                    <label>Icon URL (optional, for new apps)</label>
+                    <input type="url" name="iconURL" placeholder="https://example.com/icon.png">
                 </div>
                 <button type="submit" class="btn">Import</button>
                 <div id="importProgress" style="display:none; margin-top: 16px;">
@@ -1037,6 +1041,7 @@
                 createIfMissing: f.createIfMissing.checked,
                 name: f.name.value.trim(),
                 developerName: f.developerName.value.trim(),
+                iconURL: f.iconURL.value.trim(),
                 allowedDownloadHosts: f.allowedDownloadHosts.value.split(',').map(s => s.trim()).filter(Boolean),
             };
             const prog = document.getElementById('importProgress');
