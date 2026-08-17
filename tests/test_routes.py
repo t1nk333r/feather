@@ -412,6 +412,90 @@ def test_normalize_tolerates_malformed_catalog(client):
     assert resp.status_code == 200
 
 
+# ---------------------------------------------------------------------------
+# Plan 037: never publish an unparseable source -- coerce empty iconURL,
+# dedupe versions
+# ---------------------------------------------------------------------------
+
+
+def test_source_json_coerces_empty_icon_url(client):
+    """An app with iconURL == '' (as produced by add_app_manual without an
+    icon, and matching seed_source()'s default app) must never reach the
+    client as an empty string -- the AltStore decoder treats iconURL as a
+    URL and an empty string fails to decode, rejecting the WHOLE source.
+    normalize_source must coerce it to a valid, non-empty URL."""
+    resp = client.get("/source.json")
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    app_entry = next(a for a in body["apps"] if a["bundleIdentifier"] == "com.example.app")
+    icon = app_entry["iconURL"]
+    assert isinstance(icon, str) and icon.strip()
+    assert icon.startswith("http")
+
+
+def test_source_json_dedupes_duplicate_versions(client):
+    """Re-adding the same bundle+version (e.g. via add_version, or a
+    hand-edited catalog) must never publish duplicate version strings --
+    they break the AltStore client the same way an unparseable field does.
+    normalize_source must dedupe, keeping the first occurrence."""
+    app_module = client.app_module
+    source = seed_source()
+    source["apps"][0]["versions"] = [
+        {
+            "version": "1.0",
+            "date": "2026-01-01T00:00:00Z",
+            "downloadURL": "http://example.test/ipas/com.example.app/1.0-a.ipa",
+            "minOSVersion": "14.0",
+            "size": 111,
+        },
+        {
+            "version": "1.0",
+            "date": "2026-01-02T00:00:00Z",
+            "downloadURL": "http://example.test/ipas/com.example.app/1.0-b.ipa",
+            "minOSVersion": "14.0",
+            "size": 222,
+        },
+        {
+            "version": "1.0",
+            "date": "2026-01-03T00:00:00Z",
+            "downloadURL": "http://example.test/ipas/com.example.app/1.0-c.ipa",
+            "minOSVersion": "14.0",
+            "size": 333,
+        },
+    ]
+    data_dir = app_module.DATA_DIR
+    with open(os.path.join(data_dir, "source.json"), "w") as f:
+        f.write(json.dumps(source))
+
+    resp = client.get("/source.json")
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    app_entry = next(a for a in body["apps"] if a["bundleIdentifier"] == "com.example.app")
+    versions = [v["version"] for v in app_entry["versions"]]
+    assert versions.count("1.0") == 1
+    assert len(app_entry["versions"]) == 1
+    # First occurrence kept -- confirms dedupe order, not just a set collapse.
+    assert app_entry["versions"][0]["size"] == 111
+
+
+def test_normalize_source_leaves_valid_icon_url_untouched(client):
+    """An app that already has a real iconURL must keep it unchanged --
+    normalize_source only coerces empty/missing values."""
+    app_module = client.app_module
+    source = seed_source()
+    real_icon = "https://example.test/real-icon.png"
+    source["apps"][0]["iconURL"] = real_icon
+    data_dir = app_module.DATA_DIR
+    with open(os.path.join(data_dir, "source.json"), "w") as f:
+        f.write(json.dumps(source))
+
+    resp = client.get("/source.json")
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    app_entry = next(a for a in body["apps"] if a["bundleIdentifier"] == "com.example.app")
+    assert app_entry["iconURL"] == real_icon
+
+
 def test_ipas_serves_existing_file(client, tmp_path):
     ipa_dir = tmp_path / "ipas" / "com.example.app"
     ipa_dir.mkdir(parents=True)
@@ -582,6 +666,30 @@ def test_add_version_grows_versions_list(authed_client):
     resp = authed_client.get("/api/app/com.example.app")
     body = json.loads(resp.data)
     assert len(body["versions"]) == 2
+
+
+def test_add_version_skips_existing_version(authed_client):
+    """Re-adding a version that already exists on the app (e.g. a re-run
+    release import) must be an idempotent success -- no re-download, and
+    crucially no duplicate version entry, since duplicates break the
+    AltStore client's decode of the whole source (Plan 037)."""
+    resp = authed_client.post(
+        "/api/add-version",
+        json={
+            "bundleIdentifier": "com.example.app",
+            "version": "1.0.0",
+            "downloadURL": "http://example.test/ipas/com.example.app/1.0.0.ipa",
+        },
+    )
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["success"] is True
+
+    resp = authed_client.get("/api/app/com.example.app")
+    body = json.loads(resp.data)
+    versions = [v["version"] for v in body["versions"]]
+    assert versions.count("1.0.0") == 1
+    assert len(body["versions"]) == 1
 
 
 def test_update_version_persists_min_os(authed_client):
