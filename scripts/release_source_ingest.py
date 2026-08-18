@@ -129,6 +129,7 @@ class ReleaseCandidate:
     declared_size: object  # int or None
     download_url: str
     auth_host: str
+    release_body: str = ""
 
 
 @dataclass
@@ -409,6 +410,7 @@ def github_select_candidate(job, releases):
             declared_size=asset.get("size"),
             download_url=asset.get("url"),
             auth_host="api.github.com",
+            release_body=release.get("body") or "",
         )
     return None
 
@@ -489,6 +491,7 @@ def gitlab_select_candidate(job, releases, now=None):
             declared_size=None,
             download_url=url,
             auth_host=host,
+            release_body=release.get("description") or "",
         )
     return None
 
