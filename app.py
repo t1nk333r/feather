@@ -1070,7 +1070,43 @@ class SourceManager:
                 return success, "App deleted successfully" if success else "Failed to save source after deletion"
             else:
                 return False, "App not found"
-    
+
+    def delete_version(self, bundle_identifier, version):
+        """Delete a single version entry (and its IPA) from an app."""
+        with self._lock:
+            source_data = self.load_source()
+            if not source_data:
+                return False, "Failed to load source data"
+
+            app_index = None
+            for i, app in enumerate(source_data['apps']):
+                if app['bundleIdentifier'] == bundle_identifier:
+                    app_index = i
+                    break
+
+            if app_index is None:
+                return False, "App not found"
+
+            app = source_data['apps'][app_index]
+            version_index = None
+            for i, v in enumerate(app.get('versions', [])):
+                if v['version'] == version:
+                    version_index = i
+                    break
+
+            if version_index is None:
+                return False, "Version not found"
+
+            if len(app.get('versions', [])) <= 1:
+                return False, "Cannot delete the only version; delete the app instead"
+
+            app['versions'].pop(version_index)
+
+            success = self.save_source(source_data)
+            if success:
+                self.delete_ipa_file(bundle_identifier, version)
+            return success, "Version deleted successfully" if success else "Failed to save source after deletion"
+
     def get_app(self, bundle_identifier):
         """Get app by bundle identifier"""
         source_data = self.load_source()
@@ -1823,6 +1859,32 @@ def update_version():
             
     except Exception as e:
         logging.error(f"Error updating version: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 400
+
+@app.route('/api/delete-version', methods=['POST'])
+@requires_auth
+def delete_version():
+    try:
+        data = request.json
+        bundle_id = data.get('bundleIdentifier')
+        version = data.get('version')
+
+        if not bundle_id:
+            return jsonify({"success": False, "error": "Bundle identifier is required"}), 400
+
+        if not version:
+            return jsonify({"success": False, "error": "Version is required"}), 400
+
+        success, message = source_manager.delete_version(bundle_id, version)
+
+        if success:
+            notify("delete_version", f"Version removed: {bundle_id} {version}")
+            return jsonify({"success": True, "message": message})
+        else:
+            return jsonify({"success": False, "error": message}), 400
+
+    except Exception as e:
+        logging.error(f"Error deleting version: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 400
 
 @app.route('/api/update-source', methods=['POST'])

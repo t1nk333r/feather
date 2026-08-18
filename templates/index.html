@@ -1387,6 +1387,7 @@
                             <input type="url" class="version-ipa-url" data-version="${escapeHtml(version.version)}" placeholder="https://example.com/app.ipa" style="display: none; width: 100%; margin-top: 8px;">
                         </div>
                         <button type="button" class="btn" style="margin-top: 10px; padding: 8px 16px; font-size: 0.9em;" onclick="updateVersion('${escapeHtml(version.version)}', this)">Update Version</button>
+                        <button type="button" class="btn btn-danger" style="margin-top: 10px; margin-left: 10px; padding: 8px 16px; font-size: 0.9em;" onclick="deleteVersion('${escapeHtml(version.version)}', this)">Delete Version</button>
                     </div>
                 </div>
             `;
@@ -1540,7 +1541,37 @@
                 if (button) setButtonLoading(button, false);
             }
         }
-        
+
+        async function deleteVersion(version, button) {
+            const bundleId = document.getElementById('editBundleId').value;
+            const appName = document.getElementById('editName').value || bundleId;
+
+            if (!confirm(`Delete version ${version} of ${appName}? This removes the IPA and cannot be undone.`)) return;
+
+            if (button) setButtonLoading(button, true);
+
+            try {
+                const response = await fetch('/api/delete-version', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ bundleIdentifier: bundleId, version: version })
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    showToast(result.message || 'Version deleted successfully!', 'success');
+                    // Reload app data to show updated version list
+                    await editApp(bundleId);
+                } else {
+                    showToast(result.error || 'Failed to delete version', 'error');
+                }
+            } catch (error) {
+                showToast('Error deleting version: ' + error.message, 'error');
+            } finally {
+                if (button) setButtonLoading(button, false);
+            }
+        }
+
         async function addNewVersion(button) {
             const bundleId = document.getElementById('editBundleId').value;
             const version = document.getElementById('newVersion').value;

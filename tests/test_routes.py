@@ -1861,3 +1861,109 @@ def test_health_never_500s_on_malformed_catalog(authed_client):
     assert resp.status_code == 200
     body = json.loads(resp.data)
     assert isinstance(body["issues"], list)
+
+
+# ---------------------------------------------------------------------------
+# Plan 039: delete-version -- completing version CRUD
+# ---------------------------------------------------------------------------
+
+
+def test_delete_version_removes_one_version(authed_client):
+    """Deleting one of two versions must remove only that version, leaving
+    the other one intact."""
+    resp = authed_client.post(
+        "/api/add-version",
+        json={
+            "bundleIdentifier": "com.example.app",
+            "version": "2.0.0",
+            "downloadURL": "http://example.test/ipas/com.example.app/2.0.0.ipa",
+        },
+    )
+    assert resp.status_code == 200
+    assert json.loads(resp.data)["success"] is True
+
+    resp = authed_client.post(
+        "/api/delete-version",
+        json={"bundleIdentifier": "com.example.app", "version": "1.0.0"},
+    )
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["success"] is True
+
+    resp = authed_client.get("/api/app/com.example.app")
+    body = json.loads(resp.data)
+    versions = [v["version"] for v in body["versions"]]
+    assert versions == ["2.0.0"]
+
+
+def test_delete_version_refuses_last_version(authed_client):
+    """Deleting the only remaining version on an app must be refused --
+    it would otherwise leave a malformed zero-version app entry."""
+    resp = authed_client.post(
+        "/api/delete-version",
+        json={"bundleIdentifier": "com.example.app", "version": "1.0.0"},
+    )
+    assert resp.status_code == 400
+    body = json.loads(resp.data)
+    assert body["success"] is False
+    assert "only version" in body["error"].lower()
+
+    resp = authed_client.get("/api/app/com.example.app")
+    body = json.loads(resp.data)
+    versions = [v["version"] for v in body["versions"]]
+    assert versions == ["1.0.0"]
+
+
+def test_delete_version_unknown_version_404_message(authed_client):
+    """Deleting a version that doesn't exist on the app must fail clearly,
+    not silently succeed."""
+    resp = authed_client.post(
+        "/api/delete-version",
+        json={"bundleIdentifier": "com.example.app", "version": "9.9.9"},
+    )
+    assert resp.status_code == 400
+    body = json.loads(resp.data)
+    assert body["success"] is False
+    assert body["error"] == "Version not found"
+
+
+def test_delete_version_requires_auth(client):
+    """Unauthenticated POST /api/delete-version must 401 -- this is a
+    destructive route."""
+    resp = client.post(
+        "/api/delete-version",
+        json={"bundleIdentifier": "com.example.app", "version": "1.0.0"},
+    )
+    assert resp.status_code == 401
+
+
+def test_delete_version_deletes_the_ipa(authed_client, tmp_path):
+    """Deleting a version must also remove its stored IPA file via the
+    configured storage backend (delete_ipa_file), same as delete_app does
+    for each of an app's versions."""
+    resp = authed_client.post(
+        "/api/add-version",
+        json={
+            "bundleIdentifier": "com.example.app",
+            "version": "2.0.0",
+            "downloadURL": "http://example.test/ipas/com.example.app/2.0.0.ipa",
+        },
+    )
+    assert resp.status_code == 200
+    assert json.loads(resp.data)["success"] is True
+
+    ipa_dir = tmp_path / "ipas" / "com.example.app"
+    ipa_dir.mkdir(parents=True, exist_ok=True)
+    ipa_path = ipa_dir / "1.0.0.ipa"
+    ipa_path.write_bytes(b"PK\x03\x04fakeipa")
+    assert ipa_path.exists()
+
+    resp = authed_client.post(
+        "/api/delete-version",
+        json={"bundleIdentifier": "com.example.app", "version": "1.0.0"},
+    )
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["success"] is True
+
+    assert not ipa_path.exists()
