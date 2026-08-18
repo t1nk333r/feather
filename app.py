@@ -12,6 +12,11 @@ import hmac
 import threading
 import boto3
 import zipfile
+import plistlib
+import zlib
+import struct
+import fnmatch
+from PIL import Image
 from functools import wraps
 from botocore.exceptions import ClientError
 from datetime import datetime, timezone
@@ -1720,6 +1725,244 @@ def _clean_description(text, limit=800):
         text = text[:limit].rstrip() + "…"
     return text
 
+
+def _decode_cgbi_png(data):
+    """Reverse Apple's ``-iphone`` pngcrush CgBI transform back into a
+    standard RGBA Pillow Image.
+
+    CgBI PNGs store BGRA pixels with premultiplied alpha and a raw-deflate
+    (no zlib header) IDAT stream. This undoes both, following the
+    well-known "pngdefry"/"iphone-png-normalizer" approach. Raises
+    ``ValueError`` (or lets the underlying zlib/struct error propagate) on
+    anything that isn't a well-formed 8-bit RGBA CgBI PNG -- callers must
+    catch and fall back.
+    """
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG")
+
+    pos = 8
+    length = len(data)
+    has_cgbi = False
+    ihdr = None
+    idat = bytearray()
+    while pos + 8 <= length:
+        chunk_len = struct.unpack(">I", data[pos:pos + 4])[0]
+        chunk_type = data[pos + 4:pos + 8]
+        chunk_data = data[pos + 8:pos + 8 + chunk_len]
+        if chunk_type == b"CgBI":
+            has_cgbi = True
+        elif chunk_type == b"IHDR":
+            ihdr = chunk_data
+        elif chunk_type == b"IDAT":
+            idat += chunk_data
+        elif chunk_type == b"IEND":
+            break
+        pos += 8 + chunk_len + 4  # data + CRC
+
+    if not has_cgbi:
+        raise ValueError("not a CgBI PNG")
+    if not ihdr or len(ihdr) < 10:
+        raise ValueError("missing/short IHDR")
+
+    width, height, bit_depth, color_type = struct.unpack(">IIBB", ihdr[:10])
+    if bit_depth != 8 or color_type != 6:
+        raise ValueError(f"unsupported CgBI IHDR (bit_depth={bit_depth}, color_type={color_type})")
+
+    raw = zlib.decompress(bytes(idat), -zlib.MAX_WBITS)
+
+    bpp = 4
+    stride = width * bpp
+    if len(raw) < (stride + 1) * height:
+        raise ValueError("truncated CgBI pixel data")
+
+    out = bytearray(width * height * bpp)
+    prev_row = bytearray(stride)
+    read_pos = 0
+    for y in range(height):
+        filter_type = raw[read_pos]
+        read_pos += 1
+        row = bytearray(raw[read_pos:read_pos + stride])
+        read_pos += stride
+
+        if filter_type == 0:  # None
+            pass
+        elif filter_type == 1:  # Sub
+            for x in range(bpp, stride):
+                row[x] = (row[x] + row[x - bpp]) & 0xFF
+        elif filter_type == 2:  # Up
+            for x in range(stride):
+                row[x] = (row[x] + prev_row[x]) & 0xFF
+        elif filter_type == 3:  # Average
+            for x in range(stride):
+                a = row[x - bpp] if x >= bpp else 0
+                b = prev_row[x]
+                row[x] = (row[x] + ((a + b) >> 1)) & 0xFF
+        elif filter_type == 4:  # Paeth
+            for x in range(stride):
+                a = row[x - bpp] if x >= bpp else 0
+                b = prev_row[x]
+                c = prev_row[x - bpp] if x >= bpp else 0
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                if pa <= pb and pa <= pc:
+                    pred = a
+                elif pb <= pc:
+                    pred = b
+                else:
+                    pred = c
+                row[x] = (row[x] + pred) & 0xFF
+        else:
+            raise ValueError(f"unsupported PNG filter type {filter_type}")
+
+        row_offset = y * stride
+        for x in range(0, stride, bpp):
+            b, g, r, a = row[x], row[x + 1], row[x + 2], row[x + 3]
+            if a == 0:
+                rr = gg = bb = 0
+            else:
+                rr = min(255, (r * 255) // a)
+                gg = min(255, (g * 255) // a)
+                bb = min(255, (b * 255) // a)
+            o = row_offset + x
+            out[o] = rr
+            out[o + 1] = gg
+            out[o + 2] = bb
+            out[o + 3] = a
+
+        prev_row = row
+
+    return Image.frombytes("RGBA", (width, height), bytes(out))
+
+
+def _save_temp_png(img):
+    """Save a PIL Image as a standard PNG to a new temp file and return its path."""
+    fd, path = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix=".png")
+    os.close(fd)
+    img.save(path, format="PNG")
+    return path
+
+
+def _extract_ipa_icon(ipa_path):
+    """Best-effort extraction of the app icon from an .ipa, normalized to a
+    standard PNG. Returns a path to a new temporary PNG file (the caller
+    must delete it) or ``None`` if no icon could be extracted. Never raises
+    -- any failure anywhere just yields ``None`` so the caller falls back.
+    """
+    try:
+        with zipfile.ZipFile(ipa_path) as zf:
+            names = zf.namelist()
+
+            # 1. iTunesArtwork shortcut: a root-level, usually-standard PNG.
+            for wanted in ("itunesartwork@2x", "itunesartwork.png", "itunesartwork"):
+                for name in names:
+                    if "/" not in name and name.lower() == wanted:
+                        try:
+                            img = Image.open(io.BytesIO(zf.read(name)))
+                            img.load()
+                            return _save_temp_png(img)
+                        except Exception:
+                            pass
+
+            # 2. Find the .app directory inside Payload/.
+            app_dirs = sorted({
+                n.split("/", 2)[1] for n in names
+                if n.startswith("Payload/") and n.count("/") >= 1
+                and len(n.split("/", 2)) > 1 and n.split("/", 2)[1].endswith(".app")
+            })
+            if not app_dirs:
+                return None
+            app_prefix = f"Payload/{app_dirs[0]}/"
+
+            # 3. Candidate icon base names from Info.plist.
+            icon_bases = []
+            info_plist_path = f"{app_prefix}Info.plist"
+            if info_plist_path in names:
+                try:
+                    plist = plistlib.loads(zf.read(info_plist_path))
+                except Exception:
+                    plist = {}
+                primary = ((plist.get("CFBundleIcons") or {}).get("CFBundlePrimaryIcon") or {})
+                files = primary.get("CFBundleIconFiles")
+                if isinstance(files, list):
+                    icon_bases.extend(b for b in files if isinstance(b, str))
+                top_files = plist.get("CFBundleIconFiles")
+                if isinstance(top_files, list):
+                    icon_bases.extend(b for b in top_files if isinstance(b, str))
+                top_file = plist.get("CFBundleIconFile")
+                if isinstance(top_file, str) and top_file:
+                    icon_bases.append(top_file)
+
+            candidates = []
+            seen = set()
+            for base in icon_bases:
+                base_noext = base[:-4] if base.lower().endswith(".png") else base
+                pattern = f"{app_prefix}{base_noext}*.png"
+                for name in names:
+                    if name not in seen and fnmatch.fnmatch(name, pattern):
+                        candidates.append(name)
+                        seen.add(name)
+
+            if not candidates:
+                pattern = f"{app_prefix}AppIcon*.png"
+                candidates = [n for n in names if fnmatch.fnmatch(n, pattern)]
+
+            if not candidates:
+                return None
+
+            # 4. Pick the largest candidate (decoded pixel area, or a
+            # declared/uncompressed-size proxy when it won't decode yet),
+            # preferring @3x/@2x on ties.
+            def scale_rank(name):
+                lowered = name.lower()
+                if "@3x" in lowered:
+                    return 2
+                if "@2x" in lowered:
+                    return 1
+                return 0
+
+            best_name = None
+            best_key = None
+            for name in candidates:
+                try:
+                    raw = zf.read(name)
+                except Exception:
+                    continue
+                try:
+                    probe = Image.open(io.BytesIO(raw))
+                    size_measure = probe.size[0] * probe.size[1]
+                except Exception:
+                    try:
+                        size_measure = zf.getinfo(name).file_size
+                    except KeyError:
+                        size_measure = len(raw)
+                key = (size_measure, scale_rank(name))
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_name = name
+
+            if best_name is None:
+                return None
+
+            raw = zf.read(best_name)
+
+            # 5. A minority of IPAs ship standard (non-CgBI) PNGs here.
+            try:
+                img = Image.open(io.BytesIO(raw))
+                img.load()
+                return _save_temp_png(img)
+            except Exception:
+                pass
+
+            # 6. Otherwise treat it as CgBI and normalize it.
+            try:
+                img = _decode_cgbi_png(raw)
+                return _save_temp_png(img)
+            except Exception:
+                return None
+    except Exception:
+        return None
+
+
 @app.route('/api/import-release', methods=['POST'])
 @requires_auth
 def import_release():
@@ -1821,11 +2064,34 @@ def import_release():
                 description = _clean_description(getattr(candidate, "release_body", ""))
                 if description:
                     new_app["localizedDescription"] = description
-                if icon_url_in:
-                    new_app["iconURL"] = icon_url_in
-                ok, message = source_manager.add_app_manual(
-                    new_app, ipa_file=fs,
-                    download_icon_from_url=bool(icon_url_in), base_url=base_url)
+                extracted_icon = None
+                if not icon_url_in:
+                    extracted_icon = _extract_ipa_icon(tmp_path)
+                try:
+                    if icon_url_in:
+                        new_app["iconURL"] = icon_url_in
+                        ok, message = source_manager.add_app_manual(
+                            new_app, ipa_file=fs, download_icon_from_url=True, base_url=base_url)
+                    elif extracted_icon:
+                        icon_fs = FileStorage(stream=open(extracted_icon, "rb"), filename="icon.png")
+                        ok, message = source_manager.add_app_manual(
+                            new_app, ipa_file=fs, icon_file=icon_fs, base_url=base_url)
+                    else:
+                        # Fallback: GitHub owner avatar. GitLab avatars need an
+                        # extra API call, so GitLab imports simply go iconless here.
+                        owner = _repo_owner(project) if provider == "github" else ""
+                        if owner:
+                            new_app["iconURL"] = f"https://github.com/{owner}.png"
+                            ok, message = source_manager.add_app_manual(
+                                new_app, ipa_file=fs, download_icon_from_url=True, base_url=base_url)
+                        else:
+                            ok, message = source_manager.add_app_manual(new_app, ipa_file=fs, base_url=base_url)
+                finally:
+                    if extracted_icon:
+                        try:
+                            os.remove(extracted_icon)
+                        except OSError:
+                            pass
             else:
                 yield event(stage="error", error=f"App {bundle_id} is not in the catalog. Tick 'create if missing' with a name + developer to add it.")
                 return
