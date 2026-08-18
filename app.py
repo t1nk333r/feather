@@ -2057,6 +2057,102 @@ def catalog_health():
         return jsonify({"issues": [], "error": "scan failed"}), 200
 
 
+def _reconcile_icons(apply=False):
+    """Scan ICON_FOLDER for on-disk icons and upload any missing from the
+    active backend (plan 040). Mirrors scripts/migrate_icons_to_garage.py's
+    logic in-app so an operator without a repo checkout can repair icons
+    that were never migrated after a STORAGE_BACKEND switch.
+
+    Dry-run by default (apply=False): reports what would be uploaded without
+    writing anything. apply=True uploads only icons missing from the active
+    backend. Never deletes or modifies local icon files.
+
+    For the local backend this is a no-op: on-disk icons ARE what's served.
+    """
+    if STORAGE_BACKEND != "garage":
+        return {
+            "backend": "local",
+            "uploaded": 0,
+            "note": "local backend serves on-disk icons directly; nothing to reconcile",
+        }
+
+    checked = 0
+    would_upload = 0
+    uploaded = 0
+    skipped_existing = 0
+    failed = 0
+    items = []
+
+    if os.path.isdir(ICON_FOLDER):
+        for bundle in sorted(os.listdir(ICON_FOLDER)):
+            safe_bundle = secure_filename(bundle)
+            if not safe_bundle or safe_bundle != bundle:
+                continue
+            bundle_dir = os.path.join(ICON_FOLDER, bundle)
+            if not os.path.isdir(bundle_dir):
+                continue
+            for filename in sorted(os.listdir(bundle_dir)):
+                path = os.path.join(bundle_dir, filename)
+                if not os.path.isfile(path) or not filename.startswith("icon."):
+                    continue
+                ext = filename.rsplit(".", 1)[1].lower() if "." in filename else ""
+                safe_ext = secure_filename(ext)
+                if filename != f"icon.{ext}" or not safe_ext or safe_ext != ext or ext not in ALLOWED_ICON_EXTENSIONS:
+                    continue
+
+                checked += 1
+                try:
+                    already_exists = icon_storage.exists(bundle, ext)
+                except Exception as e:
+                    logging.error(f"Error checking icon existence ({bundle}/{ext}): {str(e)}")
+                    failed += 1
+                    items.append({"bundleIdentifier": bundle, "ext": ext, "status": "failed"})
+                    continue
+
+                if already_exists:
+                    skipped_existing += 1
+                    items.append({"bundleIdentifier": bundle, "ext": ext, "status": "skipped_existing"})
+                    continue
+
+                if not apply:
+                    would_upload += 1
+                    items.append({"bundleIdentifier": bundle, "ext": ext, "status": "would_upload"})
+                    continue
+
+                try:
+                    ok = icon_storage.put(path, bundle, ext)
+                except Exception as e:
+                    logging.error(f"Error uploading icon ({bundle}/{ext}): {str(e)}")
+                    ok = False
+                if ok:
+                    uploaded += 1
+                    items.append({"bundleIdentifier": bundle, "ext": ext, "status": "uploaded"})
+                else:
+                    failed += 1
+                    items.append({"bundleIdentifier": bundle, "ext": ext, "status": "failed"})
+
+    return {
+        "backend": "garage",
+        "checked": checked,
+        "would_upload": would_upload,
+        "uploaded": uploaded,
+        "skipped_existing": skipped_existing,
+        "failed": failed,
+        "items": items,
+    }
+
+
+@app.route('/api/reconcile-icons', methods=['POST'])
+@requires_auth
+def reconcile_icons():
+    apply = bool((request.get_json(silent=True) or {}).get('apply'))
+    try:
+        return jsonify(_reconcile_icons(apply=apply))
+    except Exception as e:
+        logging.error(f"Icon reconcile error: {str(e)}")
+        return jsonify({"error": "reconcile failed"}), 500
+
+
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({"error": "Endpoint not found"}), 404
