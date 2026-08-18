@@ -8,27 +8,97 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { 
+        :root {
+            color-scheme: light dark;               /* native form controls, scrollbars adapt */
+
+            /* backgrounds */
+            --canvas: #f2f2f7;                       /* systemGroupedBackground (light) */
+            --surface: #ffffff;                      /* secondarySystemGroupedBackground — cards */
+            --surface-2: #f2f2f7;                    /* inset fills */
+            --fill: rgba(120,120,128,0.12);          /* systemFill — subtle control fill */
+            --fill-hover: rgba(120,120,128,0.20);
+
+            /* text (Apple label ramp) */
+            --label: #1c1c1e;
+            --label-secondary: rgba(60,60,67,0.60);
+            --label-tertiary: rgba(60,60,67,0.30);
+
+            /* hairlines */
+            --separator: rgba(60,60,67,0.29);        /* opaque-ish separator */
+            --border: rgba(60,60,67,0.18);           /* input/card hairline */
+
+            /* accents (system colors, light) */
+            --accent: #007aff;                       /* systemBlue */
+            --accent-press: #0062cc;
+            --accent-tint: rgba(0,122,255,0.12);     /* tinted-button fill */
+            --danger: #ff3b30;                       /* systemRed */
+            --danger-press: #d70015;
+            --danger-tint: rgba(255,59,48,0.12);
+            --success: #34c759;                      /* systemGreen */
+            --warning: #ff9500;                      /* systemOrange */
+
+            /* shape & depth (iOS is flat with tight radii + faint shadow) */
+            --radius-lg: 12px;                       /* cards, modals, tab panels */
+            --radius-md: 10px;                       /* buttons, inputs */
+            --radius-sm: 8px;
+            --shadow-card: 0 0 0 0.5px var(--border), 0 1px 2px rgba(0,0,0,0.05);
+            --shadow-modal: 0 12px 40px rgba(0,0,0,0.18);
+            --focus-ring: 0 0 0 3px rgba(0,122,255,0.25);
+            --mono: 'SF Mono','Monaco','Inconsolata','Roboto Mono',monospace;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --canvas: #000000;                   /* systemGroupedBackground (dark) */
+                --surface: #1c1c1e;                  /* secondarySystemGroupedBackground */
+                --surface-2: #2c2c2e;
+                --fill: rgba(120,120,128,0.24);
+                --fill-hover: rgba(120,120,128,0.32);
+
+                --label: #ffffff;
+                --label-secondary: rgba(235,235,245,0.60);
+                --label-tertiary: rgba(235,235,245,0.30);
+
+                --separator: rgba(84,84,88,0.65);
+                --border: rgba(84,84,88,0.50);
+
+                --accent: #0a84ff;                   /* systemBlue (dark) */
+                --accent-press: #409cff;
+                --accent-tint: rgba(10,132,255,0.24);
+                --danger: #ff453a;                   /* systemRed (dark) */
+                --danger-press: #ff6961;
+                --danger-tint: rgba(255,69,58,0.24);
+                --success: #30d158;
+                --warning: #ff9f0a;
+
+                --shadow-card: 0 0 0 0.5px var(--border), 0 1px 2px rgba(0,0,0,0.30);
+                --shadow-modal: 0 12px 40px rgba(0,0,0,0.60);
+                --focus-ring: 0 0 0 3px rgba(10,132,255,0.35);
+            }
+        }
+        body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: var(--canvas);
             min-height: 100vh;
             padding: 20px;
         }
         .container {
             max-width: 1200px;
             margin: 0 auto;
-            background: white;
-            border-radius: 20px;
+            background: var(--surface);
+            border-radius: var(--radius-lg);
             padding: 40px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            box-shadow: var(--shadow-card);
         }
-        h1 { 
-            color: #667eea;
+        h1 {
+            color: var(--label);
             margin-bottom: 10px;
-            font-size: 2.5em;
+            font-size: 1.6em;
+            font-weight: 700;
+            letter-spacing: -0.02em;
         }
         .subtitle {
-            color: #666;
+            color: var(--label-secondary);
             margin-bottom: 30px;
             font-size: 1.1em;
         }
@@ -36,7 +106,7 @@
             display: flex;
             gap: 10px;
             margin-bottom: 30px;
-            border-bottom: 2px solid #eee;
+            border-bottom: 1px solid var(--separator);
             flex-wrap: wrap;
         }
         .tab {
@@ -45,20 +115,20 @@
             border: none;
             background: none;
             font-size: 16px;
-            color: #666;
-            border-bottom: 3px solid transparent;
-            transition: all 0.3s;
-            border-radius: 8px 8px 0 0;
+            color: var(--label-secondary);
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            border-radius: 0;
         }
         .tab.active {
-            color: #667eea;
-            border-bottom-color: #667eea;
+            color: var(--accent);
+            border-bottom-color: var(--accent);
             font-weight: 600;
-            background: #f8f9ff;
+            background: transparent;
         }
         .tab:hover {
-            color: #667eea;
-            background: #f8f9ff;
+            color: var(--label);
+            background: transparent;
         }
         .tab-content {
             display: none;
@@ -73,21 +143,23 @@
         label {
             display: block;
             margin-bottom: 8px;
-            color: #333;
+            color: var(--label);
             font-weight: 500;
         }
         input, textarea, select {
             width: 100%;
             padding: 12px;
-            border: 2px solid #e0e0e0;
-            border-radius: 8px;
+            background: var(--surface);
+            color: var(--label);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
             font-size: 14px;
-            transition: border-color 0.3s;
+            transition: border-color 0.2s;
         }
         input:focus, textarea:focus, select:focus {
             outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+            border-color: var(--accent);
+            box-shadow: var(--focus-ring);
         }
         textarea {
             min-height: 100px;
@@ -95,28 +167,27 @@
             resize: vertical;
         }
         .btn {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
+            background: var(--accent);
+            color: #fff;
             padding: 14px 28px;
             border: none;
-            border-radius: 8px;
+            border-radius: var(--radius-md);
             cursor: pointer;
             font-size: 16px;
             font-weight: 600;
-            transition: transform 0.2s, box-shadow 0.2s;
+            transition: background .15s, opacity .15s;
         }
         .btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+            background: var(--accent-press);
         }
         .btn:active {
-            transform: translateY(0);
+            opacity: .8;
         }
         .btn-danger {
-            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            background: var(--danger);
         }
         .btn-danger:hover {
-            box-shadow: 0 10px 20px rgba(245, 87, 108, 0.3);
+            background: var(--danger-press);
         }
         .app-list {
             display: grid;
@@ -124,16 +195,15 @@
             margin-top: 20px;
         }
         .app-card {
-            border: 2px solid #e0e0e0;
-            border-radius: 12px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
             padding: 20px;
-            transition: all 0.3s;
-            background: #fafafa;
+            transition: border-color 0.2s;
+            background: var(--surface);
+            box-shadow: var(--shadow-card);
         }
         .app-card:hover {
-            border-color: #667eea;
-            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.2);
-            transform: translateY(-2px);
+            border-color: var(--separator);
         }
         .app-header {
             display: flex;
@@ -146,12 +216,12 @@
             flex: 1;
         }
         .app-info h3 {
-            color: #333;
+            color: var(--label);
             margin-bottom: 5px;
             font-size: 1.2em;
         }
         .app-info p {
-            color: #666;
+            color: var(--label-secondary);
             font-size: 0.9em;
             margin-bottom: 5px;
         }
@@ -161,59 +231,64 @@
         }
         .qr-container img {
             max-width: 300px;
-            border: 5px solid #667eea;
+            border: 1px solid var(--border);
             border-radius: 12px;
             padding: 10px;
-            background: white;
+            background: #fff;
             margin: 0 auto 20px;
         }
         .source-url {
-            background: #f5f5f5;
+            background: var(--surface-2);
             padding: 15px;
-            border-radius: 8px;
+            border-radius: var(--radius-md);
             margin: 15px 0;
-            font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace;
+            font-family: var(--mono);
             word-break: break-all;
-            border: 1px solid #e0e0e0;
+            border: 1px solid var(--border);
+            color: var(--label);
         }
         .alert {
             padding: 15px;
-            border-radius: 8px;
+            border-radius: var(--radius-md);
             margin-bottom: 20px;
         }
         .alert-success {
-            background: #d4edda;
-            color: #155724;
-            border: 1px solid #c3e6cb;
+            background: rgba(52,199,89,0.14);
+            color: var(--label);
+            border: 1px solid rgba(52,199,89,0.30);
         }
         .alert-error {
-            background: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
+            background: var(--danger-tint);
+            color: var(--label);
+            border: 1px solid var(--danger);
         }
         .parser-options {
-            background: #f8f9fa;
+            background: var(--surface-2);
             padding: 20px;
-            border-radius: 8px;
+            border-radius: var(--radius-md);
             margin-top: 10px;
-            border: 1px solid #e9ecef;
+            border: 1px solid var(--border);
         }
         .version-info {
             font-size: 0.85em;
-            color: #666;
+            color: var(--label-secondary);
             margin-top: 5px;
             line-height: 1.4;
         }
         .info-box {
-            background: #e8f4fd;
+            background: var(--accent-tint);
             padding: 15px;
-            border-radius: 8px;
-            border-left: 4px solid #667eea;
+            border-radius: var(--radius-md);
+            border-left: 3px solid var(--accent);
             margin: 20px 0;
         }
         .btn-secondary {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: var(--accent-tint);
+            color: var(--accent);
             margin-right: 10px;
+        }
+        .btn-secondary:hover {
+            background: var(--fill-hover);
         }
         .btn-group {
             display: flex;
@@ -233,15 +308,15 @@
             animation: fadeIn 0.3s;
         }
         .modal-content {
-            background-color: white;
+            background: var(--surface);
             margin: 5% auto;
             padding: 30px;
-            border-radius: 20px;
+            border-radius: var(--radius-lg);
             width: 90%;
             max-width: 600px;
             max-height: 90vh;
             overflow-y: auto;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            box-shadow: var(--shadow-modal);
         }
         .modal-header {
             display: flex;
@@ -249,14 +324,14 @@
             align-items: center;
             margin-bottom: 20px;
             padding-bottom: 15px;
-            border-bottom: 2px solid #eee;
+            border-bottom: 1px solid var(--separator);
         }
         .modal-header h2 {
             margin: 0;
-            color: #667eea;
+            color: var(--label);
         }
         .close {
-            color: #aaa;
+            color: var(--label-tertiary);
             font-size: 28px;
             font-weight: bold;
             cursor: pointer;
@@ -264,19 +339,19 @@
             background: none;
         }
         .close:hover {
-            color: #667eea;
+            color: var(--label);
         }
         .version-list {
             margin-top: 20px;
             padding-top: 20px;
-            border-top: 2px solid #eee;
+            border-top: 1px solid var(--separator);
         }
         .version-item {
-            background: #f8f9fa;
+            background: var(--surface-2);
             padding: 15px;
-            border-radius: 8px;
+            border-radius: var(--radius-md);
             margin-bottom: 10px;
-            border-left: 4px solid #667eea;
+            border-left: 3px solid var(--accent);
         }
         .version-item-header {
             display: flex;
@@ -285,20 +360,20 @@
             margin-bottom: 8px;
         }
         .version-item-header strong {
-            color: #333;
+            color: var(--label);
             font-size: 1.1em;
         }
         .version-item-details {
             font-size: 0.9em;
-            color: #666;
+            color: var(--label-secondary);
             margin-top: 5px;
         }
         .add-version-section {
-            background: #f8f9ff;
+            background: var(--surface-2);
             padding: 20px;
-            border-radius: 8px;
+            border-radius: var(--radius-md);
             margin-top: 20px;
-            border: 2px dashed #667eea;
+            border: 1px dashed var(--border);
         }
         .app-icon {
             width: 60px;
@@ -306,7 +381,7 @@
             border-radius: 12px;
             object-fit: cover;
             margin-right: 15px;
-            border: 2px solid #e0e0e0;
+            border: 1px solid var(--border);
             flex-shrink: 0;
         }
         .app-header-with-icon {
@@ -332,7 +407,7 @@
             left: 12px;
             top: 50%;
             transform: translateY(-50%);
-            color: #999;
+            color: var(--label-tertiary);
             font-size: 18px;
         }
         .filter-select {
@@ -348,26 +423,26 @@
             gap: 10px;
         }
         .toast {
-            background: white;
+            background: var(--surface);
             padding: 16px 20px;
-            border-radius: 8px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            border-radius: var(--radius-md);
+            box-shadow: var(--shadow-card);
             display: flex;
             align-items: center;
             gap: 12px;
             min-width: 300px;
             max-width: 500px;
             animation: slideInRight 0.3s ease-out;
-            border-left: 4px solid #667eea;
+            border-left: 3px solid var(--accent);
         }
         .toast.success {
-            border-left-color: #10b981;
+            border-left-color: var(--success);
         }
         .toast.error {
-            border-left-color: #ef4444;
+            border-left-color: var(--danger);
         }
         .toast.warning {
-            border-left-color: #f59e0b;
+            border-left-color: var(--warning);
         }
         .toast-icon {
             font-size: 20px;
@@ -379,17 +454,17 @@
         .toast-title {
             font-weight: 600;
             margin-bottom: 4px;
-            color: #333;
+            color: var(--label);
         }
         .toast-message {
             font-size: 14px;
-            color: #666;
+            color: var(--label-secondary);
         }
         .toast-close {
             background: none;
             border: none;
             font-size: 20px;
-            color: #999;
+            color: var(--label-tertiary);
             cursor: pointer;
             padding: 0;
             width: 24px;
@@ -399,11 +474,11 @@
             justify-content: center;
         }
         .toast-close:hover {
-            color: #333;
+            color: var(--label);
         }
         .spinner {
-            border: 3px solid #f3f3f3;
-            border-top: 3px solid #667eea;
+            border: 3px solid var(--fill);
+            border-top: 3px solid var(--accent);
             border-radius: 50%;
             width: 24px;
             height: 24px;
@@ -412,9 +487,8 @@
             margin-right: 8px;
         }
         .btn:disabled {
-            opacity: 0.6;
+            opacity: 0.5;
             cursor: not-allowed;
-            transform: none;
         }
         .btn.loading {
             position: relative;
@@ -440,7 +514,7 @@
             left: 0;
             right: 0;
             bottom: 0;
-            background: rgba(255, 255, 255, 0.9);
+            background: color-mix(in srgb, var(--surface) 88%, transparent);
             display: flex;
             align-items: center;
             justify-content: center;
@@ -448,10 +522,10 @@
             z-index: 10;
         }
         .skeleton {
-            background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+            background: linear-gradient(90deg, var(--fill) 25%, var(--fill-hover) 50%, var(--fill) 75%);
             background-size: 200% 100%;
             animation: loading 1.5s ease-in-out infinite;
-            border-radius: 8px;
+            border-radius: var(--radius-md);
         }
         .skeleton-text {
             height: 16px;
@@ -467,7 +541,7 @@
             to { opacity: 1; transform: translateY(0); }
         }
         @keyframes slideInRight {
-            from { 
+            from {
                 opacity: 0;
                 transform: translateX(100%);
             }
@@ -592,7 +666,7 @@
                 <div id="loadingOverlay" class="loading-overlay" style="display: none;">
                     <div class="spinner"></div>
                 </div>
-                <p style="color: #666; text-align: center; padding: 40px;">Loading apps...</p>
+                <p style="color: var(--label-secondary); text-align: center; padding: 40px;">Loading apps...</p>
             </div>
         </div>
 
@@ -630,7 +704,7 @@
                     </div>
                     <div class="form-group">
                         <label>Tint Color:</label>
-                        <input type="text" id="editTintColor" name="tintColor" placeholder="#667eea">
+                        <input type="text" id="editTintColor" name="tintColor" placeholder="#007AFF">
                     </div>
                     <div class="form-group">
                         <label>Icon:</label>
@@ -645,7 +719,7 @@
                     </div>
                     <div class="form-group">
                         <label>Bundle Identifier (read-only):</label>
-                        <input type="text" id="editBundleIdentifier" readonly style="background: #f5f5f5;">
+                        <input type="text" id="editBundleIdentifier" readonly style="background: var(--surface-2);">
                     </div>
                     
                     <div class="version-list">
@@ -653,7 +727,7 @@
                         <div id="versionsList"></div>
                         
                         <div class="add-version-section">
-                            <h4 style="margin-bottom: 15px; color: #667eea;">Add New Version</h4>
+                            <h4 style="margin-bottom: 15px; color: var(--accent);">Add New Version</h4>
                             <div class="form-group">
                                 <label>Version:</label>
                                 <input type="text" id="newVersion" name="version" placeholder="1.0.0">
@@ -696,7 +770,7 @@
                         <label for="loginPassword">Admin password</label>
                         <input type="password" id="loginPassword" name="password" autocomplete="current-password" required>
                     </div>
-                    <div id="loginError" style="display:none; color:#d02828;"></div>
+                    <div id="loginError" style="display:none; color:var(--danger);"></div>
                     <button type="submit" class="btn">Sign in</button>
                 </form>
             </div>
@@ -812,7 +886,7 @@
 
         <div id="health" class="tab-content">
             <h2 style="margin-bottom: 20px;">Catalog Health</h2>
-            <p style="color: #666; margin-bottom: 20px;">
+            <p style="color: var(--label-secondary); margin-bottom: 20px;">
                 Read-only diagnostics: scans the live catalog and storage for known
                 problem classes. Nothing here is repaired automatically.
             </p>
@@ -820,7 +894,7 @@
             <div id="healthResults" style="margin-top: 20px;"></div>
 
             <h2 style="margin-top: 40px; margin-bottom: 20px;">Reconcile Icons</h2>
-            <p style="color: #666; margin-bottom: 20px;">
+            <p style="color: var(--label-secondary); margin-bottom: 20px;">
                 Uploads on-disk app icons that are missing from the active storage
                 backend. Dry-run first to preview, then Apply to upload. Local icon
                 files are never deleted or modified.
@@ -1136,19 +1210,19 @@
             const btn = document.getElementById('healthScanBtn');
             const results = document.getElementById('healthResults');
             setButtonLoading(btn, true);
-            results.innerHTML = '<p style="color: #666;">Scanning...</p>';
+            results.innerHTML = '<p style="color: var(--label-secondary);">Scanning...</p>';
             try {
                 const response = await fetch('/api/health');
                 const data = await response.json();
                 const issues = data.issues || [];
 
                 if (data.error) {
-                    results.innerHTML = `<p style="color: #f5576c;">Scan failed: ${escapeHtml(data.error)}</p>`;
+                    results.innerHTML = `<p style="color: var(--danger);">Scan failed: ${escapeHtml(data.error)}</p>`;
                     return;
                 }
 
                 if (issues.length === 0) {
-                    results.innerHTML = '<p style="color: #666;">No problems found.</p>';
+                    results.innerHTML = '<p style="color: var(--label-secondary);">No problems found.</p>';
                     return;
                 }
 
@@ -1174,7 +1248,7 @@
                 results.innerHTML = html;
             } catch (error) {
                 console.error('Error running health scan:', error);
-                results.innerHTML = '<p style="color: #f5576c;">Scan failed. Please try again.</p>';
+                results.innerHTML = '<p style="color: var(--danger);">Scan failed. Please try again.</p>';
             } finally {
                 setButtonLoading(btn, false);
             }
@@ -1183,11 +1257,11 @@
         function renderReconcileSummary(data) {
             const results = document.getElementById('reconcileIconsResults');
             if (data.error) {
-                results.innerHTML = `<p style="color: #f5576c;">Reconcile failed: ${escapeHtml(data.error)}</p>`;
+                results.innerHTML = `<p style="color: var(--danger);">Reconcile failed: ${escapeHtml(data.error)}</p>`;
                 return;
             }
             if (data.backend === 'local') {
-                results.innerHTML = `<p style="color: #666;">${escapeHtml(data.note || 'Local backend: nothing to reconcile.')}</p>`;
+                results.innerHTML = `<p style="color: var(--label-secondary);">${escapeHtml(data.note || 'Local backend: nothing to reconcile.')}</p>`;
                 return;
             }
 
@@ -1214,7 +1288,7 @@
             const results = document.getElementById('reconcileIconsResults');
             const btn = apply ? applyBtn : dryRunBtn;
             setButtonLoading(btn, true);
-            results.innerHTML = apply ? '<p style="color: #666;">Applying...</p>' : '<p style="color: #666;">Scanning...</p>';
+            results.innerHTML = apply ? '<p style="color: var(--label-secondary);">Applying...</p>' : '<p style="color: var(--label-secondary);">Scanning...</p>';
             try {
                 const response = await fetch('/api/reconcile-icons', {
                     method: 'POST',
@@ -1224,7 +1298,7 @@
                 const data = await response.json();
 
                 if (data.error) {
-                    results.innerHTML = `<p style="color: #f5576c;">Reconcile failed: ${escapeHtml(data.error)}</p>`;
+                    results.innerHTML = `<p style="color: var(--danger);">Reconcile failed: ${escapeHtml(data.error)}</p>`;
                     showToast(data.error, 'error');
                     return;
                 }
@@ -1241,7 +1315,7 @@
                 }
             } catch (error) {
                 console.error('Error reconciling icons:', error);
-                results.innerHTML = '<p style="color: #f5576c;">Reconcile failed. Please try again.</p>';
+                results.innerHTML = '<p style="color: var(--danger);">Reconcile failed. Please try again.</p>';
                 showToast('Error reconciling icons: ' + error.message, 'error');
             } finally {
                 setButtonLoading(btn, false);
@@ -1271,7 +1345,7 @@
                 }
                 
                 if (apps.length === 0) {
-                    appsList.innerHTML = '<p style="color: #666; text-align: center; padding: 40px;">No apps added yet. Go to the "Add App" tab to add your first app!</p>';
+                    appsList.innerHTML = '<p style="color: var(--label-secondary); text-align: center; padding: 40px;">No apps added yet. Go to the "Add App" tab to add your first app!</p>';
                     setLoadingOverlay(false);
                     return;
                 }
@@ -1281,7 +1355,7 @@
             } catch (error) {
                 console.error('Error loading apps:', error);
                 showToast('Failed to load apps. Please try again.', 'error');
-                document.getElementById('appsList').innerHTML = '<p style="color: #f5576c; text-align: center; padding: 20px;">Error loading apps. Please try again.</p>';
+                document.getElementById('appsList').innerHTML = '<p style="color: var(--danger); text-align: center; padding: 20px;">Error loading apps. Please try again.</p>';
                 setLoadingOverlay(false);
             }
         }
@@ -1292,7 +1366,7 @@
             if (loadingMsg) loadingMsg.style.display = 'none';
             
             if (apps.length === 0) {
-                appsList.innerHTML = '<p style="color: #666; text-align: center; padding: 40px;">No apps found matching your search.</p>';
+                appsList.innerHTML = '<p style="color: var(--label-secondary); text-align: center; padding: 40px;">No apps found matching your search.</p>';
                 return;
             }
 
@@ -1300,7 +1374,7 @@
                 const firstLetter = (app.name || 'App').charAt(0).toUpperCase();
                 const iconUrl = app.iconURL || '';
                 // Create SVG data URI as fallback
-                const svgFallback = `data:image/svg+xml,${encodeURIComponent(`<svg width="60" height="60" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="60" fill="#667eea"/><text x="50%" y="50%" font-family="Arial" font-size="24" fill="#ffffff" text-anchor="middle" dy=".3em">${firstLetter}</text></svg>`)}`;
+                const svgFallback = `data:image/svg+xml,${encodeURIComponent(`<svg width="60" height="60" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="60" fill="#007aff"/><text x="50%" y="50%" font-family="Arial" font-size="24" fill="#ffffff" text-anchor="middle" dy=".3em">${firstLetter}</text></svg>`)}`;
                 return `
                     <div class="app-card">
                         <div class="app-header">
@@ -1424,7 +1498,7 @@
                 // Set app icon
                 const iconImg = document.getElementById('editAppIcon');
                 const firstLetter = (app.name || 'App').charAt(0).toUpperCase();
-                const svgFallback = `data:image/svg+xml,${encodeURIComponent(`<svg width="60" height="60" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="60" fill="#667eea"/><text x="50%" y="50%" font-family="Arial" font-size="24" fill="#ffffff" text-anchor="middle" dy=".3em">${firstLetter}</text></svg>`)}`;
+                const svgFallback = `data:image/svg+xml,${encodeURIComponent(`<svg width="60" height="60" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="60" fill="#007aff"/><text x="50%" y="50%" font-family="Arial" font-size="24" fill="#ffffff" text-anchor="middle" dy=".3em">${firstLetter}</text></svg>`)}`;
                 const iconUrl = app.iconURL || svgFallback;
                 iconImg.src = iconUrl;
                 iconImg.onerror = function() {
@@ -1445,7 +1519,7 @@
         function displayVersions(versions) {
             const versionsList = document.getElementById('versionsList');
             if (!versions || versions.length === 0) {
-                versionsList.innerHTML = '<p style="color: #666; text-align: center; padding: 20px;">No versions available</p>';
+                versionsList.innerHTML = '<p style="color: var(--label-secondary); text-align: center; padding: 20px;">No versions available</p>';
                 return;
             }
             
@@ -1455,7 +1529,7 @@
                 <div class="version-item" id="${versionId}">
                     <div class="version-item-header">
                         <strong>Version ${escapeHtml(version.version)}</strong>
-                        ${index === 0 ? '<span style="background: #667eea; color: white; padding: 4px 8px; border-radius: 4px; font-size: 0.8em;">Latest</span>' : ''}
+                        ${index === 0 ? '<span style="background: var(--accent); color: white; padding: 4px 8px; border-radius: 4px; font-size: 0.8em;">Latest</span>' : ''}
                     </div>
                     <div class="version-item-details">
                         <div><strong>Date:</strong> ${version.date ? new Date(version.date).toLocaleString() : 'N/A'}</div>
@@ -1466,7 +1540,7 @@
                         <div class="form-group" style="margin-top: 10px;">
                             <label style="font-size: 0.9em;">Download URL:</label>
                             <input type="url" class="version-download" data-version="${escapeHtml(version.version)}" value="${escapeHtml(version.downloadURL || '')}" placeholder="https://example.com/app.ipa" style="margin-top: 5px;">
-                            <small style="display: block; margin-top: 5px; color: #666; font-size: 0.85em;">Edit the URL above and click "Update Version" to change it</small>
+                            <small style="display: block; margin-top: 5px; color: var(--label-secondary); font-size: 0.85em;">Edit the URL above and click "Update Version" to change it</small>
                         </div>
                         <div class="form-group" style="margin-top: 10px;">
                             <label style="font-size: 0.9em;">Or Upload New IPA File (optional):</label>
