@@ -1963,6 +1963,310 @@ def _extract_ipa_icon(ipa_path):
         return None
 
 
+# ---------------------------------------------------------------------------
+# Auto-import (Plan 048): an app-managed job store + in-process scheduler
+# that runs the same release-ingest engine as /api/import-release above, on
+# a schedule, without a host crontab or .env manifest.
+# ---------------------------------------------------------------------------
+
+_AUTO_IMPORT_WRITE_LOCK = threading.Lock()
+_auto_import_run_lock = threading.Lock()
+_auto_import_wake_event = threading.Event()
+
+_AUTO_IMPORT_DEFAULT = {"enabled": False, "intervalHours": 6, "lastRunAt": None, "jobs": []}
+
+
+def _auto_import_path():
+    return os.path.join(DATA_DIR, "auto-import.json")
+
+
+def load_auto_import():
+    """Load the auto-import job store. Never raises -- a missing or corrupt
+    file returns the safe default so GET /api/auto-import can never 500."""
+    path = _auto_import_path()
+    try:
+        with open(path, 'r') as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            return copy.deepcopy(_AUTO_IMPORT_DEFAULT)
+        data = copy.deepcopy(_AUTO_IMPORT_DEFAULT)
+        data.update(raw)
+        if not isinstance(data.get('jobs'), list):
+            data['jobs'] = []
+        return data
+    except FileNotFoundError:
+        return copy.deepcopy(_AUTO_IMPORT_DEFAULT)
+    except Exception as e:
+        logging.error(f"Error loading auto-import store: {str(e)}")
+        return copy.deepcopy(_AUTO_IMPORT_DEFAULT)
+
+
+def save_auto_import(data):
+    """Atomically write the auto-import job store: temp file + os.replace,
+    mirroring SourceManager.save_source's write pattern."""
+    with _AUTO_IMPORT_WRITE_LOCK:
+        tmp_path = None
+        try:
+            path = _auto_import_path()
+            directory = os.path.dirname(path) or "."
+            os.makedirs(directory, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".auto-import-", suffix=".json.tmp")
+            with os.fdopen(fd, 'w') as f:
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+            return True
+        except Exception as e:
+            logging.error(f"Error saving auto-import store: {str(e)}")
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            return False
+
+
+def _validate_auto_import_job(raw):
+    """Normalize + validate one job dict from the API. Raises ValueError
+    with a user-facing message on any problem; rules mirror the engine's
+    own manifest validation (see release_source_ingest.parse_manifest_dict)."""
+    if not isinstance(raw, dict):
+        raise ValueError("Job must be an object")
+
+    job_id = (raw.get('id') or '').strip()
+    if not job_id:
+        raise ValueError("id is required")
+
+    provider = (raw.get('provider') or '').strip().lower()
+    if provider not in ('github', 'gitlab'):
+        raise ValueError("provider must be 'github' or 'gitlab'")
+
+    project = _normalize_repo_project(raw.get('project') or '')
+    if not project:
+        raise ValueError("project is required")
+    if provider == 'github' and not release_ingest._GITHUB_PROJECT_RE.match(project):
+        raise ValueError("GitHub repository must be owner/repo, e.g. RyanYuuki/AnymeX")
+
+    bundle_id = (raw.get('bundleIdentifier') or '').strip()
+    if not bundle_id:
+        raise ValueError("bundleIdentifier is required")
+
+    asset_glob = (raw.get('assetGlob') or '*.ipa').strip()
+    if not asset_glob:
+        raise ValueError("assetGlob is required")
+
+    hosts_in = raw.get('allowedDownloadHosts') or []
+    if not isinstance(hosts_in, list):
+        raise ValueError("allowedDownloadHosts must be a list of hostnames")
+    hosts = [h.strip().lower() for h in hosts_in if isinstance(h, str) and h.strip()]
+    if provider == 'gitlab' and not hosts:
+        raise ValueError("GitLab imports require at least one allowed download host")
+
+    create_if_missing = bool(raw.get('createIfMissing'))
+    name = (raw.get('name') or '').strip() or None
+    developer_name = (raw.get('developerName') or '').strip() or None
+    if create_if_missing and not (name and developer_name):
+        raise ValueError("createIfMissing requires a name and developerName")
+
+    return {
+        "id": job_id,
+        "provider": provider,
+        "project": project,
+        "bundleIdentifier": bundle_id,
+        "assetGlob": asset_glob,
+        "includePrereleases": bool(raw.get('includePrereleases')),
+        "createIfMissing": create_if_missing,
+        "name": name,
+        "developerName": developer_name,
+        "allowedDownloadHosts": hosts,
+        "enabled": bool(raw.get('enabled', True)),
+    }
+
+
+def _run_auto_import_job(job, base_url, session_req, tokens):
+    """Run one auto-import job end to end (select -> download -> extract ->
+    publish), reusing the exact release_ingest + source_manager calls the
+    /api/import-release route above uses. Never raises -- always returns a
+    result dict, and persists it onto the stored job's lastRunAt/lastResult."""
+    tmp_path = None
+    result = None
+    try:
+        job_obj = release_ingest.Job(
+            id=job.get('id') or '',
+            provider=job.get('provider') or '',
+            project=job.get('project') or '',
+            bundle_identifier=job.get('bundleIdentifier') or "",
+            asset_glob=job.get('assetGlob') or "*.ipa",
+            include_prereleases=bool(job.get('includePrereleases')),
+            create_if_missing=bool(job.get('createIfMissing')),
+            allowed_download_hosts=frozenset(
+                h.strip().lower() for h in (job.get('allowedDownloadHosts') or []) if h.strip()
+            ),
+            name=job.get('name') or None,
+            developer_name=job.get('developerName') or None,
+        )
+        candidate = release_ingest.select_candidate(job_obj, session_req, tokens, timeout=30)
+        fd, tmp_path = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix=".ipa")
+        os.close(fd)
+        release_ingest.stream_download(
+            session_req, candidate, job_obj, tmp_path, tokens,
+            release_ingest.DEFAULT_TIMEOUT, release_ingest.DEFAULT_MAX_BYTES,
+        )
+        bundle_id, version, detected_name = release_ingest.extract_ipa_metadata(
+            tmp_path, candidate.asset_name, job_obj, candidate)
+
+        existing = source_manager.get_app(bundle_id)
+        already_present = bool(existing) and any(
+            isinstance(v, dict) and v.get('version') == version for v in existing.get('versions', [])
+        )
+        if already_present:
+            result = {"status": "skipped", "version": version}
+        else:
+            ok = False
+            message = ""
+            fs = FileStorage(stream=open(tmp_path, "rb"), filename=f"{secure_filename(version)}.ipa")
+            if existing:
+                ok, message = source_manager.add_version(
+                    bundle_id, {"version": version}, ipa_file=fs, base_url=base_url)
+            elif job_obj.create_if_missing:
+                new_name = job_obj.name or detected_name or bundle_id
+                new_developer = job_obj.developer_name or _repo_owner(job_obj.project) or "Unknown"
+                new_app = {"name": new_name, "bundleIdentifier": bundle_id,
+                           "developerName": new_developer, "version": version}
+                description = _clean_description(getattr(candidate, "release_body", ""))
+                if description:
+                    new_app["localizedDescription"] = description
+                extracted_icon = _extract_ipa_icon(tmp_path)
+                try:
+                    if extracted_icon:
+                        icon_fs = FileStorage(stream=open(extracted_icon, "rb"), filename="icon.png")
+                        ok, message = source_manager.add_app_manual(
+                            new_app, ipa_file=fs, icon_file=icon_fs, base_url=base_url)
+                    else:
+                        # Fallback: GitHub owner avatar, same as import-release.
+                        # GitLab avatars need an extra API call, so GitLab
+                        # auto-imports simply go iconless here.
+                        owner = _repo_owner(job_obj.project) if job_obj.provider == "github" else ""
+                        if owner:
+                            new_app["iconURL"] = f"https://github.com/{owner}.png"
+                            ok, message = source_manager.add_app_manual(
+                                new_app, ipa_file=fs, download_icon_from_url=True, base_url=base_url)
+                        else:
+                            ok, message = source_manager.add_app_manual(new_app, ipa_file=fs, base_url=base_url)
+                finally:
+                    if extracted_icon:
+                        try:
+                            os.remove(extracted_icon)
+                        except OSError:
+                            pass
+            else:
+                message = (f"App {bundle_id} is not in the catalog. Tick 'create if missing' "
+                           "with a name + developer to add it.")
+
+            if ok:
+                notify("add_version",
+                       f"Auto-imported {bundle_id} {version} from {job_obj.provider}:{job_obj.project}\n{base_url}/source.json")
+                result = {"status": "published", "version": version}
+            else:
+                result = {"status": "error", "message": message}
+    except Exception as e:
+        result = {"status": "error", "message": str(e)}
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+    # Persist lastRunAt/lastResult onto the stored job.
+    try:
+        data = load_auto_import()
+        for stored in data.get('jobs', []):
+            if stored.get('id') == job.get('id'):
+                stored['lastRunAt'] = datetime.now(timezone.utc).isoformat()
+                stored['lastResult'] = result
+                break
+        save_auto_import(data)
+    except Exception:
+        logging.exception("Failed to persist auto-import job result for %s", job.get('id'))
+
+    return result
+
+
+def _run_all_enabled_jobs(base_url):
+    """Run every enabled job once, isolated (one job's failure never stops
+    the others), then stamp the top-level lastRunAt."""
+    data = load_auto_import()
+    jobs = [j for j in data.get('jobs', []) if j.get('enabled', True)]
+    session_req = requests.Session()
+    tokens = {"github": os.environ.get("GITHUB_TOKEN"), "gitlab": os.environ.get("GITLAB_TOKEN")}
+    results = {}
+    for job in jobs:
+        try:
+            results[job.get('id')] = _run_auto_import_job(job, base_url, session_req, tokens)
+        except Exception as e:
+            # _run_auto_import_job already catches internally, but guard the
+            # loop itself too so one pathological job can never abort the batch.
+            results[job.get('id')] = {"status": "error", "message": str(e)}
+
+    data = load_auto_import()
+    data['lastRunAt'] = datetime.now(timezone.utc).isoformat()
+    save_auto_import(data)
+    return results
+
+
+def _auto_import_scheduler_loop(stop_event):
+    """Daemon loop: each cycle, run enabled jobs if intervalHours has
+    elapsed since lastRunAt (or lastRunAt is unset), then wait up to a short
+    poll interval so config changes (POST /api/auto-import/config) are
+    picked up promptly -- that route also sets _auto_import_wake_event to
+    wake this loop early. Started ONLY from `__main__` at the bottom of this
+    file -- see _start_auto_import_scheduler."""
+    while not stop_event.is_set():
+        interval_hours = 6
+        try:
+            data = load_auto_import()
+            interval_hours = data.get('intervalHours') or 6
+            if data.get('enabled'):
+                last_run_at = data.get('lastRunAt')
+                should_run = not last_run_at
+                if not should_run:
+                    try:
+                        last_dt = datetime.fromisoformat(last_run_at)
+                        if last_dt.tzinfo is None:
+                            last_dt = last_dt.replace(tzinfo=timezone.utc)
+                        elapsed = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                        should_run = elapsed >= interval_hours * 3600
+                    except ValueError:
+                        should_run = True
+                if should_run:
+                    if _auto_import_run_lock.acquire(blocking=False):
+                        try:
+                            _run_all_enabled_jobs(resolve_base_url())
+                        finally:
+                            _auto_import_run_lock.release()
+        except Exception:
+            logging.exception("auto-import scheduler cycle failed")
+
+        wait_s = min(max(interval_hours, 1) * 3600, 300)
+        _auto_import_wake_event.wait(timeout=wait_s)
+        _auto_import_wake_event.clear()
+
+
+def _start_auto_import_scheduler():
+    """Start the auto-import scheduler daemon thread. Call ONLY from
+    `__main__` -- never at module import time, or the test suite (which
+    imports this module) would spawn a background thread on every test run."""
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_auto_import_scheduler_loop, args=(stop_event,),
+        daemon=True, name="auto-import-scheduler",
+    )
+    thread.start()
+    return thread, stop_event
+
+
 @app.route('/api/import-release', methods=['POST'])
 @requires_auth
 def import_release():
@@ -2113,6 +2417,97 @@ def import_release():
                     pass
 
     return app.response_class(run(), mimetype="application/x-ndjson")
+
+
+@app.route('/api/auto-import', methods=['GET'])
+@requires_auth
+def get_auto_import():
+    return jsonify(load_auto_import())
+
+
+@app.route('/api/auto-import/config', methods=['POST'])
+@requires_auth
+def auto_import_config():
+    payload = request.get_json(silent=True) or {}
+    data = load_auto_import()
+    if 'intervalHours' in payload:
+        try:
+            interval = int(payload['intervalHours'])
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "error": "intervalHours must be an integer"}), 400
+        if interval < 1 or interval > 168:
+            return jsonify({"success": False, "error": "intervalHours must be between 1 and 168"}), 400
+        data['intervalHours'] = interval
+    if 'enabled' in payload:
+        data['enabled'] = bool(payload['enabled'])
+    save_auto_import(data)
+    _auto_import_wake_event.set()
+    return jsonify(data)
+
+
+@app.route('/api/auto-import/job', methods=['POST'])
+@requires_auth
+def auto_import_upsert_job():
+    payload = request.get_json(silent=True) or {}
+    try:
+        job = _validate_auto_import_job(payload)
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+
+    data = load_auto_import()
+    jobs = data.setdefault('jobs', [])
+    existing_idx = next((i for i, j in enumerate(jobs) if j.get('id') == job['id']), None)
+    if existing_idx is not None:
+        job['lastRunAt'] = jobs[existing_idx].get('lastRunAt')
+        job['lastResult'] = jobs[existing_idx].get('lastResult')
+        jobs[existing_idx] = job
+    else:
+        job['lastRunAt'] = None
+        job['lastResult'] = None
+        jobs.append(job)
+    save_auto_import(data)
+    return jsonify({"success": True, "job": job})
+
+
+@app.route('/api/auto-import/job/delete', methods=['POST'])
+@requires_auth
+def auto_import_delete_job():
+    payload = request.get_json(silent=True) or {}
+    job_id = (payload.get('id') or '').strip()
+    data = load_auto_import()
+    jobs = data.get('jobs', [])
+    remaining = [j for j in jobs if j.get('id') != job_id]
+    if len(remaining) == len(jobs):
+        return jsonify({"success": False, "error": "Job not found"}), 404
+    data['jobs'] = remaining
+    save_auto_import(data)
+    return jsonify({"success": True})
+
+
+@app.route('/api/auto-import/run', methods=['POST'])
+@requires_auth
+def auto_import_run():
+    if not _auto_import_run_lock.acquire(blocking=False):
+        return jsonify({"status": "busy"})
+    try:
+        payload = request.get_json(silent=True) or {}
+        job_id = (payload.get('id') or '').strip()
+        base_url = resolve_base_url()
+        tokens = {"github": os.environ.get("GITHUB_TOKEN"), "gitlab": os.environ.get("GITLAB_TOKEN")}
+        if job_id:
+            data = load_auto_import()
+            job = next((j for j in data.get('jobs', []) if j.get('id') == job_id), None)
+            if not job:
+                return jsonify({"success": False, "error": "Job not found"}), 404
+            session_req = requests.Session()
+            result = _run_auto_import_job(job, base_url, session_req, tokens)
+            return jsonify({"status": "done", "results": {job_id: result}})
+        else:
+            results = _run_all_enabled_jobs(base_url)
+            return jsonify({"status": "done", "results": results})
+    finally:
+        _auto_import_run_lock.release()
+
 
 @app.route('/api/update-version', methods=['POST'])
 @requires_auth
@@ -2486,4 +2881,5 @@ def internal_error(error):
 
 if __name__ == '__main__':
     logging.info("Starting AltStore Source Manager...")
+    _start_auto_import_scheduler()
     app.run(host='0.0.0.0', port=PORT, debug=False)
