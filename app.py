@@ -11,9 +11,11 @@ import hashlib
 import hmac
 import threading
 import boto3
+import zipfile
 from functools import wraps
 from botocore.exceptions import ClientError
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 from werkzeug.utils import secure_filename
 from werkzeug.datastructures import FileStorage
 
@@ -1838,6 +1840,160 @@ def update_source():
     except Exception as e:
         logging.error(f"Error updating source: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 400
+
+
+def _scan_catalog_health():
+    """Read-only scan of the live catalog + storage for known problem
+    classes (plan 038): duplicate versions, zero/missing sizes, empty or
+    non-public downloadURLs, missing icons, missing IPAs, and (local
+    backend only) IPA files that exist but aren't actually valid ZIPs --
+    the gzip-HTML corruption class.
+
+    Never mutates anything. Tolerates a malformed catalog shape (missing
+    'apps', a non-dict app/version, a non-string bundleIdentifier) the
+    same way normalize_source() does on the /source.json path, by
+    skipping the offending element instead of raising -- this backs a
+    GET route that must never 500.
+
+    Returns a list of {"bundleIdentifier", "version", "kind", "detail",
+    "severity"} dicts. "version" is None for app-level issues (and for
+    the one Garage limitation note, "bundleIdentifier" is None too).
+    """
+    issues = []
+    source_data = source_manager.load_source()
+    if not isinstance(source_data, dict):
+        return issues
+
+    apps = source_data.get('apps')
+    if not isinstance(apps, list):
+        return issues
+
+    try:
+        this_host = urlparse(resolve_base_url()).netloc.lower()
+    except Exception:
+        this_host = None
+
+    public_host = None
+    if PUBLIC_BASE_URL:
+        try:
+            public_host = urlparse(PUBLIC_BASE_URL).netloc.lower()
+        except Exception:
+            public_host = None
+
+    is_local_backend = STORAGE_BACKEND != "garage"
+
+    def add(bundle_id, version, kind, detail, severity):
+        issues.append({
+            "bundleIdentifier": bundle_id,
+            "version": version,
+            "kind": kind,
+            "detail": detail,
+            "severity": severity,
+        })
+
+    for app_entry in apps:
+        if not isinstance(app_entry, dict):
+            continue
+        bundle_id = app_entry.get('bundleIdentifier')
+        if not (isinstance(bundle_id, str) and bundle_id):
+            continue
+
+        # missing-icon: empty iconURL, or (best-effort, only when the URL
+        # points at this host's /icons/ path) the hosted icon is absent.
+        icon_url = app_entry.get('iconURL')
+        if not (isinstance(icon_url, str) and icon_url.strip()):
+            add(bundle_id, None, "missing-icon", "iconURL is empty", "warning")
+        else:
+            try:
+                parsed_icon = urlparse(icon_url)
+                if this_host and parsed_icon.netloc.lower() == this_host and parsed_icon.path.startswith('/icons/'):
+                    filename = parsed_icon.path.rsplit('/', 1)[-1]
+                    if filename.startswith('icon.') and len(filename) > len('icon.'):
+                        icon_ext = filename[len('icon.'):]
+                        if not icon_storage.exists(bundle_id, icon_ext):
+                            add(bundle_id, None, "missing-icon",
+                                f"hosted icon not found for {icon_url}", "warning")
+            except Exception:
+                pass
+
+        versions = app_entry.get('versions')
+        if not isinstance(versions, list):
+            continue
+
+        seen_versions = set()
+        for version_entry in versions:
+            if not isinstance(version_entry, dict):
+                continue
+            raw_version = version_entry.get('version')
+            version_label = raw_version if isinstance(raw_version, str) and raw_version else None
+
+            # duplicate-version
+            if version_label is not None:
+                if version_label in seen_versions:
+                    add(bundle_id, version_label, "duplicate-version",
+                        f"version '{version_label}' appears more than once", "error")
+                else:
+                    seen_versions.add(version_label)
+
+            # zero-size: missing, 0, or not an int (bool excluded explicitly --
+            # it is technically an int subtype but never a legitimate size).
+            size = version_entry.get('size')
+            if isinstance(size, bool) or not isinstance(size, int) or size == 0:
+                add(bundle_id, version_label, "zero-size", f"size is {size!r}", "error")
+
+            # empty-or-nonpublic-downloadURL + missing-ipa
+            download_url = version_entry.get('downloadURL')
+            if not (isinstance(download_url, str) and download_url.strip()):
+                add(bundle_id, version_label, "empty-or-nonpublic-downloadURL",
+                    "downloadURL is empty", "error")
+            else:
+                try:
+                    parsed = urlparse(download_url)
+                    if public_host and parsed.netloc.lower() != public_host:
+                        add(bundle_id, version_label, "empty-or-nonpublic-downloadURL",
+                            f"downloadURL host '{parsed.netloc}' does not match "
+                            f"PUBLIC_BASE_URL host '{public_host}'", "info")
+                    if (this_host and version_label and parsed.netloc.lower() == this_host
+                            and parsed.path.startswith('/ipas/')
+                            and not ipa_storage.exists(bundle_id, version_label)):
+                        add(bundle_id, version_label, "missing-ipa",
+                            f"hosted IPA not found for {download_url}", "error")
+                except Exception:
+                    pass
+
+            # not-a-zip (local backend only -- checking a Garage object's
+            # content would mean downloading it, which this scan never does)
+            if is_local_backend and version_label:
+                try:
+                    path = source_manager.get_ipa_path(bundle_id, version_label)
+                    if os.path.exists(path) and not zipfile.is_zipfile(path):
+                        add(bundle_id, version_label, "not-a-zip",
+                            f"local IPA is not a valid ZIP: {path}", "error")
+                except Exception:
+                    pass
+
+    if not is_local_backend:
+        add(None, None, "not-a-zip",
+            "Content validation (ZIP-file check) is unavailable for the Garage "
+            "backend -- only object existence is verified.", "info")
+
+    return issues
+
+
+@app.route('/api/health')
+@requires_auth
+def catalog_health():
+    """Read-only diagnostics: scan the live catalog + storage for known
+    problem classes and report them. Never mutates anything, never 500s
+    (plan 038) -- a scan failure degrades to an empty report rather than
+    a broken response, since this exists to surface problems, not add one.
+    """
+    try:
+        return jsonify({"issues": _scan_catalog_health()})
+    except Exception as e:
+        logging.error(f"Health scan error: {str(e)}")
+        return jsonify({"issues": [], "error": "scan failed"}), 200
+
 
 @app.errorhandler(404)
 def not_found(error):

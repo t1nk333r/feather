@@ -1751,3 +1751,113 @@ def test_add_app_icon_download_from_url_sets_hosted_icon_url(authed_client, gzip
 
     app_entry = json.loads(authed_client.get("/api/app/com.example.fetched").data)
     assert "/icons/com.example.fetched/" in app_entry["iconURL"]
+
+
+# ---------------------------------------------------------------------------
+# Plan 038: GET /api/health -- read-only catalog health scan
+# ---------------------------------------------------------------------------
+
+
+def test_health_flags_duplicate_versions(authed_client):
+    """Two versions sharing the same version string must surface as a
+    duplicate-version issue for that bundle+version."""
+    app_module = authed_client.app_module
+    source = seed_source()
+    source["apps"][0]["versions"] = [
+        {
+            "version": "1.0",
+            "date": "2026-01-01T00:00:00Z",
+            "downloadURL": "http://example.test/ipas/com.example.app/1.0-a.ipa",
+            "minOSVersion": "14.0",
+            "size": 111,
+        },
+        {
+            "version": "1.0",
+            "date": "2026-01-02T00:00:00Z",
+            "downloadURL": "http://example.test/ipas/com.example.app/1.0-b.ipa",
+            "minOSVersion": "14.0",
+            "size": 222,
+        },
+    ]
+    data_dir = app_module.DATA_DIR
+    with open(os.path.join(data_dir, "source.json"), "w") as f:
+        f.write(json.dumps(source))
+
+    resp = authed_client.get("/api/health")
+    assert resp.status_code == 200
+    issues = json.loads(resp.data)["issues"]
+    dup = [i for i in issues if i["kind"] == "duplicate-version"
+           and i["bundleIdentifier"] == "com.example.app" and i["version"] == "1.0"]
+    assert len(dup) == 1
+
+
+def test_health_flags_zero_size(authed_client):
+    """A version with size: 0 must surface as a zero-size issue."""
+    app_module = authed_client.app_module
+    source = seed_source()
+    source["apps"][0]["versions"] = [
+        {
+            "version": "1.0",
+            "date": "2026-01-01T00:00:00Z",
+            "downloadURL": "http://example.test/ipas/com.example.app/1.0.ipa",
+            "minOSVersion": "14.0",
+            "size": 0,
+        },
+    ]
+    data_dir = app_module.DATA_DIR
+    with open(os.path.join(data_dir, "source.json"), "w") as f:
+        f.write(json.dumps(source))
+
+    resp = authed_client.get("/api/health")
+    assert resp.status_code == 200
+    issues = json.loads(resp.data)["issues"]
+    zero = [i for i in issues if i["kind"] == "zero-size"
+            and i["bundleIdentifier"] == "com.example.app" and i["version"] == "1.0"]
+    assert len(zero) == 1
+
+
+def test_health_flags_empty_icon(authed_client):
+    """An app with iconURL: '' must surface as a missing-icon issue."""
+    app_module = authed_client.app_module
+    source = seed_source()
+    source["apps"][0]["iconURL"] = ""
+    data_dir = app_module.DATA_DIR
+    with open(os.path.join(data_dir, "source.json"), "w") as f:
+        f.write(json.dumps(source))
+
+    resp = authed_client.get("/api/health")
+    assert resp.status_code == 200
+    issues = json.loads(resp.data)["issues"]
+    missing_icon = [i for i in issues if i["kind"] == "missing-icon"
+                    and i["bundleIdentifier"] == "com.example.app"]
+    assert len(missing_icon) == 1
+
+
+def test_health_requires_auth(client):
+    """Unauthenticated GET /api/health must 401 -- the report leaks
+    internal filesystem paths."""
+    resp = client.get("/api/health")
+    assert resp.status_code == 401
+
+
+def test_health_never_500s_on_malformed_catalog(authed_client):
+    """A catalog with a non-dict app and an app missing 'versions' entirely
+    must not raise -- /api/health must always return 200 with an issues
+    list, the same tolerance /source.json has for a malformed catalog."""
+    app_module = authed_client.app_module
+    malformed = {
+        "name": "x",
+        "apps": [
+            "not-a-dict",
+            {"bundleIdentifier": "c.d"},
+        ],
+        "news": [],
+    }
+    data_dir = app_module.DATA_DIR
+    with open(os.path.join(data_dir, "source.json"), "w") as f:
+        f.write(json.dumps(malformed))
+
+    resp = authed_client.get("/api/health")
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert isinstance(body["issues"], list)
