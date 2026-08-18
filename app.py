@@ -1136,11 +1136,26 @@ class SourceManager:
         
             # Update app fields
             app = source_data['apps'][app_index]
-            updatable_fields = ['name', 'developerName', 'localizedDescription']
+            updatable_fields = ['name', 'developerName', 'localizedDescription', 'subtitle', 'tintColor']
             for field in updatable_fields:
                 if field in data and data[field] is not None:
                     app[field] = data[field]
-        
+
+            # Handle screenshotURLs separately: accept a JSON list or a
+            # newline/comma-separated string; only overwrite when the key was
+            # explicitly provided (mirrors the "only when present" convention
+            # used for the scalar fields above).
+            if 'screenshotURLs' in data and data['screenshotURLs'] is not None:
+                raw_screenshots = data['screenshotURLs']
+                if isinstance(raw_screenshots, list):
+                    screenshot_items = raw_screenshots
+                else:
+                    normalized = raw_screenshots.replace(',', '\n')
+                    screenshot_items = normalized.split('\n')
+                app['screenshotURLs'] = [
+                    item.strip() for item in screenshot_items if item and item.strip()
+                ]
+
             # Handle icon file - upload, download, or use URL
             # Only update icon if a new one is provided
             icon_url = data.get('iconURL', '')
@@ -1598,7 +1613,10 @@ def update_app():
                 'name': request.form.get('name'),
                 'developerName': request.form.get('developerName'),
                 'localizedDescription': request.form.get('localizedDescription', ''),
-                'iconURL': request.form.get('iconURL', '')
+                'iconURL': request.form.get('iconURL', ''),
+                'subtitle': request.form.get('subtitle'),
+                'tintColor': request.form.get('tintColor'),
+                'screenshotURLs': request.form.get('screenshotURLs')
             }
             bundle_id = data.get('bundleIdentifier')
         else:
