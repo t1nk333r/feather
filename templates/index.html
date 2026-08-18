@@ -513,6 +513,7 @@
             <button class="tab" onclick="switchTab('qr-code', this)">QR Code</button>
             <button class="tab" onclick="switchTab('source-info', this)">Source Info</button>
             <button class="tab" onclick="switchTab('import-repo', this)">Import from Repo</button>
+            <button class="tab" onclick="switchTab('health', this)">Health</button>
             <button class="tab" onclick="logout()" style="margin-left: auto;">Sign out</button>
         </div>
 
@@ -795,6 +796,16 @@
                     <span id="importStatus"></span>
                 </div>
             </form>
+        </div>
+
+        <div id="health" class="tab-content">
+            <h2 style="margin-bottom: 20px;">Catalog Health</h2>
+            <p style="color: #666; margin-bottom: 20px;">
+                Read-only diagnostics: scans the live catalog and storage for known
+                problem classes. Nothing here is repaired automatically.
+            </p>
+            <button type="button" class="btn" id="healthScanBtn" onclick="runHealthScan()">Scan</button>
+            <div id="healthResults" style="margin-top: 20px;"></div>
         </div>
     </div>
 
@@ -1098,6 +1109,54 @@
                 setButtonLoading(submitBtn, false);
             }
         });
+
+        async function runHealthScan() {
+            const btn = document.getElementById('healthScanBtn');
+            const results = document.getElementById('healthResults');
+            setButtonLoading(btn, true);
+            results.innerHTML = '<p style="color: #666;">Scanning...</p>';
+            try {
+                const response = await fetch('/api/health');
+                const data = await response.json();
+                const issues = data.issues || [];
+
+                if (data.error) {
+                    results.innerHTML = `<p style="color: #f5576c;">Scan failed: ${escapeHtml(data.error)}</p>`;
+                    return;
+                }
+
+                if (issues.length === 0) {
+                    results.innerHTML = '<p style="color: #666;">No problems found.</p>';
+                    return;
+                }
+
+                const grouped = {};
+                issues.forEach(issue => {
+                    const kind = issue.kind || 'unknown';
+                    if (!grouped[kind]) grouped[kind] = [];
+                    grouped[kind].push(issue);
+                });
+
+                let html = '';
+                Object.keys(grouped).sort().forEach(kind => {
+                    html += `<h3 style="margin-top: 20px;">${escapeHtml(kind)} (${grouped[kind].length})</h3>`;
+                    html += '<ul style="margin-top: 8px;">';
+                    grouped[kind].forEach(issue => {
+                        const bundle = issue.bundleIdentifier ? escapeHtml(issue.bundleIdentifier) : '(source-level)';
+                        const version = issue.version ? ` v${escapeHtml(issue.version)}` : '';
+                        const detail = escapeHtml(issue.detail || '');
+                        html += `<li style="margin-bottom: 6px;"><strong>${bundle}${version}</strong> - ${detail}</li>`;
+                    });
+                    html += '</ul>';
+                });
+                results.innerHTML = html;
+            } catch (error) {
+                console.error('Error running health scan:', error);
+                results.innerHTML = '<p style="color: #f5576c;">Scan failed. Please try again.</p>';
+            } finally {
+                setButtonLoading(btn, false);
+            }
+        }
 
         async function loadApps() {
             try {
