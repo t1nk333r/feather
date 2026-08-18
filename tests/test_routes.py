@@ -726,6 +726,85 @@ def test_update_app_persists_name(authed_client):
     assert body["name"] == "Renamed App"
 
 
+def test_update_app_sets_subtitle_and_tint(authed_client):
+    resp = authed_client.post(
+        "/api/update-app",
+        json={
+            "bundleIdentifier": "com.example.app",
+            "subtitle": "A great little app",
+            "tintColor": "#ff00ff",
+        },
+    )
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["success"] is True
+
+    resp = authed_client.get("/api/app/com.example.app")
+    body = json.loads(resp.data)
+    assert body["subtitle"] == "A great little app"
+    assert body["tintColor"] == "#ff00ff"
+
+
+def test_update_app_sets_screenshot_urls_from_lines(authed_client):
+    url1 = "http://example.test/screenshots/com.example.app/1.png"
+    url2 = "http://example.test/screenshots/com.example.app/2.png"
+    resp = authed_client.post(
+        "/api/update-app",
+        json={
+            "bundleIdentifier": "com.example.app",
+            "screenshotURLs": f"{url1}\n{url2}",
+        },
+    )
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["success"] is True
+
+    resp = authed_client.get("/api/app/com.example.app")
+    body = json.loads(resp.data)
+    assert body["screenshotURLs"] == [url1, url2]
+
+
+def test_update_app_absent_metadata_fields_preserved(authed_client):
+    url1 = "http://example.test/screenshots/com.example.app/1.png"
+    resp = authed_client.post(
+        "/api/update-app",
+        json={
+            "bundleIdentifier": "com.example.app",
+            "subtitle": "Original subtitle",
+            "screenshotURLs": url1,
+        },
+    )
+    assert resp.status_code == 200
+
+    # Update only "name", without the new metadata keys -- they must not be
+    # wiped, matching the "only overwrite when present" convention already
+    # used for the scalar fields.
+    resp = authed_client.post(
+        "/api/update-app",
+        json={"bundleIdentifier": "com.example.app", "name": "Renamed Again"},
+    )
+    assert resp.status_code == 200
+
+    resp = authed_client.get("/api/app/com.example.app")
+    body = json.loads(resp.data)
+    assert body["name"] == "Renamed Again"
+    assert body["subtitle"] == "Original subtitle"
+    assert body["screenshotURLs"] == [url1]
+
+
+def test_update_app_metadata_requires_auth(client):
+    resp = client.post(
+        "/api/update-app",
+        json={
+            "bundleIdentifier": "com.example.app",
+            "subtitle": "Should not be set",
+            "tintColor": "#000000",
+            "screenshotURLs": "http://example.test/screenshots/com.example.app/1.png",
+        },
+    )
+    assert resp.status_code == 401
+
+
 def test_update_source_persists_name(authed_client):
     resp = authed_client.post("/api/update-source", json={"name": "Renamed Source"})
     assert resp.status_code == 200

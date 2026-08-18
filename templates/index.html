@@ -617,8 +617,20 @@
                         <input type="text" id="editDeveloperName" name="developerName" required>
                     </div>
                     <div class="form-group">
+                        <label>Subtitle:</label>
+                        <input type="text" id="editSubtitle" name="subtitle">
+                    </div>
+                    <div class="form-group">
                         <label>Description:</label>
                         <textarea id="editDescription" name="localizedDescription" rows="4"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>Screenshot URLs (one per line):</label>
+                        <textarea id="editScreenshotURLs" name="screenshotURLs" rows="4" placeholder="https://example.com/screenshot1.png"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>Tint Color:</label>
+                        <input type="text" id="editTintColor" name="tintColor" placeholder="#667eea">
                     </div>
                     <div class="form-group">
                         <label>Icon:</label>
@@ -1383,8 +1395,11 @@
                 document.getElementById('editBundleIdentifier').value = app.bundleIdentifier;
                 document.getElementById('editName').value = app.name || '';
                 document.getElementById('editDeveloperName').value = app.developerName || '';
+                document.getElementById('editSubtitle').value = app.subtitle || '';
                 document.getElementById('editDescription').value = app.localizedDescription || '';
-                
+                document.getElementById('editScreenshotURLs').value = (app.screenshotURLs || []).join('\n');
+                document.getElementById('editTintColor').value = app.tintColor || '';
+
                 // Handle icon - check if icon is self-hosted
                 const iconURL = app.iconURL || '';
                 const isSelfHosted = iconURL && iconURL.includes('/icons/');
@@ -1732,7 +1747,10 @@
                 formData.append('bundleIdentifier', document.getElementById('editBundleId').value);
                 formData.append('name', document.getElementById('editName').value);
                 formData.append('developerName', document.getElementById('editDeveloperName').value);
+                formData.append('subtitle', document.getElementById('editSubtitle').value);
                 formData.append('localizedDescription', document.getElementById('editDescription').value);
+                formData.append('screenshotURLs', document.getElementById('editScreenshotURLs').value);
+                formData.append('tintColor', document.getElementById('editTintColor').value);
                 formData.append('iconFile', iconFile);
                 
                 response = await fetch('/api/update-app', {
@@ -1746,7 +1764,10 @@
                     bundleIdentifier: document.getElementById('editBundleId').value,
                     name: document.getElementById('editName').value,
                     developerName: document.getElementById('editDeveloperName').value,
+                    subtitle: document.getElementById('editSubtitle').value,
                     localizedDescription: document.getElementById('editDescription').value,
+                    screenshotURLs: document.getElementById('editScreenshotURLs').value,
+                    tintColor: document.getElementById('editTintColor').value,
                     iconURL: iconURL
                 };
                 
@@ -1763,7 +1784,10 @@
                     bundleIdentifier: bundleId,
                     name: document.getElementById('editName').value,
                     developerName: document.getElementById('editDeveloperName').value,
-                    localizedDescription: document.getElementById('editDescription').value
+                    subtitle: document.getElementById('editSubtitle').value,
+                    localizedDescription: document.getElementById('editDescription').value,
+                    screenshotURLs: document.getElementById('editScreenshotURLs').value,
+                    tintColor: document.getElementById('editTintColor').value
                 };
                 
                 // Only include iconURL if user provided a new one (and wants to use URL without downloading)
