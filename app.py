@@ -2116,14 +2116,35 @@ def _reconcile_icons(apply=False):
     items = []
 
     if os.path.isdir(ICON_FOLDER):
-        for bundle in sorted(os.listdir(ICON_FOLDER)):
+        try:
+            bundles = sorted(os.listdir(ICON_FOLDER))
+        except OSError as e:
+            logging.error(f"Could not read icon folder for reconcile: {e}")
+            return {
+                "backend": "garage",
+                "checked": 0,
+                "would_upload": 0,
+                "uploaded": 0,
+                "skipped_existing": 0,
+                "failed": 0,
+                "items": [],
+                "note": "Could not read the local icon folder; nothing was reconciled.",
+            }
+        for bundle in bundles:
             safe_bundle = secure_filename(bundle)
             if not safe_bundle or safe_bundle != bundle:
                 continue
             bundle_dir = os.path.join(ICON_FOLDER, bundle)
             if not os.path.isdir(bundle_dir):
                 continue
-            for filename in sorted(os.listdir(bundle_dir)):
+            try:
+                filenames = sorted(os.listdir(bundle_dir))
+            except OSError as e:
+                logging.error(f"Could not read icon dir for {bundle}: {e}")
+                failed += 1
+                items.append({"bundleIdentifier": bundle, "ext": None, "status": "scan_failed"})
+                continue
+            for filename in filenames:
                 path = os.path.join(bundle_dir, filename)
                 if not os.path.isfile(path) or not filename.startswith("icon."):
                     continue
@@ -2163,7 +2184,7 @@ def _reconcile_icons(apply=False):
                     failed += 1
                     items.append({"bundleIdentifier": bundle, "ext": ext, "status": "failed"})
 
-    return {
+    result = {
         "backend": "garage",
         "checked": checked,
         "would_upload": would_upload,
@@ -2172,6 +2193,10 @@ def _reconcile_icons(apply=False):
         "failed": failed,
         "items": items,
     }
+    if checked == 0 and "note" not in result:
+        result["note"] = ("No local icon files found to reconcile. Icons missing from "
+                          "Garage that have no local copy must be re-uploaded via Edit App.")
+    return result
 
 
 @app.route('/api/reconcile-icons', methods=['POST'])

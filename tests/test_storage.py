@@ -15,7 +15,9 @@ import importlib
 import io
 import json
 import os
+import os as _os
 import threading
+from unittest import mock
 
 import pytest
 from botocore.exceptions import ClientError
@@ -602,3 +604,60 @@ def test_reconcile_local_backend_is_noop(client):
 def test_reconcile_requires_auth(garage_client):
     resp = garage_client.post("/api/reconcile-icons", json={"apply": False})
     assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Plan 045: a filesystem error in the icon walk must not 500.
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_icon_folder_unreadable_does_not_500(garage_client):
+    app_module = garage_client.app_module
+    real_listdir = _os.listdir
+
+    def fake_listdir(p):
+        if str(p) == app_module.ICON_FOLDER:
+            raise OSError("simulated unreadable icon folder")
+        return real_listdir(p)
+
+    assert garage_client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+    with mock.patch.object(app_module.os, "listdir", side_effect=fake_listdir):
+        resp = garage_client.post("/api/reconcile-icons", json={"apply": False})
+    assert resp.status_code == 200          # <-- the bug: was 500
+    body = json.loads(resp.data)
+    assert body["backend"] == "garage"
+    assert body["checked"] == 0
+    assert "note" in body
+
+
+def test_reconcile_one_unreadable_bundle_is_isolated(garage_client):
+    app_module = garage_client.app_module
+    _write_local_icon(app_module, "com.good.app", "png")
+    _write_local_icon(app_module, "com.bad.app", "png")
+    bad_dir = os.path.join(app_module.ICON_FOLDER, "com.bad.app")
+    real_listdir = _os.listdir
+
+    def fake_listdir(p):
+        if str(p) == bad_dir:
+            raise OSError("simulated")
+        return real_listdir(p)
+
+    assert garage_client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+    with mock.patch.object(app_module.os, "listdir", side_effect=fake_listdir):
+        resp = garage_client.post("/api/reconcile-icons", json={"apply": False})
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    # the good bundle is still processed; the bad one is reported, not fatal
+    assert body["would_upload"] >= 1
+    assert any(i.get("status") == "scan_failed" and i["bundleIdentifier"] == "com.bad.app"
+               for i in body["items"])
+
+
+def test_reconcile_empty_folder_returns_note(garage_client):
+    # garage backend, no local icons written at all
+    assert garage_client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+    resp = garage_client.post("/api/reconcile-icons", json={"apply": False})
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["checked"] == 0
+    assert "note" in body
