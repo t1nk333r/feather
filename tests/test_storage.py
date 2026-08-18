@@ -525,3 +525,80 @@ def test_update_version_preserves_original_on_failed_upload(garage_client, plain
     ipa_dir = os.path.join(app_module.IPA_FOLDER, "com.example.app")
     leftover = [f for f in os.listdir(ipa_dir) if f != "1.0.0.ipa"] if os.path.isdir(ipa_dir) else []
     assert leftover == []
+
+
+# ---------------------------------------------------------------------------
+# POST /api/reconcile-icons (Plan 040): upload on-disk icons missing from
+# the active backend. Dry-run by default; never touches local icon files.
+# ---------------------------------------------------------------------------
+
+
+def _write_local_icon(app_module, bundle_id, ext, contents=b"icon bytes"):
+    bundle_dir = os.path.join(app_module.ICON_FOLDER, bundle_id)
+    os.makedirs(bundle_dir, exist_ok=True)
+    path = os.path.join(bundle_dir, f"icon.{ext}")
+    with open(path, "wb") as f:
+        f.write(contents)
+    return path
+
+
+def test_reconcile_dry_run_reports_missing_without_uploading(garage_client):
+    app_module = garage_client.app_module
+    _write_local_icon(app_module, "com.example.app", "png")
+
+    assert garage_client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+    resp = garage_client.post("/api/reconcile-icons", json={"apply": False})
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["backend"] == "garage"
+    assert body["would_upload"] >= 1
+    assert body["uploaded"] == 0
+    assert ("test-bucket", "icons/com.example.app/icon.png") not in garage_client.fake_client.objects
+
+
+def test_reconcile_apply_uploads_missing_icons(garage_client):
+    app_module = garage_client.app_module
+    _write_local_icon(app_module, "com.example.app", "png")
+
+    assert garage_client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+    resp = garage_client.post("/api/reconcile-icons", json={"apply": True})
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["backend"] == "garage"
+    assert body["uploaded"] >= 1
+    assert ("test-bucket", "icons/com.example.app/icon.png") in garage_client.fake_client.objects
+
+
+def test_reconcile_skips_already_present(garage_client):
+    app_module = garage_client.app_module
+    _write_local_icon(app_module, "com.example.app", "png")
+    garage_client.fake_client.objects[("test-bucket", "icons/com.example.app/icon.png")] = 10
+
+    assert garage_client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+    resp = garage_client.post("/api/reconcile-icons", json={"apply": True})
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["skipped_existing"] >= 1
+    assert body["uploaded"] == 0
+    upload_calls = [call for call in garage_client.fake_client.calls if call[0] in ("upload_file", "upload_fileobj")]
+    assert upload_calls == []
+
+
+def test_reconcile_local_backend_is_noop(client):
+    app_module = client.app_module
+    _write_local_icon(app_module, "com.example.app", "png")
+
+    assert client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+    resp = client.post("/api/reconcile-icons", json={"apply": True})
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+    assert body["backend"] == "local"
+    assert body["uploaded"] == 0
+    # Local icon file must remain untouched.
+    icon_path = os.path.join(app_module.ICON_FOLDER, "com.example.app", "icon.png")
+    assert os.path.exists(icon_path)
+
+
+def test_reconcile_requires_auth(garage_client):
+    resp = garage_client.post("/api/reconcile-icons", json={"apply": False})
+    assert resp.status_code == 401

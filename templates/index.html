@@ -806,6 +806,16 @@
             </p>
             <button type="button" class="btn" id="healthScanBtn" onclick="runHealthScan()">Scan</button>
             <div id="healthResults" style="margin-top: 20px;"></div>
+
+            <h2 style="margin-top: 40px; margin-bottom: 20px;">Reconcile Icons</h2>
+            <p style="color: #666; margin-bottom: 20px;">
+                Uploads on-disk app icons that are missing from the active storage
+                backend. Dry-run first to preview, then Apply to upload. Local icon
+                files are never deleted or modified.
+            </p>
+            <button type="button" class="btn" id="reconcileIconsBtn" onclick="runReconcileIcons(false)">Reconcile Icons (Dry Run)</button>
+            <button type="button" class="btn" id="reconcileIconsApplyBtn" onclick="runReconcileIcons(true)" style="display: none;">Apply</button>
+            <div id="reconcileIconsResults" style="margin-top: 20px;"></div>
         </div>
     </div>
 
@@ -1153,6 +1163,74 @@
             } catch (error) {
                 console.error('Error running health scan:', error);
                 results.innerHTML = '<p style="color: #f5576c;">Scan failed. Please try again.</p>';
+            } finally {
+                setButtonLoading(btn, false);
+            }
+        }
+
+        function renderReconcileSummary(data) {
+            const results = document.getElementById('reconcileIconsResults');
+            if (data.error) {
+                results.innerHTML = `<p style="color: #f5576c;">Reconcile failed: ${escapeHtml(data.error)}</p>`;
+                return;
+            }
+            if (data.backend === 'local') {
+                results.innerHTML = `<p style="color: #666;">${escapeHtml(data.note || 'Local backend: nothing to reconcile.')}</p>`;
+                return;
+            }
+
+            let html = `<p>Backend: <strong>${escapeHtml(data.backend)}</strong> - checked: ${data.checked}, ` +
+                `would upload: ${data.would_upload || 0}, uploaded: ${data.uploaded || 0}, ` +
+                `skipped (already present): ${data.skipped_existing || 0}, failed: ${data.failed || 0}</p>`;
+
+            if (Array.isArray(data.items) && data.items.length > 0) {
+                html += '<ul style="margin-top: 8px;">';
+                data.items.forEach(item => {
+                    const bundle = escapeHtml(item.bundleIdentifier || '');
+                    const ext = escapeHtml(item.ext || '');
+                    const status = escapeHtml(item.status || '');
+                    html += `<li style="margin-bottom: 6px;"><strong>${bundle}</strong>.${ext} - ${status}</li>`;
+                });
+                html += '</ul>';
+            }
+            results.innerHTML = html;
+        }
+
+        async function runReconcileIcons(apply) {
+            const dryRunBtn = document.getElementById('reconcileIconsBtn');
+            const applyBtn = document.getElementById('reconcileIconsApplyBtn');
+            const results = document.getElementById('reconcileIconsResults');
+            const btn = apply ? applyBtn : dryRunBtn;
+            setButtonLoading(btn, true);
+            results.innerHTML = apply ? '<p style="color: #666;">Applying...</p>' : '<p style="color: #666;">Scanning...</p>';
+            try {
+                const response = await fetch('/api/reconcile-icons', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ apply: apply })
+                });
+                const data = await response.json();
+
+                if (data.error) {
+                    results.innerHTML = `<p style="color: #f5576c;">Reconcile failed: ${escapeHtml(data.error)}</p>`;
+                    showToast(data.error, 'error');
+                    return;
+                }
+
+                renderReconcileSummary(data);
+
+                if (apply) {
+                    applyBtn.style.display = 'none';
+                    showToast(`Reconcile complete: uploaded ${data.uploaded || 0}, failed ${data.failed || 0}`, (data.failed ? 'warning' : 'success'));
+                } else if (data.backend === 'garage' && (data.would_upload || 0) > 0) {
+                    applyBtn.style.display = 'inline-block';
+                } else {
+                    applyBtn.style.display = 'none';
+                }
+            } catch (error) {
+                console.error('Error reconciling icons:', error);
+                results.innerHTML = '<p style="color: #f5576c;">Reconcile failed. Please try again.</p>';
+                showToast('Error reconciling icons: ' + error.message, 'error');
             } finally {
                 setButtonLoading(btn, false);
             }
