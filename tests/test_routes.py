@@ -605,6 +605,15 @@ def test_index_offers_both_favicon_themes(client):
     assert b"prefers-color-scheme: dark" in resp.data
 
 
+def test_index_contains_auto_import_tab(client):
+    """Plan 049: the Auto-Import admin tab (nav button + panel) renders."""
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.data.decode("utf-8")
+    assert "switchTab('auto-import', this)" in body
+    assert 'id="auto-import"' in body
+
+
 def test_index_contains_no_emoji(client):
     """Regression guard (Plan 025): the admin UI's 21 emoji were removed
     deliberately. Without this test, the next person adding a button puts
