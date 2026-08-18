@@ -1709,6 +1709,17 @@ def _normalize_repo_project(raw):
         p = p[:-4]
     return p.strip("/")
 
+def _repo_owner(project):
+    """First path segment of an owner/repo (or group/project) string."""
+    return (project or "").strip("/").split("/")[0].strip()
+
+def _clean_description(text, limit=800):
+    """Trim release notes to a catalog-friendly description."""
+    text = (text or "").strip()
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "…"
+    return text
+
 @app.route('/api/import-release', methods=['POST'])
 @requires_auth
 def import_release():
@@ -1804,9 +1815,12 @@ def import_release():
                 ok, message = source_manager.add_version(bundle_id, {"version": version}, ipa_file=fs, base_url=base_url)
             elif create_if_missing:
                 new_name = name_in or detected_name or bundle_id
-                new_developer = developer_in or "Unknown"
+                new_developer = developer_in or _repo_owner(project) or "Unknown"
                 new_app = {"name": new_name, "bundleIdentifier": bundle_id,
                            "developerName": new_developer, "version": version}
+                description = _clean_description(getattr(candidate, "release_body", ""))
+                if description:
+                    new_app["localizedDescription"] = description
                 if icon_url_in:
                     new_app["iconURL"] = icon_url_in
                 ok, message = source_manager.add_app_manual(

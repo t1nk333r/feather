@@ -426,7 +426,9 @@ def test_import_new_app_auto_names_from_ipa(authed_client):
     app_info = app_module.source_manager.get_app("com.new.app")
     assert app_info is not None
     assert app_info["name"] == "AnymeX"
-    assert app_info["developerName"] == "Unknown"
+    # developerName falls back to the repo owner (from "owner/repo"), not "Unknown" --
+    # see test_import_new_app_developer_from_repo_owner for the dedicated coverage.
+    assert app_info["developerName"] == "owner"
 
 
 def test_import_new_app_sets_icon_url(authed_client):
@@ -465,3 +467,178 @@ def test_import_new_app_sets_icon_url(authed_client):
     app_info = app_module.source_manager.get_app("com.icon.app")
     assert app_info is not None
     assert app_info["iconURL"].endswith("/icons/com.icon.app/icon.png")
+
+
+def test_import_new_app_uses_release_body_as_description(authed_client):
+    app_module = authed_client.app_module
+    release_ingest = app_module.release_ingest
+
+    ipa_bytes = build_ipa_bytes(bundle_id="com.new.app", version="1.0.0", name="AnymeX")
+    candidate = make_candidate(
+        release_ingest,
+        declared_size=len(ipa_bytes),
+        release_body="AnymeX is an anime streaming app.",
+    )
+
+    status, events = post_and_collect(
+        authed_client,
+        {
+            "provider": "github",
+            "project": "owner/repo",
+            "bundleIdentifier": "",
+            "createIfMissing": True,
+            "name": "",
+            "developerName": "",
+        },
+        {
+            "select_candidate": make_fake_select_candidate(candidate),
+            "stream_download": make_fake_stream_download(ipa_bytes),
+        },
+    )
+
+    assert status == 200
+    last = events[-1]
+    assert last["stage"] == "done", events
+
+    app_info = app_module.source_manager.get_app("com.new.app")
+    assert app_info is not None
+    assert app_info["localizedDescription"] == "AnymeX is an anime streaming app."
+
+
+def test_import_new_app_developer_from_repo_owner(authed_client):
+    app_module = authed_client.app_module
+    release_ingest = app_module.release_ingest
+
+    ipa_bytes = build_ipa_bytes(bundle_id="com.new.app", version="1.0.0", name="AnymeX")
+    candidate = make_candidate(
+        release_ingest, project="RyanYuuki/AnymeX", declared_size=len(ipa_bytes)
+    )
+
+    status, events = post_and_collect(
+        authed_client,
+        {
+            "provider": "github",
+            "project": "RyanYuuki/AnymeX",
+            "bundleIdentifier": "",
+            "createIfMissing": True,
+            "name": "",
+            "developerName": "",
+        },
+        {
+            "select_candidate": make_fake_select_candidate(candidate),
+            "stream_download": make_fake_stream_download(ipa_bytes),
+        },
+    )
+
+    assert status == 200
+    last = events[-1]
+    assert last["stage"] == "done", events
+
+    app_info = app_module.source_manager.get_app("com.new.app")
+    assert app_info is not None
+    assert app_info["developerName"] == "RyanYuuki"
+
+
+def test_import_user_developer_overrides_repo_owner(authed_client):
+    app_module = authed_client.app_module
+    release_ingest = app_module.release_ingest
+
+    ipa_bytes = build_ipa_bytes(bundle_id="com.new.app", version="1.0.0", name="AnymeX")
+    candidate = make_candidate(
+        release_ingest, project="RyanYuuki/AnymeX", declared_size=len(ipa_bytes)
+    )
+
+    status, events = post_and_collect(
+        authed_client,
+        {
+            "provider": "github",
+            "project": "RyanYuuki/AnymeX",
+            "bundleIdentifier": "",
+            "createIfMissing": True,
+            "name": "",
+            "developerName": "Custom Dev",
+        },
+        {
+            "select_candidate": make_fake_select_candidate(candidate),
+            "stream_download": make_fake_stream_download(ipa_bytes),
+        },
+    )
+
+    assert status == 200
+    last = events[-1]
+    assert last["stage"] == "done", events
+
+    app_info = app_module.source_manager.get_app("com.new.app")
+    assert app_info is not None
+    assert app_info["developerName"] == "Custom Dev"
+
+
+def test_import_long_release_body_is_truncated(authed_client):
+    app_module = authed_client.app_module
+    release_ingest = app_module.release_ingest
+
+    ipa_bytes = build_ipa_bytes(bundle_id="com.new.app", version="1.0.0", name="AnymeX")
+    long_body = "x" * 2000
+    candidate = make_candidate(
+        release_ingest, declared_size=len(ipa_bytes), release_body=long_body
+    )
+
+    status, events = post_and_collect(
+        authed_client,
+        {
+            "provider": "github",
+            "project": "owner/repo",
+            "bundleIdentifier": "",
+            "createIfMissing": True,
+            "name": "",
+            "developerName": "",
+        },
+        {
+            "select_candidate": make_fake_select_candidate(candidate),
+            "stream_download": make_fake_stream_download(ipa_bytes),
+        },
+    )
+
+    assert status == 200
+    last = events[-1]
+    assert last["stage"] == "done", events
+
+    app_info = app_module.source_manager.get_app("com.new.app")
+    assert app_info is not None
+    description = app_info["localizedDescription"]
+    assert len(description) <= 801
+    assert description.endswith("…")
+
+
+def test_import_empty_release_body_leaves_description_blank(authed_client):
+    app_module = authed_client.app_module
+    release_ingest = app_module.release_ingest
+
+    ipa_bytes = build_ipa_bytes(bundle_id="com.new.app", version="1.0.0", name="AnymeX")
+    candidate = make_candidate(
+        release_ingest, declared_size=len(ipa_bytes), release_body=""
+    )
+
+    status, events = post_and_collect(
+        authed_client,
+        {
+            "provider": "github",
+            "project": "owner/repo",
+            "bundleIdentifier": "",
+            "createIfMissing": True,
+            "name": "",
+            "developerName": "",
+        },
+        {
+            "select_candidate": make_fake_select_candidate(candidate),
+            "stream_download": make_fake_stream_download(ipa_bytes),
+        },
+    )
+
+    assert status == 200
+    last = events[-1]
+    assert last["stage"] == "done", events
+
+    app_info = app_module.source_manager.get_app("com.new.app")
+    assert app_info is not None
+    assert not app_info.get("localizedDescription")
