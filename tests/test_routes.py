@@ -2114,3 +2114,28 @@ def test_diagnostics_requires_auth(client):
     contain internal paths/hostnames."""
     resp = client.get("/api/diagnostics")
     assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Plan 052: serve via Waitress (single-process WSGI) instead of the Flask
+# dev server -- the `__main__` block isn't exercised by the test suite, so
+# these tests just guard the two things it depends on.
+# ---------------------------------------------------------------------------
+
+
+def test_app_is_wsgi_callable(client):
+    """The module-level Flask `app` object is a plain WSGI callable, which
+    is all `waitress.serve(app, ...)` needs -- confirms the Waitress switch
+    in `__main__` requires no changes to the app object itself."""
+    app_module = client.app_module
+    assert callable(app_module.app)
+
+
+def test_waitress_importable():
+    """Guards the runtime dependency pinned in requirements.txt: `__main__`
+    does `from waitress import serve` lazily (not at module import time), so
+    this is the only place the test suite checks it's actually installed."""
+    import waitress  # noqa: F401
+    from waitress import serve
+
+    assert callable(serve)
