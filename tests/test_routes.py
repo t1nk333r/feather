@@ -2142,3 +2142,50 @@ def test_waitress_importable():
     from waitress import serve
 
     assert callable(serve)
+
+
+# ---------------------------------------------------------------------------
+# Plan 056: PWA support -- manifest, apple/theme-color tags, public /sw.js.
+# ---------------------------------------------------------------------------
+
+
+def test_sw_js_public_and_scoped(client):
+    """GET /sw.js must be reachable with no session (it loads before/around
+    login), served as JS, and carry Service-Worker-Allowed: / so it can
+    control the whole app even though the file itself lives at /sw.js."""
+    resp = client.get("/sw.js")
+    assert resp.status_code == 200
+    assert "javascript" in resp.content_type
+    assert "addEventListener" in resp.get_data(as_text=True)
+    assert resp.headers.get("Service-Worker-Allowed") == "/"
+
+
+def test_manifest_served(client):
+    """GET /static/manifest.webmanifest must be public, valid JSON, and
+    declare a standalone display mode so "Add to Home Screen" installs a
+    real app-like experience instead of a bookmark."""
+    resp = client.get("/static/manifest.webmanifest")
+    assert resp.status_code == 200
+    body = json.loads(resp.get_data(as_text=True))
+    assert body["name"]
+    assert body["display"] == "standalone"
+
+
+def test_index_has_pwa_tags(client):
+    """GET / must link the manifest, declare apple-mobile-web-app-capable,
+    and set a theme-color meta so iOS Safari and Android Chrome can install
+    the page to the home screen."""
+    resp = client.get("/")
+    html = resp.get_data(as_text=True)
+    assert 'rel="manifest"' in html
+    assert "apple-mobile-web-app-capable" in html
+    assert "theme-color" in html
+
+
+def test_sw_and_manifest_need_no_auth(client):
+    """Both the service worker and the manifest are fetched before/around
+    login, so neither may require an authenticated session."""
+    sw_resp = client.get("/sw.js")
+    manifest_resp = client.get("/static/manifest.webmanifest")
+    assert sw_resp.status_code == 200
+    assert manifest_resp.status_code == 200

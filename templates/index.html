@@ -6,6 +6,14 @@
     <link rel="icon" type="image/svg+xml" href="/static/icon-dark.svg" media="(prefers-color-scheme: dark)">
     <link rel="alternate icon" href="/static/favicon.png">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="manifest" href="/static/manifest.webmanifest">
+    <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="Source Mgr">
+    <link rel="apple-touch-icon" href="/static/icon-256.png">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         :root {
@@ -992,6 +1000,14 @@
     <div id="toastContainer" class="toast-container"></div>
 
     <script>
+        // Register the PWA service worker (feature-guarded; errors are
+        // swallowed so a registration failure can never break the page).
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
+            });
+        }
+
         // Intercept every fetch() call: if any response comes back 401
         // (session missing/expired), pop the login modal. This is one
         // interception point instead of editing all 13 call sites.

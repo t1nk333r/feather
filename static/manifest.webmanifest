@@ -1,0 +1,15 @@
+{
+  "name": "AltStore Source Manager",
+  "short_name": "Source Mgr",
+  "description": "Manage your self-hosted AltStore/Feather app source.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#f2f2f7",
+  "icons": [
+    { "src": "/static/icon-256.png",  "sizes": "256x256",  "type": "image/png" },
+    { "src": "/static/icon-512.png",  "sizes": "512x512",  "type": "image/png" },
+    { "src": "/static/icon-1024.png", "sizes": "1024x1024","type": "image/png" }
+  ]
+}

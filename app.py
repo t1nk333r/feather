@@ -1750,6 +1750,32 @@ def generate_qr():
         logging.error(f"QR generation error: {str(e)}")
         return jsonify({"error": "QR generation failed"}), 500
 
+@app.route('/sw.js')
+def service_worker():
+    js = """
+self.addEventListener('install', (e) => self.skipWaiting());
+self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+// Network-first for navigations; never cache API or authenticated pages.
+self.addEventListener('fetch', (e) => {
+  const url = new URL(e.request.url);
+  if (e.request.method !== 'GET') return;
+  if (url.pathname.startsWith('/static/')) {
+    e.respondWith(caches.open('feather-static-v1').then(async (c) => {
+      const hit = await c.match(e.request);
+      if (hit) return hit;
+      const res = await fetch(e.request);
+      if (res.ok) c.put(e.request, res.clone());
+      return res;
+    }));
+  }
+  // everything else: default network handling (no caching)
+});
+""".strip()
+    resp = app.response_class(js, mimetype='application/javascript')
+    resp.headers['Service-Worker-Allowed'] = '/'
+    resp.headers['Cache-Control'] = 'no-cache'
+    return resp
+
 @app.route('/api/apps')
 def get_apps():
     try:
