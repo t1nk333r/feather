@@ -20,7 +20,7 @@ pipeline {
     stage('Tests (Python 3.11)') {
       steps {
         sh '''
-          uv venv --python 3.11 .venv311
+          uv venv --clear --python 3.11 .venv311
           . .venv311/bin/activate
           uv pip install -r requirements.txt -r requirements-dev.txt
           python -m pytest tests/ -q
@@ -31,7 +31,7 @@ pipeline {
     stage('Tests (Python 3.14)') {
       steps {
         sh '''
-          uv venv --python 3.14 .venv314
+          uv venv --clear --python 3.14 .venv314
           . .venv314/bin/activate
           uv pip install -r requirements.txt -r requirements-dev.txt
           python -m pytest tests/ -q
