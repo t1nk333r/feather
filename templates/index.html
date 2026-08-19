@@ -602,7 +602,6 @@
             <button class="tab" onclick="switchTab('source-info', this)">Source Info</button>
             <button class="tab" onclick="switchTab('import-repo', this)">Import from Repo</button>
             <button class="tab" onclick="switchTab('health', this)">Health</button>
-            <button class="tab" onclick="switchTab('auto-import', this)">Auto-Import</button>
             <button class="tab" onclick="logout()" style="margin-left: auto;">Sign out</button>
         </div>
 
@@ -891,12 +890,48 @@
                     <label>Icon URL (optional, for new apps)</label>
                     <input type="url" name="iconURL" placeholder="https://example.com/icon.png">
                 </div>
-                <button type="submit" class="btn">Import</button>
+
+                <h3 style="margin-top: 25px; margin-bottom: 15px;">Auto-import options</h3>
+                <div class="form-group">
+                    <label>Job ID (optional):</label>
+                    <input type="text" name="jobId" placeholder="blank = derived from repo">
+                </div>
+                <div class="form-group">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="jobEnabled" name="jobEnabled" checked style="width: auto; margin: 0; cursor: pointer;">
+                        <label for="jobEnabled" style="margin: 0; font-weight: normal; cursor: pointer; user-select: none;">Enabled</label>
+                    </div>
+                </div>
+
+                <button type="submit" class="btn">Import now</button>
+                <button type="button" class="btn btn-secondary" id="saveJobBtn" onclick="saveRepoAsJob()">Save &amp; auto-import</button>
                 <div id="importProgress" style="display:none; margin-top: 16px;">
                     <progress id="importBar" max="100" value="0" style="width: 100%;"></progress>
                     <span id="importStatus"></span>
                 </div>
             </form>
+
+            <h3 style="margin-top: 40px; margin-bottom: 15px;">Schedule</h3>
+            <div class="parser-options">
+                <div class="form-group" style="margin-bottom: 15px;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="autoImportEnabled" style="width: auto; margin: 0; cursor: pointer;">
+                        <label for="autoImportEnabled" style="margin: 0; font-weight: normal; cursor: pointer; user-select: none;">Enable scheduled auto-import</label>
+                    </div>
+                </div>
+                <div class="form-group" style="margin-bottom: 15px;">
+                    <label>Interval (hours):</label>
+                    <input type="number" id="autoImportInterval" min="1" max="168" value="6" style="max-width: 160px;">
+                </div>
+                <button type="button" class="btn" id="autoImportSaveConfigBtn" onclick="saveAutoImportConfig()">Save Schedule</button>
+                <button type="button" class="btn btn-secondary" id="autoImportRunAllBtn" onclick="runAutoImport(null, this)">Run All Now</button>
+                <p id="autoImportLastRun" style="color: var(--label-secondary); margin-top: 12px; margin-bottom: 0; font-size: 0.85em;"></p>
+            </div>
+
+            <h3 style="margin-top: 30px; margin-bottom: 15px;">Jobs</h3>
+            <div id="autoImportJobsList" class="app-list">
+                <p style="color: var(--label-secondary);">Loading...</p>
+            </div>
         </div>
 
         <div id="health" class="tab-content">
@@ -935,95 +970,6 @@
             </p>
             <button type="button" class="btn" id="diagnosticsRefreshBtn" onclick="runDiagnostics()">Refresh</button>
             <div id="diagnosticsResults" style="margin-top: 20px;"></div>
-        </div>
-
-        <div id="auto-import" class="tab-content">
-            <h2 style="margin-bottom: 20px;">Auto-Import</h2>
-            <p style="color: var(--label-secondary); margin-bottom: 20px;">
-                Manage repos the app watches for new releases. Enable the schedule to
-                import automatically on an interval, or run jobs on demand below.
-            </p>
-
-            <h3 style="margin-bottom: 15px;">Schedule</h3>
-            <div class="parser-options">
-                <div class="form-group" style="margin-bottom: 15px;">
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                        <input type="checkbox" id="autoImportEnabled" style="width: auto; margin: 0; cursor: pointer;">
-                        <label for="autoImportEnabled" style="margin: 0; font-weight: normal; cursor: pointer; user-select: none;">Enable scheduled auto-import</label>
-                    </div>
-                </div>
-                <div class="form-group" style="margin-bottom: 15px;">
-                    <label>Interval (hours):</label>
-                    <input type="number" id="autoImportInterval" min="1" max="168" value="6" style="max-width: 160px;">
-                </div>
-                <button type="button" class="btn" id="autoImportSaveConfigBtn" onclick="saveAutoImportConfig()">Save Schedule</button>
-                <button type="button" class="btn btn-secondary" id="autoImportRunAllBtn" onclick="runAutoImport(null, this)">Run All Now</button>
-                <p id="autoImportLastRun" style="color: var(--label-secondary); margin-top: 12px; margin-bottom: 0; font-size: 0.85em;"></p>
-            </div>
-
-            <h3 style="margin-top: 30px; margin-bottom: 15px;">Jobs</h3>
-            <div id="autoImportJobsList" class="app-list">
-                <p style="color: var(--label-secondary);">Loading...</p>
-            </div>
-
-            <h3 style="margin-top: 30px; margin-bottom: 15px;" id="autoImportFormTitle">Add Job</h3>
-            <form id="autoImportJobForm">
-                <div class="form-group">
-                    <label>Job ID (unique, e.g. "anymex"):</label>
-                    <input type="text" id="jobId" required placeholder="anymex">
-                </div>
-                <div class="form-group">
-                    <label>Provider:</label>
-                    <select id="jobProvider" required onchange="toggleAutoImportJobFields()">
-                        <option value="github">GitHub</option>
-                        <option value="gitlab">GitLab</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label>Repository:</label>
-                    <input type="text" id="jobProject" required placeholder="owner/repo">
-                </div>
-                <div class="form-group">
-                    <label>Bundle Identifier:</label>
-                    <input type="text" id="jobBundleIdentifier" required placeholder="com.example.app">
-                </div>
-                <div class="form-group">
-                    <label>Asset Glob:</label>
-                    <input type="text" id="jobAssetGlob" value="*.ipa">
-                </div>
-                <div class="form-group">
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                        <input type="checkbox" id="jobIncludePrereleases" style="width: auto; margin: 0; cursor: pointer;">
-                        <label for="jobIncludePrereleases" style="margin: 0; font-weight: normal; cursor: pointer; user-select: none;">Include prereleases</label>
-                    </div>
-                </div>
-                <div class="form-group">
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                        <input type="checkbox" id="jobCreateIfMissing" style="width: auto; margin: 0; cursor: pointer;" onchange="toggleAutoImportJobFields()">
-                        <label for="jobCreateIfMissing" style="margin: 0; font-weight: normal; cursor: pointer; user-select: none;">Create app if missing</label>
-                    </div>
-                </div>
-                <div class="form-group" id="jobNameGroup" style="display: none;">
-                    <label>Name (for new apps):</label>
-                    <input type="text" id="jobName" placeholder="My Awesome App">
-                </div>
-                <div class="form-group" id="jobDeveloperNameGroup" style="display: none;">
-                    <label>Developer Name (for new apps):</label>
-                    <input type="text" id="jobDeveloperName" placeholder="Developer Name">
-                </div>
-                <div class="form-group" id="jobHostsGroup" style="display: none;">
-                    <label>Allowed Download Hosts (required for GitLab):</label>
-                    <input type="text" id="jobAllowedDownloadHosts" placeholder="gitlab.com, example.com">
-                </div>
-                <div class="form-group">
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                        <input type="checkbox" id="jobEnabled" checked style="width: auto; margin: 0; cursor: pointer;">
-                        <label for="jobEnabled" style="margin: 0; font-weight: normal; cursor: pointer; user-select: none;">Enabled</label>
-                    </div>
-                </div>
-                <button type="submit" class="btn" id="autoImportJobSubmitBtn">Save Job</button>
-                <button type="button" class="btn btn-secondary" id="autoImportJobCancelBtn" onclick="resetAutoImportJobForm()" style="display: none;">Cancel Edit</button>
-            </form>
         </div>
     </div>
 
@@ -1114,7 +1060,7 @@
                 loadApps();
             } else if (tabName === 'source-info') {
                 loadSourceInfo();
-            } else if (tabName === 'auto-import') {
+            } else if (tabName === 'import-repo') {
                 loadAutoImport();
             }
         }
@@ -1329,6 +1275,57 @@
                 setButtonLoading(submitBtn, false);
             }
         });
+
+        // The shared #importRepoForm feeds two intents: "Import now" (transient,
+        // one-off streaming via /api/import-release, handled above) and
+        // "Save & auto-import" (persistent, via /api/auto-import/job, below).
+        // iconURL applies only to Import now (jobs get their icon from the IPA,
+        // plan 046); jobId/jobEnabled apply only to Save & auto-import.
+        async function saveRepoAsJob() {
+            const f = document.getElementById('importRepoForm');
+            const btn = document.getElementById('saveJobBtn');
+            const project = f.project.value.trim();
+            let id = f.jobId.value.trim();
+            if (!id) {
+                id = project
+                    .replace(/^https?:\/\/[^/]+\//, '')
+                    .replace(/\.git$/, '')
+                    .replace(/[^a-z0-9]+/gi, '-')
+                    .toLowerCase();
+            }
+            setButtonLoading(btn, true);
+            try {
+                const body = {
+                    id: id,
+                    provider: f.provider.value,
+                    project: project,
+                    bundleIdentifier: f.bundleIdentifier.value.trim(),
+                    assetGlob: f.assetGlob.value.trim() || '*.ipa',
+                    includePrereleases: f.includePrereleases.checked,
+                    createIfMissing: f.createIfMissing.checked,
+                    name: f.name.value.trim(),
+                    developerName: f.developerName.value.trim(),
+                    allowedDownloadHosts: f.allowedDownloadHosts.value.split(',').map(s => s.trim()).filter(Boolean),
+                    enabled: f.jobEnabled.checked,
+                };
+                const response = await fetch('/api/auto-import/job', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                const data = await response.json();
+                if (!data.success) {
+                    showToast(data.error || 'Failed to save job', 'error');
+                    return;
+                }
+                showToast('Job saved', 'success');
+                loadAutoImport();
+            } catch (error) {
+                showToast('Error saving job: ' + error.message, 'error');
+            } finally {
+                setButtonLoading(btn, false);
+            }
+        }
 
         async function runHealthScan() {
             const btn = document.getElementById('healthScanBtn');
@@ -2187,21 +2184,6 @@
         // ------------------------------------------------------------------
         let autoImportJobsCache = [];
 
-        function toggleAutoImportJobFields() {
-            const createIfMissing = document.getElementById('jobCreateIfMissing').checked;
-            const nameGroup = document.getElementById('jobNameGroup');
-            const devGroup = document.getElementById('jobDeveloperNameGroup');
-            const nameInput = document.getElementById('jobName');
-            const devInput = document.getElementById('jobDeveloperName');
-            nameGroup.style.display = createIfMissing ? 'block' : 'none';
-            devGroup.style.display = createIfMissing ? 'block' : 'none';
-            nameInput.required = createIfMissing;
-            devInput.required = createIfMissing;
-
-            const provider = document.getElementById('jobProvider').value;
-            document.getElementById('jobHostsGroup').style.display = provider === 'gitlab' ? 'block' : 'none';
-        }
-
         function formatAutoImportResult(result) {
             if (!result) return 'Never run';
             const status = result.status || 'unknown';
@@ -2293,80 +2275,27 @@
             }
         }
 
-        function resetAutoImportJobForm() {
-            const form = document.getElementById('autoImportJobForm');
-            form.reset();
-            document.getElementById('jobId').disabled = false;
-            document.getElementById('jobAssetGlob').value = '*.ipa';
-            document.getElementById('autoImportFormTitle').textContent = 'Add Job';
-            document.getElementById('autoImportJobSubmitBtn').textContent = 'Save Job';
-            document.getElementById('autoImportJobCancelBtn').style.display = 'none';
-            toggleAutoImportJobFields();
-        }
-
         function editAutoImportJob(id) {
             const job = autoImportJobsCache.find(j => j.id === id);
             if (!job) {
                 showToast('Job not found', 'error');
                 return;
             }
-            document.getElementById('jobId').value = job.id;
-            document.getElementById('jobId').disabled = true;
-            document.getElementById('jobProvider').value = job.provider;
-            document.getElementById('jobProject').value = job.project;
-            document.getElementById('jobBundleIdentifier').value = job.bundleIdentifier;
-            document.getElementById('jobAssetGlob').value = job.assetGlob || '*.ipa';
-            document.getElementById('jobIncludePrereleases').checked = !!job.includePrereleases;
-            document.getElementById('jobCreateIfMissing').checked = !!job.createIfMissing;
-            document.getElementById('jobName').value = job.name || '';
-            document.getElementById('jobDeveloperName').value = job.developerName || '';
-            document.getElementById('jobAllowedDownloadHosts').value = (job.allowedDownloadHosts || []).join(', ');
-            document.getElementById('jobEnabled').checked = job.enabled !== false;
-            toggleAutoImportJobFields();
-            document.getElementById('autoImportFormTitle').textContent = 'Edit Job';
-            document.getElementById('autoImportJobSubmitBtn').textContent = 'Update Job';
-            document.getElementById('autoImportJobCancelBtn').style.display = 'inline-block';
-            document.getElementById('autoImportJobForm').scrollIntoView({ behavior: 'smooth' });
+            const f = document.getElementById('importRepoForm');
+            f.provider.value = job.provider;
+            f.project.value = job.project;
+            f.bundleIdentifier.value = job.bundleIdentifier;
+            f.assetGlob.value = job.assetGlob || '*.ipa';
+            f.includePrereleases.checked = !!job.includePrereleases;
+            f.createIfMissing.checked = !!job.createIfMissing;
+            f.name.value = job.name || '';
+            f.developerName.value = job.developerName || '';
+            f.allowedDownloadHosts.value = (job.allowedDownloadHosts || []).join(', ');
+            f.jobId.value = job.id;
+            f.jobEnabled.checked = job.enabled !== false;
+            document.getElementById('saveJobBtn').textContent = 'Update job';
+            f.scrollIntoView({ behavior: 'smooth' });
         }
-
-        document.getElementById('autoImportJobForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const submitBtn = document.getElementById('autoImportJobSubmitBtn');
-            setButtonLoading(submitBtn, true);
-            try {
-                const hostsRaw = document.getElementById('jobAllowedDownloadHosts').value;
-                const body = {
-                    id: document.getElementById('jobId').value.trim(),
-                    provider: document.getElementById('jobProvider').value,
-                    project: document.getElementById('jobProject').value.trim(),
-                    bundleIdentifier: document.getElementById('jobBundleIdentifier').value.trim(),
-                    assetGlob: document.getElementById('jobAssetGlob').value.trim() || '*.ipa',
-                    includePrereleases: document.getElementById('jobIncludePrereleases').checked,
-                    createIfMissing: document.getElementById('jobCreateIfMissing').checked,
-                    name: document.getElementById('jobName').value.trim(),
-                    developerName: document.getElementById('jobDeveloperName').value.trim(),
-                    allowedDownloadHosts: hostsRaw.split(',').map(s => s.trim()).filter(Boolean),
-                    enabled: document.getElementById('jobEnabled').checked,
-                };
-                const response = await fetch('/api/auto-import/job', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body),
-                });
-                const data = await response.json();
-                if (!data.success) {
-                    showToast(data.error || 'Failed to save job', 'error');
-                    return;
-                }
-                showToast('Job saved', 'success');
-                resetAutoImportJobForm();
-                loadAutoImport();
-            } catch (error) {
-                showToast('Error saving job: ' + error.message, 'error');
-            } finally {
-                setButtonLoading(submitBtn, false);
-            }
-        });
 
         async function toggleAutoImportJobEnabled(id, checkbox) {
             const job = autoImportJobsCache.find(j => j.id === id);

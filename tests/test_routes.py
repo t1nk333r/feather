@@ -606,12 +606,15 @@ def test_index_offers_both_favicon_themes(client):
 
 
 def test_index_contains_auto_import_tab(client):
-    """Plan 049: the Auto-Import admin tab (nav button + panel) renders."""
+    """Plan 053: auto-import is merged into the "Import from Repo" tab
+    (Save & auto-import action + jobs list) rather than a separate tab."""
     resp = client.get("/")
     assert resp.status_code == 200
     body = resp.data.decode("utf-8")
-    assert "switchTab('auto-import', this)" in body
-    assert 'id="auto-import"' in body
+    assert "switchTab('auto-import'" not in body
+    assert 'id="auto-import"' not in body
+    assert 'id="autoImportJobsList"' in body
+    assert "saveRepoAsJob()" in body
 
 
 def test_index_contains_no_emoji(client):
