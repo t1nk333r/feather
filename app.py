@@ -33,6 +33,37 @@ import release_source_ingest as release_ingest
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
+# Added by plan 051 -- in-memory ring buffer of recent WARNING+ log records,
+# surfaced (auth-gated, secrets redacted) via GET /api/diagnostics.
+import collections
+
+_DIAG_BUFFER = collections.deque(maxlen=200)
+
+def _redact_secret(text):
+    """Never echo secret env VALUES into the diagnostics buffer (Hard Rule 4)."""
+    s = text
+    for name in ("ADMIN_PASSWORD", "SECRET_KEY", "GARAGE_S3_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "GITLAB_TOKEN"):
+        val = os.environ.get(name)
+        if val and len(val) >= 4 and val in s:
+            s = s.replace(val, "***REDACTED***")
+    return s
+
+class _RingBufferLogHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            _DIAG_BUFFER.append({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "level": record.levelname,
+                "message": _redact_secret(self.format(record)),
+            })
+        except Exception:
+            pass  # a logging handler must never raise
+
+_ring_handler = _RingBufferLogHandler()
+_ring_handler.setLevel(logging.WARNING)
+_ring_handler.setFormatter(logging.Formatter("%(message)s"))
+logging.getLogger().addHandler(_ring_handler)
+
 app = Flask(__name__)
 
 # Configuration
@@ -3099,6 +3130,13 @@ def storage_selftest():
     except Exception as e:
         logging.error(f"Storage self-test error: {str(e)}")
         return jsonify({"error": "self-test failed"}), 500
+
+
+@app.route('/api/diagnostics', methods=['GET'])
+@requires_auth
+def diagnostics():
+    # newest first, capped
+    return jsonify({"entries": list(_DIAG_BUFFER)[::-1]})
 
 
 @app.errorhandler(404)
