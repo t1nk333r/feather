@@ -54,7 +54,7 @@ pipeline {
     stage('Build & push image') {
       when { branch 'main' }
       steps {
-        withCredentials([usernamePassword(credentialsId: 'github-pat',
+        withCredentials([usernamePassword(credentialsId: 'ghcr-pat',
             usernameVariable: 'REG_USER', passwordVariable: 'REG_TOKEN')]) {
           sh 'echo "$REG_TOKEN" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin'
         }
