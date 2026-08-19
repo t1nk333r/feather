@@ -3148,6 +3148,12 @@ def internal_error(error):
     return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == '__main__':
-    logging.info("Starting AltStore Source Manager...")
+    logging.info("Starting AltStore Source Manager (Waitress)...")
     _start_auto_import_scheduler()
-    app.run(host='0.0.0.0', port=PORT, debug=False)
+    # Single process, many threads: SourceManager's in-process lock and the
+    # auto-import scheduler thread both assume exactly one process. Do NOT
+    # scale this out to multiple Waitress/gunicorn/uWSGI worker processes
+    # without first externalizing the lock and ensuring only one process
+    # owns the scheduler.
+    from waitress import serve
+    serve(app, host='0.0.0.0', port=PORT, threads=int(os.environ.get("WAITRESS_THREADS", "8")))
