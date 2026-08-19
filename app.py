@@ -267,6 +267,20 @@ def _require_garage_config():
         raise RuntimeError(message)
 
 
+def _classify_storage_error(e):
+    """Classify a ClientError raised during a storage self-test probe
+    (plan 050). A 403 -- by HTTP status or an AccessDenied/Forbidden
+    error code -- is reported as "forbidden" so a permission problem is
+    never confused with a plain "error". Returns (status, detail), where
+    detail is the S3 error code.
+    """
+    status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    code = e.response.get("Error", {}).get("Code", "unknown")
+    if status == 403 or code in ("403", "AccessDenied", "Forbidden"):
+        return "forbidden", code
+    return "error", code
+
+
 class LocalIpaStorage:
     """IPA storage on local disk -- today's behaviour, unchanged.
 
@@ -337,6 +351,52 @@ class LocalIpaStorage:
 
     def exists(self, bundle_id, version):
         return os.path.exists(self._path(bundle_id, version))
+
+    def selftest(self):
+        """Write, read, then delete a probe file under IPA_FOLDER to
+        confirm the mount is writable and readable (plan 050). All
+        capabilities are "ok" unless an OSError occurs, in which case
+        that capability is "error" with the errno in detail. The probe
+        file is always deleted, even if the read step fails. Never
+        raises.
+        """
+        result = {"backend": "local", "write": "error", "read": "error", "delete": "error", "detail": None}
+
+        def note(detail):
+            if detail and result["detail"] is None:
+                result["detail"] = detail
+
+        probe_dir = os.path.join(IPA_FOLDER, "__selftest__")
+        probe_path = os.path.join(probe_dir, "probe.tmp")
+        wrote = False
+        try:
+            os.makedirs(probe_dir, exist_ok=True)
+            with open(probe_path, "wb") as f:
+                f.write(b"feather-selftest")
+            result["write"] = "ok"
+            wrote = True
+        except OSError as e:
+            note(f"errno {e.errno}: {e.strerror}")
+
+        if wrote:
+            try:
+                with open(probe_path, "rb") as f:
+                    f.read()
+                result["read"] = "ok"
+            except OSError as e:
+                note(f"errno {e.errno}: {e.strerror}")
+
+        try:
+            if os.path.exists(probe_path):
+                os.remove(probe_path)
+            if os.path.isdir(probe_dir) and not os.listdir(probe_dir):
+                os.rmdir(probe_dir)
+            result["delete"] = "ok"
+        except OSError as e:
+            result["delete"] = "error"
+            note(f"errno {e.errno}: {e.strerror}")
+
+        return result
 
     def public_url(self, bundle_id, version):
         return None
@@ -421,6 +481,59 @@ class GarageIpaStorage:
             logging.error(f"Error checking IPA existence ({key}): {code}")
             return False
 
+    def selftest(self):
+        """Write, read, then delete a dedicated probe object -- never a
+        real IPA key -- and report each capability (plan 050). A 403 is
+        reported as "forbidden", distinct from a plain "error" or "ok",
+        so a permission problem is never mistaken for the object simply
+        being missing. The probe is always deleted, even if the read
+        step fails. Never raises.
+        """
+        probe_key = self._key("__selftest__", "probe")
+        result = {"backend": "garage", "write": "error", "read": "error", "delete": "error", "detail": None}
+
+        def note(detail):
+            if detail and result["detail"] is None:
+                result["detail"] = detail
+
+        wrote = False
+        try:
+            self._client.put_object(Bucket=GARAGE_BUCKET, Key=probe_key, Body=b"feather-selftest")
+            result["write"] = "ok"
+            wrote = True
+        except ClientError as e:
+            status, detail = _classify_storage_error(e)
+            result["write"] = status
+            note(detail)
+        except Exception as e:
+            result["write"] = "error"
+            note(str(e))
+
+        try:
+            if wrote:
+                self._client.head_object(Bucket=GARAGE_BUCKET, Key=probe_key)
+                result["read"] = "ok"
+        except ClientError as e:
+            status, detail = _classify_storage_error(e)
+            result["read"] = status
+            note(detail)
+        except Exception as e:
+            result["read"] = "error"
+            note(str(e))
+        finally:
+            try:
+                self._client.delete_object(Bucket=GARAGE_BUCKET, Key=probe_key)
+                result["delete"] = "ok"
+            except ClientError as e:
+                status, detail = _classify_storage_error(e)
+                result["delete"] = status
+                note(detail)
+            except Exception as e:
+                result["delete"] = "error"
+                note(str(e))
+
+        return result
+
     def public_url(self, bundle_id, version):
         key = self._key(bundle_id, version)
         return f"{GARAGE_PUBLIC_BASE_URL.rstrip('/')}/{key}"
@@ -489,6 +602,52 @@ class LocalIconStorage:
 
     def exists(self, bundle_id, ext):
         return os.path.exists(self._path(bundle_id, ext))
+
+    def selftest(self):
+        """Write, read, then delete a probe file under ICON_FOLDER to
+        confirm the mount is writable and readable (plan 050). All
+        capabilities are "ok" unless an OSError occurs, in which case
+        that capability is "error" with the errno in detail. The probe
+        file is always deleted, even if the read step fails. Never
+        raises.
+        """
+        result = {"backend": "local", "write": "error", "read": "error", "delete": "error", "detail": None}
+
+        def note(detail):
+            if detail and result["detail"] is None:
+                result["detail"] = detail
+
+        probe_dir = os.path.join(ICON_FOLDER, "__selftest__")
+        probe_path = os.path.join(probe_dir, "probe.tmp")
+        wrote = False
+        try:
+            os.makedirs(probe_dir, exist_ok=True)
+            with open(probe_path, "wb") as f:
+                f.write(b"feather-selftest")
+            result["write"] = "ok"
+            wrote = True
+        except OSError as e:
+            note(f"errno {e.errno}: {e.strerror}")
+
+        if wrote:
+            try:
+                with open(probe_path, "rb") as f:
+                    f.read()
+                result["read"] = "ok"
+            except OSError as e:
+                note(f"errno {e.errno}: {e.strerror}")
+
+        try:
+            if os.path.exists(probe_path):
+                os.remove(probe_path)
+            if os.path.isdir(probe_dir) and not os.listdir(probe_dir):
+                os.rmdir(probe_dir)
+            result["delete"] = "ok"
+        except OSError as e:
+            result["delete"] = "error"
+            note(f"errno {e.errno}: {e.strerror}")
+
+        return result
 
     def public_url(self, bundle_id, ext):
         return None
@@ -598,6 +757,59 @@ class GarageIconStorage:
                 return False
             logging.error(f"Error checking icon existence ({key}): {code}")
             return False
+
+    def selftest(self):
+        """Write, read, then delete a dedicated probe object -- never a
+        real icon key -- and report each capability (plan 050). A 403 is
+        reported as "forbidden", distinct from a plain "error" or "ok",
+        so a permission problem is never mistaken for the icon simply
+        being missing. The probe is always deleted, even if the read
+        step fails. Never raises.
+        """
+        probe_key = self._key("__selftest__", "probe")
+        result = {"backend": "garage", "write": "error", "read": "error", "delete": "error", "detail": None}
+
+        def note(detail):
+            if detail and result["detail"] is None:
+                result["detail"] = detail
+
+        wrote = False
+        try:
+            self._client.put_object(Bucket=GARAGE_BUCKET, Key=probe_key, Body=b"feather-selftest")
+            result["write"] = "ok"
+            wrote = True
+        except ClientError as e:
+            status, detail = _classify_storage_error(e)
+            result["write"] = status
+            note(detail)
+        except Exception as e:
+            result["write"] = "error"
+            note(str(e))
+
+        try:
+            if wrote:
+                self._client.head_object(Bucket=GARAGE_BUCKET, Key=probe_key)
+                result["read"] = "ok"
+        except ClientError as e:
+            status, detail = _classify_storage_error(e)
+            result["read"] = status
+            note(detail)
+        except Exception as e:
+            result["read"] = "error"
+            note(str(e))
+        finally:
+            try:
+                self._client.delete_object(Bucket=GARAGE_BUCKET, Key=probe_key)
+                result["delete"] = "ok"
+            except ClientError as e:
+                status, detail = _classify_storage_error(e)
+                result["delete"] = status
+                note(detail)
+            except Exception as e:
+                result["delete"] = "error"
+                note(str(e))
+
+        return result
 
     def public_url(self, bundle_id, ext):
         return f"{GARAGE_PUBLIC_BASE_URL.rstrip('/')}/{self._key(bundle_id, ext)}"
@@ -2869,6 +3081,24 @@ def reconcile_icons():
     except Exception as e:
         logging.error(f"Icon reconcile error: {str(e)}")
         return jsonify({"error": "reconcile failed"}), 500
+
+
+@app.route('/api/storage-selftest', methods=['POST'])
+@requires_auth
+def storage_selftest():
+    """Write-read-delete round-trip against the active storage backend
+    for both icon_storage and ipa_storage (plan 050). Distinguishes a 403
+    ("forbidden") from a real 404/missing object, which exists()'s bool
+    contract cannot do -- see the class docstrings on each storage
+    backend's selftest() for the discrimination logic. Only ever touches
+    a dedicated probe key, which is always deleted; never mutates a real
+    catalog object.
+    """
+    try:
+        return jsonify({"icon": icon_storage.selftest(), "ipa": ipa_storage.selftest()})
+    except Exception as e:
+        logging.error(f"Storage self-test error: {str(e)}")
+        return jsonify({"error": "self-test failed"}), 500
 
 
 @app.errorhandler(404)
