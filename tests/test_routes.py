@@ -2055,3 +2055,62 @@ def test_delete_version_deletes_the_ipa(authed_client, tmp_path):
     assert body["success"] is True
 
     assert not ipa_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Plan 051: GET /api/diagnostics -- in-app ring buffer of recent WARNING+ logs
+# ---------------------------------------------------------------------------
+
+
+def test_diagnostics_captures_recent_error(authed_client):
+    """A record logged at ERROR must land in the ring buffer and be
+    returned by GET /api/diagnostics."""
+    app_module = authed_client.app_module
+    app_module.logging.error("plan051-probe-marker")
+
+    resp = authed_client.get("/api/diagnostics")
+    assert resp.status_code == 200
+    entries = json.loads(resp.data)["entries"]
+    matches = [
+        e for e in entries
+        if e["level"] == "ERROR" and "plan051-probe-marker" in e["message"]
+    ]
+    assert len(matches) >= 1
+
+
+def test_diagnostics_ignores_info(authed_client):
+    """INFO-level records must not appear in the diagnostics buffer --
+    only WARNING+ is captured."""
+    app_module = authed_client.app_module
+    app_module.logging.info("plan051-info-marker-should-not-appear")
+
+    resp = authed_client.get("/api/diagnostics")
+    assert resp.status_code == 200
+    entries = json.loads(resp.data)["entries"]
+    assert not any(
+        "plan051-info-marker-should-not-appear" in e["message"] for e in entries
+    )
+
+
+def test_diagnostics_redacts_secret(authed_client):
+    """If a secret env value (here, the test-configured ADMIN_PASSWORD)
+    ever ends up in a log message, it must be redacted before it reaches
+    the diagnostics buffer -- never echoed back over the API."""
+    app_module = authed_client.app_module
+    app_module.logging.error("leak " + TEST_ADMIN_PASSWORD)
+
+    resp = authed_client.get("/api/diagnostics")
+    assert resp.status_code == 200
+    entries = json.loads(resp.data)["entries"]
+    matches = [e for e in entries if "leak" in e["message"]]
+    assert len(matches) >= 1
+    for entry in matches:
+        assert TEST_ADMIN_PASSWORD not in entry["message"]
+        assert "***REDACTED***" in entry["message"]
+
+
+def test_diagnostics_requires_auth(client):
+    """Unauthenticated GET /api/diagnostics must 401 -- the buffer can
+    contain internal paths/hostnames."""
+    resp = client.get("/api/diagnostics")
+    assert resp.status_code == 401

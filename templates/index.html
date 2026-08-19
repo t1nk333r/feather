@@ -927,6 +927,14 @@
             </p>
             <button type="button" class="btn" id="storageSelftestBtn" onclick="runStorageSelftest()">Run Storage Self-Test</button>
             <div id="storageSelftestResults" style="margin-top: 20px;"></div>
+
+            <h2 style="margin-top: 40px; margin-bottom: 20px;">Recent Errors</h2>
+            <p style="color: var(--label-secondary); margin-bottom: 20px;">
+                The last warnings and errors logged by this server process, in memory
+                only. Resets on restart. Secrets are redacted before storage.
+            </p>
+            <button type="button" class="btn" id="diagnosticsRefreshBtn" onclick="runDiagnostics()">Refresh</button>
+            <div id="diagnosticsResults" style="margin-top: 20px;"></div>
         </div>
 
         <div id="auto-import" class="tab-content">
@@ -1493,6 +1501,39 @@
                 console.error('Error running storage self-test:', error);
                 results.innerHTML = '<p style="color: var(--danger);">Self-test failed. Please try again.</p>';
                 showToast('Error running storage self-test: ' + error.message, 'error');
+            } finally {
+                setButtonLoading(btn, false);
+            }
+        }
+
+        async function runDiagnostics() {
+            const btn = document.getElementById('diagnosticsRefreshBtn');
+            const results = document.getElementById('diagnosticsResults');
+            setButtonLoading(btn, true);
+            results.innerHTML = '<p style="color: var(--label-secondary);">Loading...</p>';
+            try {
+                const response = await fetch('/api/diagnostics');
+                const data = await response.json();
+
+                if (data.error) {
+                    results.innerHTML = `<p style="color: var(--danger);">Failed to load diagnostics: ${escapeHtml(data.error)}</p>`;
+                    showToast(data.error, 'error');
+                    return;
+                }
+
+                const entries = data.entries || [];
+                if (entries.length === 0) {
+                    results.innerHTML = '<p style="color: var(--label-secondary);">No recent warnings or errors.</p>';
+                    return;
+                }
+
+                results.innerHTML = '<ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 13px;">' +
+                    entries.map(entry => `<li style="padding: 6px 0; border-bottom: 1px solid var(--separator);">${escapeHtml(entry.ts)} &middot; ${escapeHtml(entry.level)} &middot; ${escapeHtml(entry.message)}</li>`).join('') +
+                    '</ul>';
+            } catch (error) {
+                console.error('Error loading diagnostics:', error);
+                results.innerHTML = '<p style="color: var(--danger);">Failed to load diagnostics. Please try again.</p>';
+                showToast('Error loading diagnostics: ' + error.message, 'error');
             } finally {
                 setButtonLoading(btn, false);
             }
