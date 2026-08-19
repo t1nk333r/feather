@@ -83,12 +83,16 @@
             padding: 20px;
         }
         .container {
-            max-width: 1200px;
-            margin: 0 auto;
+            max-width: 1100px;
+            margin: 24px auto;
             background: var(--surface);
             border-radius: var(--radius-lg);
-            padding: 40px;
             box-shadow: var(--shadow-card);
+            display: grid;
+            grid-template-columns: 240px minmax(0, 1fr);
+            overflow: hidden;              /* keep the rounded corners over the grid */
+            min-height: 600px;
+            padding: 0;                    /* padding moves into sidebar/workspace */
         }
         h1 {
             color: var(--label);
@@ -102,33 +106,58 @@
             margin-bottom: 30px;
             font-size: 1.1em;
         }
-        .tabs {
+        .sidebar {
             display: flex;
-            gap: 10px;
-            margin-bottom: 30px;
-            border-bottom: 1px solid var(--separator);
-            flex-wrap: wrap;
+            flex-direction: column;
+            gap: 4px;
+            padding: 20px 12px;
+            border-right: 1px solid var(--separator);
+            background: var(--canvas);     /* subtle contrast vs the workspace surface */
+        }
+        .brand {
+            display: flex; align-items: center; gap: 10px;
+            padding: 8px 12px 16px;
+            font-weight: 700; font-size: 1.0em; color: var(--label);
+            letter-spacing: -0.01em;
+        }
+        .tabs {                            /* vertical nav list */
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            border-bottom: none;
         }
         .tab {
-            padding: 12px 24px;
+            width: 100%;
+            text-align: left;
+            padding: 10px 12px;
             cursor: pointer;
             border: none;
             background: none;
-            font-size: 16px;
+            font-size: 15px;
             color: var(--label-secondary);
-            border-bottom: 2px solid transparent;
-            transition: all 0.2s;
-            border-radius: 0;
+            border-radius: var(--radius-md);
+            transition: background .15s, color .15s;
         }
         .tab.active {
+            background: var(--accent-tint);
             color: var(--accent);
-            border-bottom-color: var(--accent);
             font-weight: 600;
-            background: transparent;
         }
         .tab:hover {
+            background: var(--fill);
             color: var(--label);
-            background: transparent;
+        }
+        .tab.signout {
+            margin-top: auto;
+            color: var(--danger);
+        }
+        .tab.signout:hover {
+            background: var(--danger-tint);
+            color: var(--danger);
+        }
+        .workspace {
+            padding: 32px 36px;
+            min-width: 0;                  /* allow inner content (tables/cards) to shrink */
         }
         .tab-content {
             display: none;
@@ -573,38 +602,36 @@
             100% { background-position: -200% 0; }
         }
         @media (max-width: 768px) {
-            .container {
-                padding: 20px;
-                margin: 10px;
-            }
+            .container { grid-template-columns: 1fr; margin: 10px; min-height: 0; }
             .app-header {
                 flex-direction: column;
             }
-            .tabs {
-                flex-direction: column;
-            }
-            .tab {
-                text-align: center;
-            }
+            .sidebar { border-right: none; border-bottom: 1px solid var(--separator); }
+            .tabs { flex-direction: row; overflow-x: auto; }
+            .tab { width: auto; white-space: nowrap; }
+            .tab.signout { margin-top: 0; }
+            .workspace { padding: 20px; }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1><img src="/static/icon.svg" alt="" width="40" height="40"
-                 style="vertical-align: -6px; margin-right: 10px; border-radius: 8px;">AltStore Source Manager</h1>
-        <p class="subtitle">Manage your custom iOS app repository</p>
-        
-        <div class="tabs">
-            <button class="tab active" onclick="switchTab('add-app', this)">Add App</button>
-            <button class="tab" onclick="switchTab('manage-apps', this)">Manage Apps</button>
-            <button class="tab" onclick="switchTab('qr-code', this)">QR Code</button>
-            <button class="tab" onclick="switchTab('source-info', this)">Source Info</button>
-            <button class="tab" onclick="switchTab('import-repo', this)">Import from Repo</button>
-            <button class="tab" onclick="switchTab('health', this)">Health</button>
-            <button class="tab" onclick="logout()" style="margin-left: auto;">Sign out</button>
-        </div>
-
+        <aside class="sidebar">
+            <div class="brand">
+                <img src="/static/icon.svg" alt="" width="28" height="28" style="border-radius:6px;">
+                <span>AltStore Source Manager</span>
+            </div>
+            <nav class="tabs">
+                <button class="tab active" onclick="switchTab('add-app', this)">Add App</button>
+                <button class="tab" onclick="switchTab('manage-apps', this)">Manage Apps</button>
+                <button class="tab" onclick="switchTab('qr-code', this)">QR Code</button>
+                <button class="tab" onclick="switchTab('source-info', this)">Source Info</button>
+                <button class="tab" onclick="switchTab('import-repo', this)">Import from Repo</button>
+                <button class="tab" onclick="switchTab('health', this)">Health</button>
+            </nav>
+            <button class="tab signout" onclick="logout()">Sign out</button>
+        </aside>
+        <main class="workspace">
         <div id="add-app" class="tab-content active">
             <h2 style="margin-bottom: 20px;">Add New App</h2>
             <form id="addAppForm">
@@ -681,112 +708,6 @@
                     <div class="spinner"></div>
                 </div>
                 <p style="color: var(--label-secondary); text-align: center; padding: 40px;">Loading apps...</p>
-            </div>
-        </div>
-
-        <!-- Edit App Modal -->
-        <div id="editAppModal" class="modal">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h2>Edit App</h2>
-                    <button class="close" onclick="closeEditModal()">&times;</button>
-                </div>
-                <form id="editAppForm">
-                    <input type="hidden" id="editBundleId" name="bundleIdentifier">
-                    <div class="form-group" style="text-align: center; margin-bottom: 20px;">
-                        <img id="editAppIcon" src="" alt="App Icon" class="app-icon" style="margin: 0 auto; display: block;">
-                    </div>
-                    <div class="form-group">
-                        <label>App Name:</label>
-                        <input type="text" id="editName" name="name" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Developer Name:</label>
-                        <input type="text" id="editDeveloperName" name="developerName" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Subtitle:</label>
-                        <input type="text" id="editSubtitle" name="subtitle">
-                    </div>
-                    <div class="form-group">
-                        <label>Description:</label>
-                        <textarea id="editDescription" name="localizedDescription" rows="4"></textarea>
-                    </div>
-                    <div class="form-group">
-                        <label>Screenshot URLs (one per line):</label>
-                        <textarea id="editScreenshotURLs" name="screenshotURLs" rows="4" placeholder="https://example.com/screenshot1.png"></textarea>
-                    </div>
-                    <div class="form-group">
-                        <label>Tint Color:</label>
-                        <input type="text" id="editTintColor" name="tintColor" placeholder="#007AFF">
-                    </div>
-                    <div class="form-group">
-                        <label>Icon:</label>
-                        <div style="margin-bottom: 10px;">
-                            <input type="file" id="editIconFile" name="iconFile" accept=".png,.jpg,.jpeg,.webp,.gif" style="margin-bottom: 10px; width: 100%;">
-                            <div style="display: flex; align-items: center; gap: 8px; margin-top: 10px;">
-                                <input type="checkbox" id="editDownloadIconFromUrl" name="downloadIconFromUrl" value="true" onchange="toggleEditIconMethod()" style="width: auto; margin: 0; cursor: pointer;">
-                                <label for="editDownloadIconFromUrl" style="margin: 0; font-weight: normal; cursor: pointer; user-select: none;">Use URL instead</label>
-                            </div>
-                        </div>
-                        <input type="url" id="editIconURL" name="iconURL" placeholder="https://example.com/icon.png" style="display: none; width: 100%;">
-                    </div>
-                    <div class="form-group">
-                        <label>Bundle Identifier (read-only):</label>
-                        <input type="text" id="editBundleIdentifier" readonly style="background: var(--surface-2);">
-                    </div>
-                    
-                    <div class="version-list">
-                        <h3 style="margin-bottom: 15px;">Versions</h3>
-                        <div id="versionsList"></div>
-                        
-                        <div class="add-version-section">
-                            <h4 style="margin-bottom: 15px; color: var(--accent);">Add New Version</h4>
-                            <div class="form-group">
-                                <label>Version:</label>
-                                <input type="text" id="newVersion" name="version" placeholder="1.0.0">
-                            </div>
-                            <div class="form-group">
-                                <label>IPA File:</label>
-                                <div style="margin-bottom: 10px;">
-                                    <input type="file" id="newIpaFile" name="ipaFile" accept=".ipa" style="margin-bottom: 10px; width: 100%;">
-                                    <div style="display: flex; align-items: center; gap: 8px; margin-top: 10px;">
-                                        <input type="checkbox" id="newDownloadFromUrl" name="downloadFromUrl" value="true" onchange="toggleNewVersionDownloadMethod()" style="width: auto; margin: 0; cursor: pointer;">
-                                        <label for="newDownloadFromUrl" style="margin: 0; font-weight: normal; cursor: pointer; user-select: none;">Use URL instead</label>
-                                    </div>
-                                </div>
-                                <input type="url" id="newDownloadURL" name="downloadURL" placeholder="https://example.com/app.ipa" style="display: none; width: 100%;">
-                            </div>
-                            <div class="form-group">
-                                <label>Min iOS Version:</label>
-                                <input type="text" id="newMinOSVersion" name="minOSVersion" placeholder="14.0">
-                            </div>
-                            <button type="button" class="btn" id="addVersionBtn" onclick="addNewVersion(this)">Add Version</button>
-                        </div>
-                    </div>
-                    
-                    <div class="btn-group" style="margin-top: 20px;">
-                        <button type="submit" class="btn">Save Changes</button>
-                        <button type="button" class="btn btn-danger" onclick="closeEditModal()">Cancel</button>
-                    </div>
-                </form>
-            </div>
-        </div>
-
-        <!-- Login Modal -->
-        <div id="loginModal" class="modal">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h2>Sign in</h2>
-                </div>
-                <form id="loginForm">
-                    <div class="form-group">
-                        <label for="loginPassword">Admin password</label>
-                        <input type="password" id="loginPassword" name="password" autocomplete="current-password" required>
-                    </div>
-                    <div id="loginError" style="display:none; color:var(--danger);"></div>
-                    <button type="submit" class="btn">Sign in</button>
-                </form>
             </div>
         </div>
 
@@ -970,6 +891,113 @@
             </p>
             <button type="button" class="btn" id="diagnosticsRefreshBtn" onclick="runDiagnostics()">Refresh</button>
             <div id="diagnosticsResults" style="margin-top: 20px;"></div>
+        </div>
+        </main>
+
+        <!-- Edit App Modal -->
+        <div id="editAppModal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Edit App</h2>
+                    <button class="close" onclick="closeEditModal()">&times;</button>
+                </div>
+                <form id="editAppForm">
+                    <input type="hidden" id="editBundleId" name="bundleIdentifier">
+                    <div class="form-group" style="text-align: center; margin-bottom: 20px;">
+                        <img id="editAppIcon" src="" alt="App Icon" class="app-icon" style="margin: 0 auto; display: block;">
+                    </div>
+                    <div class="form-group">
+                        <label>App Name:</label>
+                        <input type="text" id="editName" name="name" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Developer Name:</label>
+                        <input type="text" id="editDeveloperName" name="developerName" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Subtitle:</label>
+                        <input type="text" id="editSubtitle" name="subtitle">
+                    </div>
+                    <div class="form-group">
+                        <label>Description:</label>
+                        <textarea id="editDescription" name="localizedDescription" rows="4"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>Screenshot URLs (one per line):</label>
+                        <textarea id="editScreenshotURLs" name="screenshotURLs" rows="4" placeholder="https://example.com/screenshot1.png"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>Tint Color:</label>
+                        <input type="text" id="editTintColor" name="tintColor" placeholder="#007AFF">
+                    </div>
+                    <div class="form-group">
+                        <label>Icon:</label>
+                        <div style="margin-bottom: 10px;">
+                            <input type="file" id="editIconFile" name="iconFile" accept=".png,.jpg,.jpeg,.webp,.gif" style="margin-bottom: 10px; width: 100%;">
+                            <div style="display: flex; align-items: center; gap: 8px; margin-top: 10px;">
+                                <input type="checkbox" id="editDownloadIconFromUrl" name="downloadIconFromUrl" value="true" onchange="toggleEditIconMethod()" style="width: auto; margin: 0; cursor: pointer;">
+                                <label for="editDownloadIconFromUrl" style="margin: 0; font-weight: normal; cursor: pointer; user-select: none;">Use URL instead</label>
+                            </div>
+                        </div>
+                        <input type="url" id="editIconURL" name="iconURL" placeholder="https://example.com/icon.png" style="display: none; width: 100%;">
+                    </div>
+                    <div class="form-group">
+                        <label>Bundle Identifier (read-only):</label>
+                        <input type="text" id="editBundleIdentifier" readonly style="background: var(--surface-2);">
+                    </div>
+
+                    <div class="version-list">
+                        <h3 style="margin-bottom: 15px;">Versions</h3>
+                        <div id="versionsList"></div>
+
+                        <div class="add-version-section">
+                            <h4 style="margin-bottom: 15px; color: var(--accent);">Add New Version</h4>
+                            <div class="form-group">
+                                <label>Version:</label>
+                                <input type="text" id="newVersion" name="version" placeholder="1.0.0">
+                            </div>
+                            <div class="form-group">
+                                <label>IPA File:</label>
+                                <div style="margin-bottom: 10px;">
+                                    <input type="file" id="newIpaFile" name="ipaFile" accept=".ipa" style="margin-bottom: 10px; width: 100%;">
+                                    <div style="display: flex; align-items: center; gap: 8px; margin-top: 10px;">
+                                        <input type="checkbox" id="newDownloadFromUrl" name="downloadFromUrl" value="true" onchange="toggleNewVersionDownloadMethod()" style="width: auto; margin: 0; cursor: pointer;">
+                                        <label for="newDownloadFromUrl" style="margin: 0; font-weight: normal; cursor: pointer; user-select: none;">Use URL instead</label>
+                                    </div>
+                                </div>
+                                <input type="url" id="newDownloadURL" name="downloadURL" placeholder="https://example.com/app.ipa" style="display: none; width: 100%;">
+                            </div>
+                            <div class="form-group">
+                                <label>Min iOS Version:</label>
+                                <input type="text" id="newMinOSVersion" name="minOSVersion" placeholder="14.0">
+                            </div>
+                            <button type="button" class="btn" id="addVersionBtn" onclick="addNewVersion(this)">Add Version</button>
+                        </div>
+                    </div>
+
+                    <div class="btn-group" style="margin-top: 20px;">
+                        <button type="submit" class="btn">Save Changes</button>
+                        <button type="button" class="btn btn-danger" onclick="closeEditModal()">Cancel</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Login Modal -->
+        <div id="loginModal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Sign in</h2>
+                </div>
+                <form id="loginForm">
+                    <div class="form-group">
+                        <label for="loginPassword">Admin password</label>
+                        <input type="password" id="loginPassword" name="password" autocomplete="current-password" required>
+                    </div>
+                    <div id="loginError" style="display:none; color:var(--danger);"></div>
+                    <button type="submit" class="btn">Sign in</button>
+                </form>
+            </div>
         </div>
     </div>
 
