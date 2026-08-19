@@ -7,7 +7,7 @@
     <link rel="alternate icon" href="/static/favicon.png">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="manifest" href="/static/manifest.webmanifest">
-    <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#f8f8f6" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="mobile-web-app-capable" content="yes">
@@ -19,92 +19,78 @@
         :root {
             color-scheme: light dark;               /* native form controls, scrollbars adapt */
 
-            /* backgrounds */
-            --canvas: #f2f2f7;                       /* systemGroupedBackground (light) */
-            --surface: #ffffff;                      /* secondarySystemGroupedBackground — cards */
-            --surface-2: #f2f2f7;                    /* inset fills */
-            --fill: rgba(120,120,128,0.12);          /* systemFill — subtle control fill */
-            --fill-hover: rgba(120,120,128,0.20);
+            /* backgrounds — Omarchy (light / paper) */
+            --canvas: #f8f8f6;
+            --surface: #ffffff;
+            --surface-2: #f1f1ef;
+            --fill: rgba(25,25,27,0.05);
+            --fill-hover: rgba(25,25,27,0.09);
 
-            /* text (Apple label ramp) */
-            --label: #1c1c1e;
-            --label-secondary: rgba(60,60,67,0.72);
-            --label-tertiary: rgba(60,60,67,0.52);
+            /* text */
+            --label: #19191b;
+            --label-secondary: #65656a;
+            --label-tertiary: #6d6d74;
 
             /* hairlines */
-            --separator: rgba(60,60,67,0.29);        /* opaque-ish separator */
-            --border: rgba(60,60,67,0.18);           /* input/card hairline */
+            --separator: #cdcdca;
+            --border: #dededb;
 
-            /* accents (system colors, light) */
-            --accent: #007aff;                       /* systemBlue */
-            --accent-press: #0062cc;
-            --accent-tint: rgba(0,122,255,0.12);     /* tinted-button fill */
-            --danger: #ff3b30;                       /* systemRed */
-            --danger-press: #d70015;
-            --danger-tint: rgba(255,59,48,0.12);
-            --success: #34c759;                      /* systemGreen */
-            --warning: #ff9500;                      /* systemOrange */
+            /* accent (Omarchy orange) */
+            --accent: #c6371c;
+            --accent-contrast: #ffffff;
+            --accent-press: #a82c15;
+            --accent-tint: rgba(198,55,28,0.10);
+            --danger: #c0392b;                       /* distinct red — not the accent */
+            --danger-press: #a5311f;
+            --danger-tint: rgba(192,57,43,0.10);
+            --success: #65751e;
+            --warning: #9a6700;
 
-            /* shape & depth (Liquid Glass: translucent, blurred, rounder) */
-            --radius-lg: 18px;                       /* cards, modals, tab panels */
-            --radius-md: 12px;                       /* buttons, inputs */
-            --radius-sm: 8px;
-            --radius-xl: 26px;                       /* floating tab bar / large cards */
-            --shadow-card: 0 0 0 0.5px var(--border), 0 1px 2px rgba(0,0,0,0.05);
-            --shadow-modal: 0 12px 40px rgba(0,0,0,0.18);
-            --focus-ring: 0 0 0 3px rgba(0,122,255,0.25);
-            --mono: 'SF Mono','Monaco','Inconsolata','Roboto Mono',monospace;
-
-            /* liquid glass */
-            --glass-bg: rgba(255,255,255,0.65);
-            --glass-bg-strong: rgba(255,255,255,0.80);   /* bars/modals where legibility matters most */
-            --glass-blur: saturate(180%) blur(20px);
-            --glass-highlight: rgba(255,255,255,0.55);    /* top/edge specular border */
-            --glass-border: rgba(255,255,255,0.35);
+            /* shape & depth — flat, square, line-based (no glass) */
+            --radius-lg: 3px;
+            --radius-md: 3px;
+            --radius-sm: 2px;
+            --shadow-card: 0 0 0 1px var(--border);
+            --shadow-modal: 0 0 0 1px var(--separator);
+            --focus-ring: 0 0 0 3px rgba(198,55,28,0.25);
+            --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
+            --sans: -apple-system, BlinkMacSystemFont, Inter, "Segoe UI", Roboto, sans-serif;
         }
 
         @media (prefers-color-scheme: dark) {
             :root {
-                --canvas: #000000;                   /* systemGroupedBackground (dark) */
-                --surface: #1c1c1e;                  /* secondarySystemGroupedBackground */
-                --surface-2: #2c2c2e;
-                --fill: rgba(120,120,128,0.24);
-                --fill-hover: rgba(120,120,128,0.32);
+                /* backgrounds — Omarchy (dark / terminal) */
+                --canvas: #000000;
+                --surface: #0b0b0d;
+                --surface-2: #101012;
+                --fill: rgba(215,215,217,0.06);
+                --fill-hover: rgba(215,215,217,0.10);
 
-                --label: #ffffff;
-                --label-secondary: rgba(235,235,245,0.70);
-                --label-tertiary: rgba(235,235,245,0.50);
+                --label: #d7d7d9;
+                --label-secondary: #aaaab0;
+                --label-tertiary: #7d7d84;
 
-                --separator: rgba(84,84,88,0.65);
-                --border: rgba(84,84,88,0.50);
+                --separator: #28282c;
+                --border: #1c1c20;
 
-                --accent: #0a84ff;                   /* systemBlue (dark) */
-                --accent-press: #409cff;
-                --accent-tint: rgba(10,132,255,0.24);
-                --danger: #ff453a;                   /* systemRed (dark) */
-                --danger-press: #ff6961;
-                --danger-tint: rgba(255,69,58,0.24);
-                --success: #30d158;
-                --warning: #ff9f0a;
+                --accent: #ff5a36;
+                --accent-contrast: #111111;
+                --accent-press: #e64a2b;
+                --accent-tint: rgba(255,90,54,0.14);
+                --danger: #e5484d;
+                --danger-press: #cf3f44;
+                --danger-tint: rgba(229,72,77,0.14);
+                --success: #b4c96f;
+                --warning: #ffb000;
 
-                --shadow-card: 0 0 0 0.5px var(--border), 0 1px 2px rgba(0,0,0,0.30);
-                --shadow-modal: 0 12px 40px rgba(0,0,0,0.60);
-                --focus-ring: 0 0 0 3px rgba(10,132,255,0.35);
-
-                --glass-bg: rgba(28,28,30,0.55);
-                --glass-bg-strong: rgba(28,28,30,0.72);
-                --glass-blur: saturate(180%) blur(22px);
-                --glass-highlight: rgba(255,255,255,0.14);
-                --glass-border: rgba(255,255,255,0.10);
+                --shadow-card: 0 0 0 1px var(--border);
+                --shadow-modal: 0 0 0 1px var(--separator);
+                --focus-ring: 0 0 0 3px rgba(255,90,54,0.35);
             }
         }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-            background:
-              radial-gradient(1200px 800px at 15% -10%, rgba(0,122,255,0.10), transparent 60%),
-              radial-gradient(1000px 700px at 110% 10%, rgba(175,82,222,0.10), transparent 55%),
-              var(--canvas);
-            background-attachment: fixed;
+            font-family: var(--sans);
+            background: var(--canvas);
             min-height: 100vh;
             padding: 20px;
         }
@@ -116,6 +102,9 @@
             display: flex;
             flex-direction: column;
             box-shadow: none;
+        }
+        h1, h2, h3 {
+            font-family: var(--mono);
         }
         h1 {
             color: var(--label);
@@ -132,17 +121,15 @@
         .topbar {
             display: flex; align-items: center; justify-content: space-between;
             padding: 14px 20px;
-            border-bottom: 1px solid var(--glass-border);
+            border-bottom: 1px solid var(--separator);
             position: sticky; top: 0; z-index: 5;
-            background: var(--glass-bg-strong);
-            -webkit-backdrop-filter: var(--glass-blur);
-            backdrop-filter: var(--glass-blur);
-            box-shadow: inset 0 1px 0 var(--glass-highlight);
+            background: var(--surface);
         }
         .brand {
             display: flex; align-items: center; gap: 8px;
             font-weight: 700; font-size: 1.0em; color: var(--label);
             letter-spacing: -0.01em;
+            font-family: var(--mono);
         }
         .btn-link {
             border: none; background: none; cursor: pointer;
@@ -153,19 +140,17 @@
         }
         .workspace {
             flex: 1 1 auto;
-            padding: 24px 20px calc(96px + env(safe-area-inset-bottom, 0px));  /* clear the floating bar */
+            padding: 24px 20px calc(64px + env(safe-area-inset-bottom, 0px));  /* clear the flat bottom bar */
             overflow-x: hidden;
             min-width: 0;                  /* allow inner content (tables/cards) to shrink */
         }
         .tabbar {
-            position: fixed; left: 12px; right: 12px; bottom: calc(10px + env(safe-area-inset-bottom, 0px)); z-index: 20;
+            position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
             display: flex;
-            border-radius: var(--radius-xl);
-            background: var(--glass-bg-strong);
-            -webkit-backdrop-filter: var(--glass-blur);
-            backdrop-filter: var(--glass-blur);
-            border: 1px solid var(--glass-border);
-            box-shadow: 0 8px 30px rgba(0,0,0,0.18), inset 0 1px 0 var(--glass-highlight);
+            border-radius: 0;
+            background: var(--surface);
+            border-top: 1px solid var(--separator);
+            padding-bottom: env(safe-area-inset-bottom, 0);
         }
         .tab {
             flex: 1 1 0; min-width: 0;
@@ -174,10 +159,12 @@
             color: var(--label-secondary);
             text-align: center;
             transition: color .15s;
+            font-family: var(--mono);
         }
         .tab.active {
             color: var(--accent);
             font-weight: 600;
+            box-shadow: inset 0 2px 0 var(--accent);
         }
         .tab:hover {
             color: var(--label);
@@ -201,11 +188,9 @@
         input, textarea, select {
             width: 100%;
             padding: 12px;
-            background: var(--glass-bg);
-            -webkit-backdrop-filter: var(--glass-blur);
-            backdrop-filter: var(--glass-blur);
+            background: var(--surface-2);
             color: var(--label);
-            border: 1px solid var(--glass-border);
+            border: 1px solid var(--border);
             border-radius: var(--radius-md);
             font-size: 14px;
             transition: border-color 0.2s;
@@ -228,7 +213,7 @@
             appearance: none;
             -webkit-appearance: none;
             -moz-appearance: none;
-            background-color: var(--glass-bg);
+            background-color: var(--surface-2);
             background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='none' stroke='%238e8e93' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' d='M1 1.5 6 6.5 11 1.5'/%3E%3C/svg%3E");
             background-repeat: no-repeat;
             background-position: calc(100% - 14px) center;
@@ -236,7 +221,7 @@
         }
         .btn {
             background: var(--accent);
-            color: #fff;
+            color: var(--accent-contrast);
             padding: 14px 28px;
             border: none;
             border-radius: var(--radius-md);
@@ -253,6 +238,7 @@
         }
         .btn-danger {
             background: var(--danger);
+            color: #fff;
         }
         .btn-danger:hover {
             background: var(--danger-press);
@@ -263,14 +249,11 @@
             margin-top: 20px;
         }
         .app-card {
-            border: 1px solid var(--glass-border);
+            border: 1px solid var(--border);
             border-radius: var(--radius-lg);
             padding: 20px;
             transition: border-color 0.2s;
-            background: var(--glass-bg);
-            -webkit-backdrop-filter: var(--glass-blur);
-            backdrop-filter: var(--glass-blur);
-            box-shadow: 0 4px 20px rgba(0,0,0,0.06), inset 0 1px 0 var(--glass-highlight);
+            background: var(--surface);
         }
         .app-card:hover {
             border-color: var(--separator);
@@ -289,6 +272,7 @@
             color: var(--label);
             margin-bottom: 5px;
             font-size: 1.2em;
+            font-family: var(--mono);
         }
         .app-info p {
             color: var(--label-secondary);
@@ -302,7 +286,7 @@
         .qr-container img {
             max-width: 300px;
             border: 1px solid var(--border);
-            border-radius: 12px;
+            border-radius: var(--radius-sm);
             padding: 10px;
             background: #fff;
             margin: 0 auto 20px;
@@ -323,9 +307,9 @@
             margin-bottom: 20px;
         }
         .alert-success {
-            background: rgba(52,199,89,0.14);
+            background: color-mix(in srgb, var(--success) 14%, transparent);
             color: var(--label);
-            border: 1px solid rgba(52,199,89,0.30);
+            border: 1px solid var(--success);
         }
         .alert-error {
             background: var(--danger-tint);
@@ -333,14 +317,11 @@
             border: 1px solid var(--danger);
         }
         .parser-options {
-            background: var(--glass-bg);
-            -webkit-backdrop-filter: var(--glass-blur);
-            backdrop-filter: var(--glass-blur);
+            background: var(--surface);
             padding: 20px;
             border-radius: var(--radius-lg);
             margin-top: 10px;
-            border: 1px solid var(--glass-border);
-            box-shadow: inset 0 1px 0 var(--glass-highlight);
+            border: 1px solid var(--border);
         }
         .version-info {
             font-size: 0.85em;
@@ -349,13 +330,11 @@
             line-height: 1.4;
         }
         .info-box {
-            background: var(--glass-bg);
-            -webkit-backdrop-filter: var(--glass-blur);
-            backdrop-filter: var(--glass-blur);
+            background: var(--surface);
             padding: 15px;
             border-radius: var(--radius-lg);
+            border: 1px solid var(--border);
             border-left: 3px solid var(--accent);
-            box-shadow: inset 0 1px 0 var(--glass-highlight);
             margin: 20px 0;
         }
         .btn-secondary {
@@ -384,10 +363,8 @@
             animation: fadeIn 0.3s;
         }
         .modal-content {
-            background: var(--glass-bg-strong);
-            -webkit-backdrop-filter: var(--glass-blur);
-            backdrop-filter: var(--glass-blur);
-            border: 1px solid var(--glass-border);
+            background: var(--surface);
+            border: 1px solid var(--border);
             margin: 5% auto;
             padding: 30px;
             border-radius: var(--radius-lg);
@@ -395,7 +372,7 @@
             max-width: 600px;
             max-height: 90vh;
             overflow-y: auto;
-            box-shadow: var(--shadow-modal), inset 0 1px 0 var(--glass-highlight);
+            box-shadow: var(--shadow-modal);
         }
         .modal-header {
             display: flex;
@@ -426,14 +403,12 @@
             border-top: 1px solid var(--separator);
         }
         .version-item {
-            background: var(--glass-bg);
-            -webkit-backdrop-filter: var(--glass-blur);
-            backdrop-filter: var(--glass-blur);
+            background: var(--surface);
             padding: 15px;
             border-radius: var(--radius-md);
             margin-bottom: 10px;
+            border: 1px solid var(--border);
             border-left: 3px solid var(--accent);
-            box-shadow: inset 0 1px 0 var(--glass-highlight);
         }
         .version-item-header {
             display: flex;
@@ -460,7 +435,7 @@
         .app-icon {
             width: 60px;
             height: 60px;
-            border-radius: 12px;
+            border-radius: var(--radius-sm);
             object-fit: cover;
             margin-right: 15px;
             border: 1px solid var(--border);
@@ -505,12 +480,11 @@
             gap: 10px;
         }
         .toast {
-            background: var(--glass-bg-strong);
-            -webkit-backdrop-filter: var(--glass-blur);
-            backdrop-filter: var(--glass-blur);
+            background: var(--surface);
+            border: 1px solid var(--border);
             padding: 16px 20px;
             border-radius: var(--radius-md);
-            box-shadow: 0 4px 20px rgba(0,0,0,0.06), inset 0 1px 0 var(--glass-highlight);
+            box-shadow: var(--shadow-card);
             display: flex;
             align-items: center;
             gap: 12px;
@@ -602,7 +576,7 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            border-radius: 12px;
+            border-radius: var(--radius-sm);
             z-index: 10;
         }
         .skeleton {
@@ -618,7 +592,7 @@
         .skeleton-icon {
             width: 60px;
             height: 60px;
-            border-radius: 12px;
+            border-radius: var(--radius-sm);
         }
         @keyframes fadeIn {
             from { opacity: 0; transform: translateY(10px); }
@@ -655,7 +629,7 @@
     <div class="container">
         <header class="topbar">
             <div class="brand">
-                <img src="/static/icon.svg" alt="" width="24" height="24" style="border-radius:6px;">
+                <img src="/static/icon.svg" alt="" width="24" height="24" style="border-radius:2px;">
                 <span>Source Manager</span>
             </div>
             <button class="btn-link signout" onclick="logout()">Sign out</button>
@@ -1662,7 +1636,7 @@
                 const firstLetter = (app.name || 'App').charAt(0).toUpperCase();
                 const iconUrl = app.iconURL || '';
                 // Create SVG data URI as fallback
-                const svgFallback = `data:image/svg+xml,${encodeURIComponent(`<svg width="60" height="60" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="60" fill="#007aff"/><text x="50%" y="50%" font-family="Arial" font-size="24" fill="#ffffff" text-anchor="middle" dy=".3em">${firstLetter}</text></svg>`)}`;
+                const svgFallback = `data:image/svg+xml,${encodeURIComponent(`<svg width="60" height="60" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="60" fill="#c6371c"/><text x="50%" y="50%" font-family="Arial" font-size="24" fill="#ffffff" text-anchor="middle" dy=".3em">${firstLetter}</text></svg>`)}`;
                 return `
                     <div class="app-card">
                         <div class="app-header">
@@ -1786,7 +1760,7 @@
                 // Set app icon
                 const iconImg = document.getElementById('editAppIcon');
                 const firstLetter = (app.name || 'App').charAt(0).toUpperCase();
-                const svgFallback = `data:image/svg+xml,${encodeURIComponent(`<svg width="60" height="60" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="60" fill="#007aff"/><text x="50%" y="50%" font-family="Arial" font-size="24" fill="#ffffff" text-anchor="middle" dy=".3em">${firstLetter}</text></svg>`)}`;
+                const svgFallback = `data:image/svg+xml,${encodeURIComponent(`<svg width="60" height="60" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="60" fill="#c6371c"/><text x="50%" y="50%" font-family="Arial" font-size="24" fill="#ffffff" text-anchor="middle" dy=".3em">${firstLetter}</text></svg>`)}`;
                 const iconUrl = app.iconURL || svgFallback;
                 iconImg.src = iconUrl;
                 iconImg.onerror = function() {
@@ -1817,7 +1791,7 @@
                 <div class="version-item" id="${versionId}">
                     <div class="version-item-header">
                         <strong>Version ${escapeHtml(version.version)}</strong>
-                        ${index === 0 ? '<span style="background: var(--accent); color: white; padding: 4px 8px; border-radius: 4px; font-size: 0.8em;">Latest</span>' : ''}
+                        ${index === 0 ? '<span style="background: var(--accent); color: var(--accent-contrast); padding: 4px 8px; border-radius: 2px; font-size: 0.8em;">Latest</span>' : ''}
                     </div>
                     <div class="version-item-details">
                         <div><strong>Date:</strong> ${version.date ? new Date(version.date).toLocaleString() : 'N/A'}</div>
