@@ -45,14 +45,22 @@
             --success: #34c759;                      /* systemGreen */
             --warning: #ff9500;                      /* systemOrange */
 
-            /* shape & depth (iOS is flat with tight radii + faint shadow) */
-            --radius-lg: 12px;                       /* cards, modals, tab panels */
-            --radius-md: 10px;                       /* buttons, inputs */
+            /* shape & depth (Liquid Glass: translucent, blurred, rounder) */
+            --radius-lg: 18px;                       /* cards, modals, tab panels */
+            --radius-md: 12px;                       /* buttons, inputs */
             --radius-sm: 8px;
+            --radius-xl: 26px;                       /* floating tab bar / large cards */
             --shadow-card: 0 0 0 0.5px var(--border), 0 1px 2px rgba(0,0,0,0.05);
             --shadow-modal: 0 12px 40px rgba(0,0,0,0.18);
             --focus-ring: 0 0 0 3px rgba(0,122,255,0.25);
             --mono: 'SF Mono','Monaco','Inconsolata','Roboto Mono',monospace;
+
+            /* liquid glass */
+            --glass-bg: rgba(255,255,255,0.65);
+            --glass-bg-strong: rgba(255,255,255,0.80);   /* bars/modals where legibility matters most */
+            --glass-blur: saturate(180%) blur(20px);
+            --glass-highlight: rgba(255,255,255,0.55);    /* top/edge specular border */
+            --glass-border: rgba(255,255,255,0.35);
         }
 
         @media (prefers-color-scheme: dark) {
@@ -82,11 +90,21 @@
                 --shadow-card: 0 0 0 0.5px var(--border), 0 1px 2px rgba(0,0,0,0.30);
                 --shadow-modal: 0 12px 40px rgba(0,0,0,0.60);
                 --focus-ring: 0 0 0 3px rgba(10,132,255,0.35);
+
+                --glass-bg: rgba(28,28,30,0.55);
+                --glass-bg-strong: rgba(28,28,30,0.72);
+                --glass-blur: saturate(180%) blur(22px);
+                --glass-highlight: rgba(255,255,255,0.14);
+                --glass-border: rgba(255,255,255,0.10);
             }
         }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-            background: var(--canvas);
+            background:
+              radial-gradient(1200px 800px at 15% -10%, rgba(0,122,255,0.10), transparent 60%),
+              radial-gradient(1000px 700px at 110% 10%, rgba(175,82,222,0.10), transparent 55%),
+              var(--canvas);
+            background-attachment: fixed;
             min-height: 100vh;
             padding: 20px;
         }
@@ -94,10 +112,10 @@
             max-width: 900px;
             margin: 0 auto;
             min-height: 100vh;
-            background: var(--surface);
+            background: transparent;
             display: flex;
             flex-direction: column;
-            box-shadow: var(--shadow-card);
+            box-shadow: none;
         }
         h1 {
             color: var(--label);
@@ -114,8 +132,12 @@
         .topbar {
             display: flex; align-items: center; justify-content: space-between;
             padding: 14px 20px;
-            border-bottom: 1px solid var(--separator);
-            position: sticky; top: 0; background: var(--surface); z-index: 5;
+            border-bottom: 1px solid var(--glass-border);
+            position: sticky; top: 0; z-index: 5;
+            background: var(--glass-bg-strong);
+            -webkit-backdrop-filter: var(--glass-blur);
+            backdrop-filter: var(--glass-blur);
+            box-shadow: inset 0 1px 0 var(--glass-highlight);
         }
         .brand {
             display: flex; align-items: center; gap: 8px;
@@ -131,16 +153,19 @@
         }
         .workspace {
             flex: 1 1 auto;
-            padding: 24px 20px calc(72px + env(safe-area-inset-bottom, 0px));  /* clear the bar */
+            padding: 24px 20px calc(96px + env(safe-area-inset-bottom, 0px));  /* clear the floating bar */
             overflow-x: hidden;
             min-width: 0;                  /* allow inner content (tables/cards) to shrink */
         }
         .tabbar {
-            position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+            position: fixed; left: 12px; right: 12px; bottom: calc(10px + env(safe-area-inset-bottom, 0px)); z-index: 20;
             display: flex;
-            background: var(--surface);
-            border-top: 1px solid var(--separator);
-            padding-bottom: env(safe-area-inset-bottom, 0px);   /* iPhone home indicator */
+            border-radius: var(--radius-xl);
+            background: var(--glass-bg-strong);
+            -webkit-backdrop-filter: var(--glass-blur);
+            backdrop-filter: var(--glass-blur);
+            border: 1px solid var(--glass-border);
+            box-shadow: 0 8px 30px rgba(0,0,0,0.18), inset 0 1px 0 var(--glass-highlight);
         }
         .tab {
             flex: 1 1 0; min-width: 0;
@@ -176,9 +201,11 @@
         input, textarea, select {
             width: 100%;
             padding: 12px;
-            background: var(--surface);
+            background: var(--glass-bg);
+            -webkit-backdrop-filter: var(--glass-blur);
+            backdrop-filter: var(--glass-blur);
             color: var(--label);
-            border: 1px solid var(--border);
+            border: 1px solid var(--glass-border);
             border-radius: var(--radius-md);
             font-size: 14px;
             transition: border-color 0.2s;
@@ -201,10 +228,10 @@
             appearance: none;
             -webkit-appearance: none;
             -moz-appearance: none;
-            background-color: var(--surface);
+            background-color: var(--glass-bg);
             background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='none' stroke='%238e8e93' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' d='M1 1.5 6 6.5 11 1.5'/%3E%3C/svg%3E");
             background-repeat: no-repeat;
-            background-position: right 14px center;
+            background-position: calc(100% - 14px) center;
             padding-right: 38px;      /* room for the chevron */
         }
         .btn {
@@ -236,12 +263,14 @@
             margin-top: 20px;
         }
         .app-card {
-            border: 1px solid var(--border);
+            border: 1px solid var(--glass-border);
             border-radius: var(--radius-lg);
             padding: 20px;
             transition: border-color 0.2s;
-            background: var(--surface);
-            box-shadow: var(--shadow-card);
+            background: var(--glass-bg);
+            -webkit-backdrop-filter: var(--glass-blur);
+            backdrop-filter: var(--glass-blur);
+            box-shadow: 0 4px 20px rgba(0,0,0,0.06), inset 0 1px 0 var(--glass-highlight);
         }
         .app-card:hover {
             border-color: var(--separator);
@@ -304,11 +333,14 @@
             border: 1px solid var(--danger);
         }
         .parser-options {
-            background: var(--surface-2);
+            background: var(--glass-bg);
+            -webkit-backdrop-filter: var(--glass-blur);
+            backdrop-filter: var(--glass-blur);
             padding: 20px;
-            border-radius: var(--radius-md);
+            border-radius: var(--radius-lg);
             margin-top: 10px;
-            border: 1px solid var(--border);
+            border: 1px solid var(--glass-border);
+            box-shadow: inset 0 1px 0 var(--glass-highlight);
         }
         .version-info {
             font-size: 0.85em;
@@ -317,10 +349,13 @@
             line-height: 1.4;
         }
         .info-box {
-            background: var(--accent-tint);
+            background: var(--glass-bg);
+            -webkit-backdrop-filter: var(--glass-blur);
+            backdrop-filter: var(--glass-blur);
             padding: 15px;
-            border-radius: var(--radius-md);
+            border-radius: var(--radius-lg);
             border-left: 3px solid var(--accent);
+            box-shadow: inset 0 1px 0 var(--glass-highlight);
             margin: 20px 0;
         }
         .btn-secondary {
@@ -349,7 +384,10 @@
             animation: fadeIn 0.3s;
         }
         .modal-content {
-            background: var(--surface);
+            background: var(--glass-bg-strong);
+            -webkit-backdrop-filter: var(--glass-blur);
+            backdrop-filter: var(--glass-blur);
+            border: 1px solid var(--glass-border);
             margin: 5% auto;
             padding: 30px;
             border-radius: var(--radius-lg);
@@ -357,7 +395,7 @@
             max-width: 600px;
             max-height: 90vh;
             overflow-y: auto;
-            box-shadow: var(--shadow-modal);
+            box-shadow: var(--shadow-modal), inset 0 1px 0 var(--glass-highlight);
         }
         .modal-header {
             display: flex;
@@ -388,11 +426,14 @@
             border-top: 1px solid var(--separator);
         }
         .version-item {
-            background: var(--surface-2);
+            background: var(--glass-bg);
+            -webkit-backdrop-filter: var(--glass-blur);
+            backdrop-filter: var(--glass-blur);
             padding: 15px;
             border-radius: var(--radius-md);
             margin-bottom: 10px;
             border-left: 3px solid var(--accent);
+            box-shadow: inset 0 1px 0 var(--glass-highlight);
         }
         .version-item-header {
             display: flex;
@@ -464,10 +505,12 @@
             gap: 10px;
         }
         .toast {
-            background: var(--surface);
+            background: var(--glass-bg-strong);
+            -webkit-backdrop-filter: var(--glass-blur);
+            backdrop-filter: var(--glass-blur);
             padding: 16px 20px;
             border-radius: var(--radius-md);
-            box-shadow: var(--shadow-card);
+            box-shadow: 0 4px 20px rgba(0,0,0,0.06), inset 0 1px 0 var(--glass-highlight);
             display: flex;
             align-items: center;
             gap: 12px;
