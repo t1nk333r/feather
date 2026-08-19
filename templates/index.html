@@ -917,6 +917,16 @@
             <button type="button" class="btn" id="reconcileIconsBtn" onclick="runReconcileIcons(false)">Reconcile Icons (Dry Run)</button>
             <button type="button" class="btn" id="reconcileIconsApplyBtn" onclick="runReconcileIcons(true)" style="display: none;">Apply</button>
             <div id="reconcileIconsResults" style="margin-top: 20px;"></div>
+
+            <h2 style="margin-top: 40px; margin-bottom: 20px;">Storage Self-Test</h2>
+            <p style="color: var(--label-secondary); margin-bottom: 20px;">
+                Runs a write, read, and delete round-trip against the active storage
+                backend for icons and IPAs, using a dedicated probe object that is
+                always deleted afterward. A permission problem is reported as
+                PERMISSION DENIED (403), distinct from success or a missing object.
+            </p>
+            <button type="button" class="btn" id="storageSelftestBtn" onclick="runStorageSelftest()">Run Storage Self-Test</button>
+            <div id="storageSelftestResults" style="margin-top: 20px;"></div>
         </div>
 
         <div id="auto-import" class="tab-content">
@@ -1423,6 +1433,66 @@
                 console.error('Error reconciling icons:', error);
                 results.innerHTML = '<p style="color: var(--danger);">Reconcile failed. Please try again.</p>';
                 showToast('Error reconciling icons: ' + error.message, 'error');
+            } finally {
+                setButtonLoading(btn, false);
+            }
+        }
+
+        function renderSelftestCapability(label, status) {
+            const colors = { ok: 'var(--success)', forbidden: 'var(--warning)', error: 'var(--danger)' };
+            const labelsByStatus = { ok: 'OK', forbidden: 'PERMISSION DENIED (403)', error: 'ERROR' };
+            const color = colors[status] || 'var(--label-secondary)';
+            const text = labelsByStatus[status] || escapeHtml(String(status));
+            return `<li style="margin-bottom: 6px;"><strong>${escapeHtml(label)}:</strong> ` +
+                `<span style="color: ${color}; font-weight: 600;">${text}</span></li>`;
+        }
+
+        function renderSelftestReport(name, report) {
+            report = report || {};
+            let html = `<h3 style="margin-top: 20px;">${escapeHtml(name)} (${escapeHtml(report.backend || 'unknown')})</h3>`;
+            html += '<ul style="margin-top: 8px; list-style: none; padding-left: 0;">';
+            html += renderSelftestCapability('Write', report.write);
+            html += renderSelftestCapability('Read', report.read);
+            html += renderSelftestCapability('Delete', report.delete);
+            html += '</ul>';
+            if (report.detail) {
+                html += `<p style="color: var(--label-secondary); margin-top: 4px;">Detail: ${escapeHtml(report.detail)}</p>`;
+            }
+            return html;
+        }
+
+        async function runStorageSelftest() {
+            const btn = document.getElementById('storageSelftestBtn');
+            const results = document.getElementById('storageSelftestResults');
+            setButtonLoading(btn, true);
+            results.innerHTML = '<p style="color: var(--label-secondary);">Running self-test...</p>';
+            try {
+                const response = await fetch('/api/storage-selftest', { method: 'POST' });
+                const data = await response.json();
+
+                if (data.error) {
+                    results.innerHTML = `<p style="color: var(--danger);">Self-test failed: ${escapeHtml(data.error)}</p>`;
+                    showToast(data.error, 'error');
+                    return;
+                }
+
+                results.innerHTML = renderSelftestReport('Icons', data.icon) + renderSelftestReport('IPAs', data.ipa);
+
+                const capabilities = [
+                    data.icon && data.icon.write, data.icon && data.icon.read, data.icon && data.icon.delete,
+                    data.ipa && data.ipa.write, data.ipa && data.ipa.read, data.ipa && data.ipa.delete,
+                ];
+                if (capabilities.includes('forbidden')) {
+                    showToast('Storage self-test found a permission problem (403). See details below.', 'warning');
+                } else if (capabilities.includes('error')) {
+                    showToast('Storage self-test found an error. See details below.', 'warning');
+                } else {
+                    showToast('Storage self-test passed: write, read, and delete all OK.', 'success');
+                }
+            } catch (error) {
+                console.error('Error running storage self-test:', error);
+                results.innerHTML = '<p style="color: var(--danger);">Self-test failed. Please try again.</p>';
+                showToast('Error running storage self-test: ' + error.message, 'error');
             } finally {
                 setButtonLoading(btn, false);
             }

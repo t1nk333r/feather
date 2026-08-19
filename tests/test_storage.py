@@ -43,6 +43,10 @@ class FakeS3Client:
         self.calls = []
         self.fail_uploads = False
         self.head_size_override = None
+        # Plan 050: simulate the exact bug the storage self-test pins --
+        # a 403 on head_object (a read), independent of whether the
+        # object was actually written.
+        self.fail_head_forbidden = False
 
     def _upload_error(self):
         return ClientError(
@@ -52,6 +56,22 @@ class FakeS3Client:
             },
             "PutObject",
         )
+
+    def _forbidden_error(self, operation_name):
+        return ClientError(
+            {
+                "Error": {"Code": "AccessDenied", "Message": "simulated permission denial"},
+                "ResponseMetadata": {"HTTPStatusCode": 403},
+            },
+            operation_name,
+        )
+
+    def put_object(self, Bucket, Key, Body=None, **kwargs):
+        self.calls.append(("put_object", Bucket, Key))
+        if self.fail_uploads:
+            raise self._upload_error()
+        size = len(Body) if Body is not None else 0
+        self.objects[(Bucket, Key)] = size
 
     def upload_file(self, path, bucket, key, ExtraArgs=None):
         self.calls.append(("upload_file", path, bucket, key, ExtraArgs))
@@ -67,6 +87,8 @@ class FakeS3Client:
         self.objects[(bucket, key)] = len(data)
 
     def head_object(self, Bucket, Key):
+        if self.fail_head_forbidden:
+            raise self._forbidden_error("HeadObject")
         size = self.objects.get((Bucket, Key))
         if size is None:
             raise ClientError(
@@ -661,3 +683,79 @@ def test_reconcile_empty_folder_returns_note(garage_client):
     body = json.loads(resp.data)
     assert body["checked"] == 0
     assert "note" in body
+
+
+# ---------------------------------------------------------------------------
+# Plan 050: storage self-test -- a write/read/delete round-trip that must
+# distinguish a 403 (permission) from a real 404/missing object, which
+# exists()'s bool contract cannot do. This is the tool that would have
+# diagnosed the 2026-08-19 "403 read-denied" incident in one click.
+# ---------------------------------------------------------------------------
+
+
+def test_selftest_garage_all_ok(garage_client):
+    """A fully-cooperative fake client: write/read/delete all succeed for
+    both icon_storage and ipa_storage, and the probe key is not left
+    behind in the fake store afterward.
+    """
+    assert garage_client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+    resp = garage_client.post("/api/storage-selftest")
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+
+    for name in ("icon", "ipa"):
+        report = body[name]
+        assert report["backend"] == "garage"
+        assert report["write"] == "ok"
+        assert report["read"] == "ok"
+        assert report["delete"] == "ok"
+
+    # The probe object(s) must not be left behind for either storage class.
+    leftover = [key for key in garage_client.fake_client.objects if "__selftest__" in key[1]]
+    assert leftover == []
+
+
+def test_selftest_reports_403_read_as_forbidden(garage_client):
+    """The exact scenario that confused everyone: head_object (a read)
+    returns 403. write must still show "ok" (the put succeeded), while
+    read is reported "forbidden" -- not confused with a plain "error" or
+    with "ok".
+    """
+    garage_client.fake_client.fail_head_forbidden = True
+
+    assert garage_client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+    resp = garage_client.post("/api/storage-selftest")
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+
+    for name in ("icon", "ipa"):
+        report = body[name]
+        assert report["write"] == "ok"
+        assert report["read"] == "forbidden"
+        assert report["detail"]  # the S3 error code is surfaced
+
+
+def test_selftest_local_backend_ok(client):
+    """Local backend: all capabilities "ok", and no probe file left
+    behind under either ICON_FOLDER or IPA_FOLDER.
+    """
+    app_module = client.app_module
+    assert client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+    resp = client.post("/api/storage-selftest")
+    assert resp.status_code == 200
+    body = json.loads(resp.data)
+
+    for name in ("icon", "ipa"):
+        report = body[name]
+        assert report["backend"] == "local"
+        assert report["write"] == "ok"
+        assert report["read"] == "ok"
+        assert report["delete"] == "ok"
+
+    assert not os.path.exists(os.path.join(app_module.ICON_FOLDER, "__selftest__"))
+    assert not os.path.exists(os.path.join(app_module.IPA_FOLDER, "__selftest__"))
+
+
+def test_selftest_requires_auth(garage_client):
+    resp = garage_client.post("/api/storage-selftest")
+    assert resp.status_code == 401
