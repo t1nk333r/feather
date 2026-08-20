@@ -284,6 +284,62 @@ def test_import_existing_app_adds_version(authed_client):
     assert "1.0.0" in versions
 
 
+def test_import_existing_app_sets_icon_from_url(authed_client):
+    app_module = authed_client.app_module
+    release_ingest = app_module.release_ingest
+    ipa_bytes = build_ipa_bytes(bundle_id="com.example.app", version="2.0.0")
+    candidate = make_candidate(release_ingest, declared_size=len(ipa_bytes))
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(app_module.source_manager, "download_icon_from_url", lambda url, bundle_id: "png")
+    try:
+        status, events = post_and_collect(
+            authed_client,
+            {"provider": "github", "project": "owner/repo", "bundleIdentifier": "",
+             "createIfMissing": False, "iconURL": "https://example.test/logo.png"},
+            {"select_candidate": make_fake_select_candidate(candidate),
+             "stream_download": make_fake_stream_download(ipa_bytes)},
+        )
+    finally:
+        mp.undo()
+
+    assert status == 200
+    assert events[-1]["stage"] == "done", events
+    app_info = app_module.source_manager.get_app("com.example.app")
+    assert "2.0.0" in [v["version"] for v in app_info["versions"]]
+    assert app_info["iconURL"].endswith("/icons/com.example.app/icon.png")
+
+
+def test_import_existing_app_auto_extracts_icon_when_missing(authed_client, tmp_path):
+    app_module = authed_client.app_module
+    release_ingest = app_module.release_ingest
+    ipa_bytes = build_ipa_bytes(bundle_id="com.example.app", version="2.0.0")
+    candidate = make_candidate(release_ingest, declared_size=len(ipa_bytes))
+
+    # a real 1x1 PNG on disk for _extract_ipa_icon to return
+    png = tmp_path / "extracted.png"
+    png.write_bytes(bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
+        "890000000a49444154789c6360000002000154a24f9f0000000049454e44ae426082"))
+    mp = pytest.MonkeyPatch()
+    mp.setattr(app_module, "_extract_ipa_icon", lambda p: str(png))
+    try:
+        status, events = post_and_collect(
+            authed_client,
+            {"provider": "github", "project": "owner/repo", "bundleIdentifier": "",
+             "createIfMissing": False},
+            {"select_candidate": make_fake_select_candidate(candidate),
+             "stream_download": make_fake_stream_download(ipa_bytes)},
+        )
+    finally:
+        mp.undo()
+
+    assert status == 200
+    assert events[-1]["stage"] == "done", events
+    app_info = app_module.source_manager.get_app("com.example.app")
+    assert app_info["iconURL"].endswith("/icons/com.example.app/icon.png")
+
+
 def test_import_new_app_requires_create_flag(authed_client):
     app_module = authed_client.app_module
     release_ingest = app_module.release_ingest

@@ -2274,6 +2274,47 @@ def _extract_ipa_icon(ipa_path):
         return None
 
 
+def _apply_icon_to_existing(bundle_id, existing, ipa_path, *, provider, project,
+                            icon_url_in="", base_url=None):
+    """Best-effort: (re)apply an icon to an already-existing app during import.
+
+    An explicit ``icon_url_in`` (user-supplied) always wins. Otherwise auto-detect
+    ONLY when the current icon is missing/placeholder (never clobber a good icon on
+    a routine version import): IPA-extracted icon, else GitHub owner avatar.
+    Never raises -- a failed icon step must not fail the version import.
+    """
+    try:
+        if icon_url_in:
+            ok, msg = source_manager.update_app(
+                bundle_id, {"iconURL": icon_url_in},
+                download_icon_from_url=True, base_url=base_url)
+            if not ok:
+                logging.warning("import: icon URL update failed for %s: %s", bundle_id, msg)
+            return
+        cur_icon = (existing.get("iconURL") or "").strip()
+        if cur_icon and cur_icon != SOURCE_ARTWORK_URL:
+            return  # already has a real icon — leave it
+        extracted_icon = _extract_ipa_icon(ipa_path)
+        try:
+            if extracted_icon:
+                icon_fs = FileStorage(stream=open(extracted_icon, "rb"), filename="icon.png")
+                source_manager.update_app(bundle_id, {}, icon_file=icon_fs, base_url=base_url)
+            else:
+                owner = _repo_owner(project) if provider == "github" else ""
+                if owner:
+                    source_manager.update_app(
+                        bundle_id, {"iconURL": f"https://github.com/{owner}.png"},
+                        download_icon_from_url=True, base_url=base_url)
+        finally:
+            if extracted_icon:
+                try:
+                    os.remove(extracted_icon)
+                except OSError:
+                    pass
+    except Exception:
+        logging.exception("import: applying icon to existing app %s failed", bundle_id)
+
+
 # ---------------------------------------------------------------------------
 # Auto-import (Plan 048): an app-managed job store + in-process scheduler
 # that runs the same release-ingest engine as /api/import-release above, on
@@ -2440,6 +2481,12 @@ def _run_auto_import_job(job, base_url, session_req, tokens):
             if existing:
                 ok, message = source_manager.add_version(
                     bundle_id, {"version": version}, ipa_file=fs, base_url=base_url)
+                if ok:
+                    _apply_icon_to_existing(
+                        bundle_id, existing, tmp_path,
+                        provider=job_obj.provider, project=job_obj.project,
+                        icon_url_in="", base_url=base_url,
+                    )
             elif job_obj.create_if_missing:
                 new_name = job_obj.name or detected_name or bundle_id
                 new_developer = job_obj.developer_name or _repo_owner(job_obj.project) or "Unknown"
@@ -2671,6 +2718,12 @@ def import_release():
             fs = FileStorage(stream=open(tmp_path, "rb"), filename=f"{secure_filename(version)}.ipa")
             if existing:
                 ok, message = source_manager.add_version(bundle_id, {"version": version}, ipa_file=fs, base_url=base_url)
+                if ok:
+                    _apply_icon_to_existing(
+                        bundle_id, existing, tmp_path,
+                        provider=provider, project=project,
+                        icon_url_in=icon_url_in, base_url=base_url,
+                    )
             elif create_if_missing:
                 new_name = name_in or detected_name or bundle_id
                 new_developer = developer_in or _repo_owner(project) or "Unknown"
