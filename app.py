@@ -118,6 +118,10 @@ TELEGRAM_NOTIFY_EVENTS = set(
 # unchanged -- so merging this is a no-op until the flag is deliberately
 # flipped. See GarageIpaStorage below for the "refuse to start" validation.
 STORAGE_BACKEND = os.environ.get("STORAGE_BACKEND", "local")
+# Icons can use a different backend than IPAs (e.g. IPAs on Garage, icons on
+# local disk at /app/data/icons). Defaults to STORAGE_BACKEND for backward
+# compatibility, so existing single-backend deployments are unaffected.
+ICON_STORAGE_BACKEND = os.environ.get("ICON_STORAGE_BACKEND", STORAGE_BACKEND)
 GARAGE_S3_ENDPOINT = os.environ.get("GARAGE_S3_ENDPOINT")
 GARAGE_S3_REGION = os.environ.get("GARAGE_S3_REGION", "garage")
 GARAGE_S3_ACCESS_KEY_ID = os.environ.get("GARAGE_S3_ACCESS_KEY_ID")
@@ -1662,9 +1666,14 @@ source_manager = SourceManager(SOURCE_FILE)
 # "garage" -- see _require_garage_config for the refuse-to-start check.
 if STORAGE_BACKEND == "garage":
     ipa_storage = GarageIpaStorage()
-    icon_storage = GarageIconStorage()
 else:
     ipa_storage = LocalIpaStorage()
+
+# Icon storage backend (ICON_STORAGE_BACKEND, defaults to STORAGE_BACKEND).
+# Independent so icons can live on local disk while IPAs stay on Garage.
+if ICON_STORAGE_BACKEND == "garage":
+    icon_storage = GarageIconStorage()
+else:
     icon_storage = LocalIconStorage()
 
 
@@ -3118,7 +3127,7 @@ def _reconcile_icons(apply=False):
     """Scan ICON_FOLDER for on-disk icons and upload any missing from the
     active backend (plan 040). Mirrors scripts/migrate_icons_to_garage.py's
     logic in-app so an operator without a repo checkout can repair icons
-    that were never migrated after a STORAGE_BACKEND switch.
+    that were never migrated after an icon backend switch.
 
     Dry-run by default (apply=False): reports what would be uploaded without
     writing anything. apply=True uploads only icons missing from the active
@@ -3126,7 +3135,7 @@ def _reconcile_icons(apply=False):
 
     For the local backend this is a no-op: on-disk icons ARE what's served.
     """
-    if STORAGE_BACKEND != "garage":
+    if ICON_STORAGE_BACKEND != "garage":
         return {
             "backend": "local",
             "uploaded": 0,

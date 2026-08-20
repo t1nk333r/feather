@@ -809,3 +809,44 @@ def test_selftest_local_backend_ok(client):
 def test_selftest_requires_auth(garage_client):
     resp = garage_client.post("/api/storage-selftest")
     assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# ICON_STORAGE_BACKEND (plan 066) -- icons can use a different backend than
+# IPAs, e.g. IPAs kept on Garage while icons are pinned to local disk.
+# ---------------------------------------------------------------------------
+
+
+def test_icon_backend_defaults_to_storage_backend(tmp_path, monkeypatch):
+    """ICON_STORAGE_BACKEND unset falls back to STORAGE_BACKEND (here
+    "local"), so pre-plan-066 deployments are unaffected.
+    """
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ADMIN_PASSWORD", TEST_ADMIN_PASSWORD)
+    monkeypatch.setenv("SECRET_KEY", TEST_SECRET_KEY)
+    monkeypatch.setenv("STORAGE_BACKEND", "local")
+    monkeypatch.delenv("ICON_STORAGE_BACKEND", raising=False)
+
+    import app as app_module
+    importlib.reload(app_module)
+
+    assert isinstance(app_module.icon_storage, app_module.LocalIconStorage)
+    assert isinstance(app_module.ipa_storage, app_module.LocalIpaStorage)
+
+
+def test_split_icon_local_ipa_garage(tmp_path, monkeypatch):
+    """STORAGE_BACKEND=garage + ICON_STORAGE_BACKEND=local yields Garage
+    IPAs with local-disk icons -- the operator-requested split (plan 066).
+    """
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ADMIN_PASSWORD", TEST_ADMIN_PASSWORD)
+    monkeypatch.setenv("SECRET_KEY", TEST_SECRET_KEY)
+    for key, value in GARAGE_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("ICON_STORAGE_BACKEND", "local")
+
+    import app as app_module
+    importlib.reload(app_module)
+
+    assert isinstance(app_module.icon_storage, app_module.LocalIconStorage)
+    assert isinstance(app_module.ipa_storage, app_module.GarageIpaStorage)

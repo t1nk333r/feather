@@ -66,6 +66,10 @@ Summary:
   `DATA_DIR`, `PORT`, `SECRET_KEY`, `MAX_CONTENT_LENGTH`.
 - **Optional — S3 storage:** `STORAGE_BACKEND` plus `GARAGE_*`. Defaults to local disk
   storage for IPAs and owned app icons; unset means today's behavior is unchanged.
+  `ICON_STORAGE_BACKEND` (defaults to `STORAGE_BACKEND`) can pin icons to a different
+  backend than IPAs — e.g. `STORAGE_BACKEND=garage` + `ICON_STORAGE_BACKEND=local` keeps
+  IPAs on Garage while icons stay on local disk at `/app/data/icons` (already a mounted
+  volume in `compose.yml`).
 - **Optional — Telegram ingest and notifications:** `TELEGRAM_*`, `BOT_API_*`,
   `FEATHER_*`. Off unless explicitly configured.
 - **Optional — cron release importer:** `RELEASE_IMPORT_*`, `GITHUB_TOKEN`,
