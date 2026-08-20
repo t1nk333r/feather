@@ -148,7 +148,9 @@
             position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
             display: flex;
             border-radius: 0;
-            background: var(--surface);
+            background: color-mix(in srgb, var(--surface) 62%, transparent);
+            -webkit-backdrop-filter: saturate(180%) blur(20px);
+            backdrop-filter: saturate(180%) blur(20px);
             border-top: 1px solid var(--separator);
             padding-bottom: env(safe-area-inset-bottom, 0);
         }
