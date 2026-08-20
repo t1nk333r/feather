@@ -121,8 +121,10 @@
         .topbar {
             display: flex; align-items: center; justify-content: space-between;
             padding: 14px 20px;
-            border-bottom: 1px solid var(--separator);
-            position: sticky; top: 0; z-index: 5;
+            margin: 10px 10px 0;
+            border: 1px solid var(--separator);
+            border-radius: var(--radius-lg);
+            position: sticky; top: 10px; z-index: 5;
             background: var(--surface);
         }
         .brand {
@@ -137,6 +139,9 @@
         }
         .btn-link.signout {
             color: var(--danger);
+            border: 1px solid var(--danger);
+            border-radius: 999px;
+            padding: 6px 14px;
         }
         .workspace {
             flex: 1 1 auto;
@@ -152,6 +157,8 @@
             display: flex;
             gap: 4px;
             padding: 6px;
+            margin: 0 auto;
+            max-width: 460px;
             border-radius: 999px;
             background: color-mix(in srgb, var(--surface) 72%, transparent);
             -webkit-backdrop-filter: saturate(180%) blur(20px);
@@ -161,16 +168,14 @@
         }
         .tab {
             flex: 1 1 0; min-width: 0;
-            display: flex; flex-direction: column; align-items: center; gap: 3px;
+            display: flex; align-items: center; justify-content: center;
             border: none; background: none; cursor: pointer;
-            padding: 8px 4px 6px;
+            padding: 10px 0;
             border-radius: 999px;                 /* so the active pill is capsule-shaped */
             color: var(--label-secondary);
-            font-family: var(--sans);      /* SF Pro on iOS, not the terminal mono */
             transition: color .15s, background .15s;
         }
         .tab svg { width: 24px; height: 24px; display: block; }
-        .tab .tab-label { font-size: 10px; line-height: 1; letter-spacing: 0.01em; }
         .tab.active {
             color: var(--accent);
             background: var(--fill-hover);         /* subtle rounded highlight behind the active tab */
@@ -639,7 +644,7 @@
     <div class="container">
         <header class="topbar">
             <div class="brand">
-                <img src="/static/icon.svg" alt="" width="24" height="24" style="border-radius:2px;">
+                <img src="/static/icon.svg" alt="" width="24" height="24" style="border-radius:6px;">
                 <span>Source Manager</span>
             </div>
             <button class="btn-link signout" onclick="logout()">Sign out</button>
@@ -908,29 +913,23 @@
         </main>
 
         <nav class="tabbar">
-            <button class="tab active" onclick="switchTab('add-app', this)">
+            <button class="tab active" onclick="switchTab('add-app', this)" aria-label="Add" title="Add">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5.5v13M5.5 12h13"/></svg>
-                <span class="tab-label">Add</span>
             </button>
-            <button class="tab" onclick="switchTab('manage-apps', this)">
+            <button class="tab" onclick="switchTab('manage-apps', this)" aria-label="Apps" title="Apps">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1.6"/><rect x="13" y="4" width="7" height="7" rx="1.6"/><rect x="4" y="13" width="7" height="7" rx="1.6"/><rect x="13" y="13" width="7" height="7" rx="1.6"/></svg>
-                <span class="tab-label">Apps</span>
             </button>
-            <button class="tab" onclick="switchTab('qr-code', this)">
+            <button class="tab" onclick="switchTab('qr-code', this)" aria-label="QR" title="QR">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 14h2v2M20 14v2M14 20h2M18 18h2v2"/></svg>
-                <span class="tab-label">QR</span>
             </button>
-            <button class="tab" onclick="switchTab('source-info', this)">
+            <button class="tab" onclick="switchTab('source-info', this)" aria-label="Source" title="Source">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3.5h7l3.5 3.5V20.5H7z"/><path d="M14 3.5V7h3.5"/><path d="M9.5 12h5M9.5 15.5h5"/></svg>
-                <span class="tab-label">Source</span>
             </button>
-            <button class="tab" onclick="switchTab('import-repo', this)">
+            <button class="tab" onclick="switchTab('import-repo', this)" aria-label="Import" title="Import">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v10"/><path d="M8.5 10.5 12 14l3.5-3.5"/><path d="M5 15v3.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V15"/></svg>
-                <span class="tab-label">Import</span>
             </button>
-            <button class="tab" onclick="switchTab('health', this)">
+            <button class="tab" onclick="switchTab('health', this)" aria-label="Health" title="Health">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2-5 3.5 11L15 12h6"/></svg>
-                <span class="tab-label">Health</span>
             </button>
         </nav>
 
