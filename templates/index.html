@@ -156,17 +156,17 @@
         }
         .tab {
             flex: 1 1 0; min-width: 0;
+            display: flex; flex-direction: column; align-items: center; gap: 3px;
             border: none; background: none; cursor: pointer;
-            padding: 10px 4px; font-size: 12px;
+            padding: 8px 4px 6px;
             color: var(--label-secondary);
-            text-align: center;
+            font-family: var(--sans);      /* SF Pro on iOS, not the terminal mono */
             transition: color .15s;
-            font-family: var(--mono);
         }
+        .tab svg { width: 24px; height: 24px; display: block; }
+        .tab .tab-label { font-size: 10px; line-height: 1; letter-spacing: 0.01em; }
         .tab.active {
             color: var(--accent);
-            font-weight: 600;
-            box-shadow: inset 0 2px 0 var(--accent);
         }
         .tab:hover {
             color: var(--label);
@@ -901,12 +901,30 @@
         </main>
 
         <nav class="tabbar">
-            <button class="tab active" onclick="switchTab('add-app', this)">Add</button>
-            <button class="tab" onclick="switchTab('manage-apps', this)">Apps</button>
-            <button class="tab" onclick="switchTab('qr-code', this)">QR</button>
-            <button class="tab" onclick="switchTab('source-info', this)">Source</button>
-            <button class="tab" onclick="switchTab('import-repo', this)">Import</button>
-            <button class="tab" onclick="switchTab('health', this)">Health</button>
+            <button class="tab active" onclick="switchTab('add-app', this)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5.5v13M5.5 12h13"/></svg>
+                <span class="tab-label">Add</span>
+            </button>
+            <button class="tab" onclick="switchTab('manage-apps', this)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1.6"/><rect x="13" y="4" width="7" height="7" rx="1.6"/><rect x="4" y="13" width="7" height="7" rx="1.6"/><rect x="13" y="13" width="7" height="7" rx="1.6"/></svg>
+                <span class="tab-label">Apps</span>
+            </button>
+            <button class="tab" onclick="switchTab('qr-code', this)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 14h2v2M20 14v2M14 20h2M18 18h2v2"/></svg>
+                <span class="tab-label">QR</span>
+            </button>
+            <button class="tab" onclick="switchTab('source-info', this)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3.5h7l3.5 3.5V20.5H7z"/><path d="M14 3.5V7h3.5"/><path d="M9.5 12h5M9.5 15.5h5"/></svg>
+                <span class="tab-label">Source</span>
+            </button>
+            <button class="tab" onclick="switchTab('import-repo', this)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v10"/><path d="M8.5 10.5 12 14l3.5-3.5"/><path d="M5 15v3.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V15"/></svg>
+                <span class="tab-label">Import</span>
+            </button>
+            <button class="tab" onclick="switchTab('health', this)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2-5 3.5 11L15 12h6"/></svg>
+                <span class="tab-label">Health</span>
+            </button>
         </nav>
 
         <!-- Edit App Modal -->
