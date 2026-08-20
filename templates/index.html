@@ -47,9 +47,9 @@
             --warning: #9a6700;
 
             /* shape & depth — flat, square, line-based (no glass) */
-            --radius-lg: 3px;
-            --radius-md: 3px;
-            --radius-sm: 2px;
+            --radius-lg: 14px;
+            --radius-md: 10px;
+            --radius-sm: 8px;
             --shadow-card: 0 0 0 1px var(--border);
             --shadow-modal: 0 0 0 1px var(--separator);
             --focus-ring: 0 0 0 3px rgba(198,55,28,0.25);
@@ -140,33 +140,40 @@
         }
         .workspace {
             flex: 1 1 auto;
-            padding: 24px 20px calc(64px + env(safe-area-inset-bottom, 0px));  /* clear the flat bottom bar */
+            padding: 24px 20px calc(92px + env(safe-area-inset-bottom, 0px));  /* clear the flat bottom bar */
             overflow-x: hidden;
             min-width: 0;                  /* allow inner content (tables/cards) to shrink */
         }
         .tabbar {
-            position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+            position: fixed;
+            left: 12px; right: 12px;
+            bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+            z-index: 20;
             display: flex;
-            border-radius: 0;
-            background: color-mix(in srgb, var(--surface) 62%, transparent);
+            gap: 4px;
+            padding: 6px;
+            border-radius: 999px;
+            background: color-mix(in srgb, var(--surface) 72%, transparent);
             -webkit-backdrop-filter: saturate(180%) blur(20px);
             backdrop-filter: saturate(180%) blur(20px);
-            border-top: 1px solid var(--separator);
-            padding-bottom: env(safe-area-inset-bottom, 0);
+            border: 1px solid var(--separator);
+            box-shadow: 0 8px 30px rgba(0,0,0,0.35);
         }
         .tab {
             flex: 1 1 0; min-width: 0;
             display: flex; flex-direction: column; align-items: center; gap: 3px;
             border: none; background: none; cursor: pointer;
             padding: 8px 4px 6px;
+            border-radius: 999px;                 /* so the active pill is capsule-shaped */
             color: var(--label-secondary);
             font-family: var(--sans);      /* SF Pro on iOS, not the terminal mono */
-            transition: color .15s;
+            transition: color .15s, background .15s;
         }
         .tab svg { width: 24px; height: 24px; display: block; }
         .tab .tab-label { font-size: 10px; line-height: 1; letter-spacing: 0.01em; }
         .tab.active {
             color: var(--accent);
+            background: var(--fill-hover);         /* subtle rounded highlight behind the active tab */
         }
         .tab:hover {
             color: var(--label);
@@ -624,7 +631,7 @@
             .app-header {
                 flex-direction: column;
             }
-            .workspace { padding: 20px 16px calc(72px + env(safe-area-inset-bottom, 0px)); }
+            .workspace { padding: 20px 16px calc(92px + env(safe-area-inset-bottom, 0px)); }
         }
     </style>
 </head>
