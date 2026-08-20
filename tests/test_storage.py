@@ -306,6 +306,24 @@ def test_garage_public_url(garage_client, monkeypatch):
     assert url2 == "https://garage-web.example.invalid/ipas/com.example.app/1.0.0.ipa"
 
 
+def test_garage_ipa_put_returns_size_when_verify_forbidden(garage_client, tmp_path):
+    """A 403 on the post-upload verify head_object (write-only Garage key)
+    must not fail the upload -- the upload above already succeeded. put()
+    should return the precomputed expected size instead of None (plan 065).
+    """
+    storage = garage_client.app_module.ipa_storage
+    payload = b"garage ipa verify-403 bytes"
+    src = tmp_path / "src.ipa"
+    src.write_bytes(payload)
+
+    garage_client.fake_client.fail_head_forbidden = True
+    size = storage.put(str(src), "com.example.app", "1.0.0")
+    garage_client.fake_client.fail_head_forbidden = False
+
+    assert size == len(payload)
+    assert ("test-bucket", "ipas/com.example.app/1.0.0.ipa") in garage_client.fake_client.objects
+
+
 def test_garage_backend_refuses_to_start_unconfigured(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("ADMIN_PASSWORD", TEST_ADMIN_PASSWORD)
@@ -388,6 +406,38 @@ def test_garage_icon_key_and_content_type(garage_client, tmp_path):
     replacement.write_bytes(b"replacement")
     assert storage.put(str(replacement), "com.example.icon", "png") is False
     garage_client.fake_client.head_size_override = None
+
+
+def test_garage_icon_put_succeeds_when_verify_forbidden(garage_client, tmp_path):
+    """A 403 on the post-upload verify head_object (write-only Garage key)
+    must not fail the upload -- the upload above already succeeded. put()
+    should return True instead of False (plan 065)."""
+    storage = garage_client.app_module.icon_storage
+    src = tmp_path / "icon.png"
+    src.write_bytes(b"png bytes")
+
+    garage_client.fake_client.fail_head_forbidden = True
+    result = storage.put(str(src), "com.example.icon", "png")
+    garage_client.fake_client.fail_head_forbidden = False
+
+    assert result is True
+    assert ("test-bucket", "icons/com.example.icon/icon.png") in garage_client.fake_client.objects
+
+
+def test_garage_icon_put_still_fails_on_size_mismatch(garage_client, tmp_path):
+    """When the verify head_object SUCCEEDS (reads allowed) but the stored
+    size doesn't match what was uploaded, put() must still fail -- that is
+    a genuine corruption/truncation signal, not a permission problem, and
+    must not be tolerated the way a verify-403 now is (plan 065)."""
+    storage = garage_client.app_module.icon_storage
+    src = tmp_path / "icon.png"
+    src.write_bytes(b"png bytes")
+
+    garage_client.fake_client.head_size_override = 999
+    result = storage.put(str(src), "com.example.icon", "png")
+    garage_client.fake_client.head_size_override = None
+
+    assert result is False
 
 
 def test_garage_icon_public_url(garage_client):

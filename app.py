@@ -454,6 +454,28 @@ class GarageIpaStorage:
     def _key(self, bundle_id, version):
         return f"{GARAGE_KEY_PREFIX}/{secure_filename(bundle_id)}/{secure_filename(version)}.ipa"
 
+    @staticmethod
+    def _remaining_size(src):
+        """Return remaining bytes without consuming a file-like source.
+
+        Duplicated from GarageIconStorage._remaining_size (plan 065): a
+        tiny, dependency-free helper, kept identical on both classes
+        rather than hoisted, so this class's behaviour never depends on
+        GarageIconStorage's internals.
+        """
+        if isinstance(src, (str, bytes, os.PathLike)):
+            return os.path.getsize(src)
+        stream = getattr(src, "stream", src)
+        try:
+            position = stream.tell()
+            stream.seek(0, os.SEEK_END)
+            end = stream.tell()
+            stream.seek(position, os.SEEK_SET)
+            return end - position
+        except (AttributeError, OSError, ValueError):
+            content_length = getattr(src, "content_length", None)
+            return content_length if content_length and content_length >= 0 else None
+
     def put(self, src, bundle_id, version):
         """Upload src -- a path, or a file-like object with .save() (a
         Werkzeug FileStorage) -- to the object's final key.
@@ -465,6 +487,10 @@ class GarageIpaStorage:
         """
         key = self._key(bundle_id, version)
         extra_args = {"ContentType": "application/octet-stream"}
+        try:
+            expected_size = self._remaining_size(src)
+        except OSError:
+            expected_size = None
         try:
             if hasattr(src, "save"):
                 self._client.upload_fileobj(src, GARAGE_BUCKET, key, ExtraArgs=extra_args)
@@ -482,7 +508,14 @@ class GarageIpaStorage:
             head = self._client.head_object(Bucket=GARAGE_BUCKET, Key=key)
             return head.get("ContentLength")
         except ClientError as e:
-            code = e.response.get("Error", {}).get("Code", "unknown")
+            status, code = _classify_storage_error(e)
+            if status == "forbidden" and expected_size is not None:
+                logging.warning(
+                    f"Uploaded IPA but cannot verify it ({key}): {code} -- "
+                    f"treating upload as successful (size {expected_size} from source; "
+                    f"grant the key read to re-enable verification)"
+                )
+                return expected_size
             logging.error(f"Uploaded IPA but could not verify it ({key}): {code}")
             return None
 
@@ -749,7 +782,16 @@ class GarageIconStorage:
                 return False
             return True
         except ClientError as e:
-            code = e.response.get("Error", {}).get("Code", "unknown")
+            status, code = _classify_storage_error(e)
+            if status == "forbidden":
+                # The upload above already succeeded; we simply lack read/head
+                # permission to verify size. Do NOT fail the write on a
+                # permission-denied verify (that breaks a write-only key).
+                logging.warning(
+                    f"Uploaded icon but cannot verify it ({key}): {code} -- "
+                    f"treating upload as successful (grant the key read to re-enable verification)"
+                )
+                return True
             logging.error(f"Uploaded icon but could not verify it ({key}): {code}")
             return False
 
