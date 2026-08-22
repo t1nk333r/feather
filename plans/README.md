@@ -64,6 +64,12 @@ Three facts shape every plan here:
 | [054](054-two-column-sidebar-layout.md) | Two-column layout — left nav sidebar + right workspace (replace the top tab bar) | P3 | M | LOW–MED | 043 | **SUPERSEDED by 055** (sidebar reverted to a mobile-first bottom tab bar). Was: DONE — merged `2223576`. | TODO — user-requested. Restructure `templates/index.html` into a two-column grid: vertical nav sidebar + workspace holding the existing `.tab-content` panels. Pure layout/CSS; `switchTab` and all JS hooks unchanged. UI-only; 232 tests must stay green. |
 | [058](058-omarchy-theme.md) | Re-theme to the Omarchy look — flat terminal dark (black + orange), thin lines, sharp corners, mono chrome | P2 | M | MED | 043,055 | **DONE — merged to `main`** (2026-08-19). Reviewer-approved (glass fully removed, exact Omarchy palette light+dark, square corners, mono chrome, dropdown fix kept; headless-verified both themes). Was: user rejected the glass; wants omarchyplugins.com's theme. Swap palette to Omarchy's exact tokens (bg `#000`/`#f8f8f6`, accent `#ff5a36`/`#c6371c`, thin `--line` borders), flatten (remove all 057 glass/blur/gradient/float/shadow), square corners, mono chrome. Keeps the 055 bottom bar + the 057 dropdown fix. **Supersedes 057.** UI-only; 236 tests stay green. |
 | [066](066-split-icon-storage-backend.md) | Independent `ICON_STORAGE_BACKEND` — icons on local disk, IPAs on Garage | P2 | S | MED | 011 | **DONE — merged to `main`** (`254a4fd`, 2026-08-20). Added `ICON_STORAGE_BACKEND` (defaults to `STORAGE_BACKEND`) selecting the icon backend independently; split the init block so `ipa_storage`→`STORAGE_BACKEND`, `icon_storage`→`ICON_STORAGE_BACKEND`; `_reconcile_icons` gate moved to the icon backend. Set `STORAGE_BACKEND=garage` + `ICON_STORAGE_BACKEND=local` → IPAs on Garage, icons at `/app/data/icons` (already a mounted volume). Backward-compatible; `serve_icon`/`get_hosted_icon_url` unchanged (already polymorphic). Docs + `.env.example`. 241→243 tests. **Op note:** icons currently only on Garage 404 until re-hosted locally (re-import re-extracts them). |
+| [067](067-release-asset-discovery.md) | Release asset discovery — preview, explain, and disambiguate matched IPA assets | P1 | M | MED | — | **TODO** — replace opaque “expected exactly one” failures with a sanitized candidate preview and optional exclusion glob while preserving the exactly-one publish invariant. |
+| [068](068-shared-ipa-preflight.md) | Shared IPA preflight — verify identity, version, platform, and minimum OS before publish | P2 | L | MED | — | **TODO** — one inspection model shared by one-off, scheduled, standalone, and Telegram imports; reject non-iOS/tvOS and mismatched metadata before catalog mutation. Recommended after 067. |
+| [069](069-actionable-health-watchtower.md) | Actionable health watchtower — deep links, snapshots, transitions, and optional checks | P2 | M–L | MED | — | **TODO** — turn health findings into safe operator actions, retain bounded snapshots, and optionally notify only on state transitions. |
+| [070](070-guarded-catalog-recovery.md) | Guarded catalog recovery — inspect, diff, download, and restore catalog backups | P2 | M–L | HIGH | — | **TODO** — authenticated catalog-only recovery with validation, preview, typed confirmation, and preservation of the displaced live catalog. Plan 069 is recommended first, not required. |
+| [071](071-import-provenance-history.md) | Import provenance — retain sanitized, bounded run history outside the public catalog | P2 | M | LOW–MED | 067, 068 | **TODO** — record one-off, scheduled, and standalone import outcomes without letting ledger failure affect publication. |
+| [072](072-news-and-featured-app-authoring.md) | News and featured-app authoring — guarded editorial controls for standard AltStore metadata | P3 | M | MED | — | **TODO** — edit ordered featured apps and schema-valid news from Source Information without hand-editing `source.json`. |
 | [065](065-garage-put-tolerate-verify-403.md) | Garage `put()` must not fail an upload when the post-upload verify-read is 403 | P1 | S | MED | 028,050 | **DONE — merged to `main`** (`ddc7164`, 2026-08-20). Root cause of the live "Failed to save uploaded icon" — the write succeeded but the app's write-only Garage key 403s on the verify `head_object`, and the code treated "can't verify" as "write failed". Now both `GarageIconStorage.put` and `GarageIpaStorage.put` classify a forbidden verify via `_classify_storage_error` and degrade to success-with-warning (icon→`True`, IPA→precomputed size) instead of failing; size-mismatch/other errors still fail. `_remaining_size` duplicated onto the IPA class. 236→239 tests. Operator's real fix is still `garage bucket allow --read`. |
 | [064](064-import-icon-for-existing-apps.md) | Apply the icon on repo-import of an *existing* app (URL + auto-detect) | P2 | S–M | MED | 034,046 | **DONE — merged to `main`** (`cf2e511`, 2026-08-20). Both import paths only set the icon in the create-if-missing branch; an existing app (e.g. AnymeX) got neither a supplied `iconURL` nor auto-detection. New best-effort `_apply_icon_to_existing` helper called after `add_version` in `import_release()` + the auto-import scheduler: explicit `iconURL` always wins; else auto-detect (IPA icon → owner avatar) only when the current icon is missing/placeholder; never raises. Form label updated. 239→241 tests. |
 | [063](063-icononly-tabbar-rounded-topbar.md) | Icons-only floating bar (centered compact pill + rounded highlight) + rounded top bar | P2 | S | LOW | 062 | **DONE — merged to `main`** (`e88bd28`, 2026-08-20). Dropped the tab text labels (icons only, each button gets `aria-label`+`title`); `.tab` centered, active icon keeps orange + rounded `--fill-hover` highlight; `.tabbar` centered compact capsule (`margin:0 auto; max-width:460px` — responsive form of the 500px inset); `.topbar` → rounded floating card (`border-radius:var(--radius-lg)`, `margin:10px`, sticky `top:10px`), brand logo `border-radius:6px`, "Sign out" → rounded danger pill. Glass + SVGs + `switchTab` untouched. UI-only; 236 tests unchanged. |
@@ -88,6 +94,38 @@ Three facts shape every plan here:
 | [032](032-add-app-icon-upload.md) | Make `/api/add-app` honor the icon the Add-App form already sends | P3 | S | LOW–MED | — | **DONE — merged to `main` (2026-08-17)** — commit `688e4bf` on branch `advisor/032-add-app-icon-upload`. Route now reads `iconFile`/`downloadIconFromUrl` and passes them through; JSON branch unchanged. 136→138 pass; 2 new tests assert a self-hosted `/icons/...` URL and discriminate on the fix. Not yet merged to `main`. |
 
 Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (with a one-line reason) | `REJECTED` (with a one-line rationale)
+
+## 2026-08-22 direction addendum (Plans 067–072)
+
+A direction-focused audit at commit `f8a8827` produced six implementation-ready
+options, and the user selected all six for planning. The verified baseline is
+**243 tests passing**. These files are handoffs for other agents; this audit did
+not modify application source.
+
+- **067** makes multi-asset release failures inspectable and safely resolvable.
+- **068** establishes one shared IPA identity/platform preflight contract across
+  every import surface.
+- **069** makes existing health findings actionable and preserves bounded state
+  transitions for optional monitoring.
+- **070** adds a deliberately catalog-only recovery center; it does not restore
+  IPA or icon binaries.
+- **071** keeps sanitized import provenance outside public `source.json` and is
+  explicitly best-effort.
+- **072** exposes the already-supported AltStore news and featured-app fields
+  through guarded editorial controls.
+
+Recommended execution order:
+
+```text
+067 ──> 068 ──> 071
+
+069 ──> 070   (recommended ordering; no hard dependency)
+
+072             (independent)
+```
+
+If only one plan is taken next, start with **067**: it directly addresses the
+observed `SceneBox-*.ipa` ambiguity while keeping publication fail-closed.
 
 ## 2026-08-17 audit addendum (Plans 029–032)
 
