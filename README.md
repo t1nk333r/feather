@@ -84,13 +84,18 @@ Summary:
 | `GET /ipas/<bundle_id>/<filename>` | public | IPA download (redirects to S3 when Garage storage is enabled) |
 | `GET /icons/<bundle_id>/icon.<ext>` | public | app icons |
 | `GET /qr` | public | QR code for the `feather://` source URL |
+| `GET /fdroid/repo/<path>` | public | the F-Droid repo (index, jars, APKs) built by the `fdroid-index` sidecar |
+| `GET /fdroid/qr` | public | QR code for the Android repo's subscribe URL (`?fingerprint=...`) |
 | `GET /` | public | admin UI |
 | `POST /api/login`, `/api/logout`, `GET /api/session` | public | session auth |
 | `GET /api/apps`, `GET /api/app/<id>` | public | read-only JSON |
 | `POST /api/add-app`, `/api/delete-app`, `/api/update-app`, `/api/add-version`, `/api/update-version`, `/api/update-source` | session required | the six mutating routes |
+| `GET /api/android/status`, `GET /api/android/apps`, `POST /api/android/add-apk`, `/update-app`, `/delete-version`, `/delete-app`, `/repo-config`, `/request-update` | session required | Android/F-Droid admin API (plan 073) |
 
 **The first four routes must never require authentication.** iOS clients fetch them with
-no credentials; gating any of them breaks every subscribed device.
+no credentials; gating any of them breaks every subscribed device. The same rule applies to
+`GET /fdroid/repo/<path>` and `GET /fdroid/qr` — the F-Droid client sends no credentials
+either.
 
 ## Updating a deployment
 
@@ -154,6 +159,35 @@ assume this path matches your deployment):
 17 */6 * * * cd /path/to/feather && /usr/bin/docker compose run --rm -T release-import --apply >> /var/log/feather-release-import.log 2>&1
 ```
 
+**Android / F-Droid repository.** Feather can also serve a third-party F-Droid repo
+for Android devices, built and signed by the official `fdroidserver` tool running in
+a sidecar container (`fdroid-index`, profile `android`). Feather's job is limited to
+accepting APKs, writing `metadata/<package>.yml`, and asking the sidecar to rebuild;
+the sidecar owns JAR-signing the index. See `plans/073-android-fdroid-repo.md` for the
+full design. Off unless you enable the `android` profile:
+
+```bash
+# One-time setup
+mkdir -p data/fdroid
+chown -R 999:999 data/fdroid   # same reason as the top-level data/ chown above
+
+# Set FDROID_KEYSTORE_PASSWORD in .env before first start -- the sidecar
+# refuses to run without it. Dockge cannot pass `--profile`, so set
+# COMPOSE_PROFILES in .env instead (or export it) rather than relying on
+# a CLI flag.
+echo 'COMPOSE_PROFILES=android' >> .env
+
+docker compose up -d
+```
+
+The first start generates a signing keystore at `data/fdroid/keystore.p12`.
+**Back this file up along with `FDROID_KEYSTORE_PASSWORD`** — losing either means a new
+signing key, a new repository fingerprint, and every device that already subscribed
+must re-add the repo. Once the sidecar has produced an index, open the admin UI's
+Android tab, upload an APK, and scan the QR code (or open its URL,
+`https://<host>/fdroid/repo?fingerprint=<64-hex>`) on an Android device with the
+F-Droid client installed to subscribe.
+
 ## Repository layout
 
 ```
@@ -164,6 +198,7 @@ scripts/telegram_bot_ingest.py  optional: forward-an-IPA-to-a-bot ingest worker
 scripts/release_source_ingest.py  optional: cron-driven GitHub/GitLab release importer
 scripts/migrate_ipas_to_garage.py  one-shot local-disk -> Garage S3 migration
 scripts/migrate_icons_to_garage.py  one-shot local app-icon -> Garage migration
+scripts/fdroid_index_loop.sh    optional: the fdroid-index sidecar's rebuild loop
 release-sources.example.json    template for the release importer's manifest
 tests/                          the test suite; no network, no Docker
 plans/                          numbered implementation plans; plans/README.md is the index

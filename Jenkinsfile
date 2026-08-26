@@ -14,6 +14,7 @@ pipeline {
     REGISTRY = 'ghcr.io'
     IMAGE = 'ghcr.io/d7eeem/feather'
     BOT_IMAGE = 'ghcr.io/d7eeem/feather-bot'
+    FDROID_IMAGE = 'ghcr.io/d7eeem/feather-fdroid'
   }
 
   stages {
@@ -134,6 +135,34 @@ pipeline {
             echo "FAIL: bot started with no configuration"; exit 1
           fi
           echo "ok: refuses to run unconfigured, names the missing variables"
+        '''
+      }
+    }
+
+    stage('Build & push fdroid image') {
+      when { branch 'main' }
+      steps {
+        sh '''
+          set -eu
+          SHORT=$(git rev-parse --short HEAD)
+          docker build -f Dockerfile.fdroid -t "$FDROID_IMAGE:main" -t "$FDROID_IMAGE:latest" -t "$FDROID_IMAGE:sha-$SHORT" .
+          docker push "$FDROID_IMAGE:main"
+          docker push "$FDROID_IMAGE:latest"
+          docker push "$FDROID_IMAGE:sha-$SHORT"
+        '''
+      }
+    }
+
+    stage('Smoke-test fdroid image') {
+      when { branch 'main' }
+      steps {
+        // Must refuse to run without the keystore password, naming it.
+        sh '''
+          set -eu
+          OUT="$(docker run --rm "$FDROID_IMAGE:main" 2>&1 || true)"
+          echo "$OUT" | grep -q "FDROID_KEYSTORE_PASSWORD" \
+            || { echo "FAIL: did not name FDROID_KEYSTORE_PASSWORD"; exit 1; }
+          echo "ok: refuses to run unconfigured"
         '''
       }
     }

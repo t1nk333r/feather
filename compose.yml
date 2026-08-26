@@ -14,6 +14,7 @@ services:
       - ./data:/app/data
       - ./data/ipas:/app/data/ipas
       - ./data/icons:/app/data/icons
+      - ./data/fdroid:/app/data/fdroid
     environment:
       - FLASK_ENV=production
       - PYTHONUNBUFFERED=1
@@ -106,6 +107,30 @@ services:
       - ./data/release-import:/var/lib/feather-release-import
     restart: "no"
     # No `ports:` -- this is a one-shot CLI invocation, not a server.
+
+  # Plan 073: builds and signs the F-Droid index for the Android repo.
+  # Opt-in (profile "android"). Shares ./data/fdroid with feather: feather
+  # writes APKs + metadata and touches .update-requested; this service runs
+  # `fdroid update` and writes the signed index feather serves at
+  # /fdroid/repo/. Runs as root INSIDE the container by necessity (the
+  # upstream image is not usable by any other uid); it has no ports and
+  # its only mount is this one directory.
+  fdroid-index:
+    profiles: ["android"]
+    image: ghcr.io/d7eeem/feather-fdroid:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.fdroid
+    container_name: feather-fdroid-index
+    depends_on:
+      - altstore-manager
+    env_file:
+      - .env
+    environment:
+      - FEATHER_UID=999
+    volumes:
+      - ./data/fdroid:/repo
+    restart: unless-stopped
 networks: {}
 
 volumes:
