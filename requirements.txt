@@ -6,3 +6,5 @@ Werkzeug==2.3.7
 pillow==11.3.0
 boto3==1.43.68
 waitress==3.0.2
+pyaxmlparser==0.3.31
+PyYAML==6.0.3
