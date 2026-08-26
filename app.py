@@ -3664,6 +3664,276 @@ def diagnostics():
     return jsonify({"entries": list(_DIAG_BUFFER)[::-1]})
 
 
+# ---------------------------------------------------------------------------
+# Plan 073: Android / F-Droid repository routes.
+#
+# /fdroid/repo/<path> and /fdroid/qr are PUBLIC by contract, like the four
+# iOS routes (/source.json, /ipas/..., /icons/..., /qr) -- the F-Droid
+# client sends no credentials. Everything under /api/android/* is
+# session-gated, same convention as the rest of the admin API.
+# ---------------------------------------------------------------------------
+
+FDROID_REPO_MIME_TYPES = {
+    'apk': 'application/vnd.android.package-archive',
+    'jar': 'application/java-archive',
+    'json': 'application/json',
+}
+
+# Maps the lowerCamel keys the UI/API accept to AndroidRepoManager's
+# METADATA_KEYS (fdroidserver's own YAML key casing).
+ANDROID_METADATA_FIELD_MAP = {
+    "name": "Name",
+    "summary": "Summary",
+    "description": "Description",
+    "authorName": "AuthorName",
+    "website": "WebSite",
+    "sourceCode": "SourceCode",
+    "license": "License",
+    "categories": "Categories",
+}
+
+
+def _android_metadata_fields_from(source):
+    """Pick out and rename whichever metadata fields were supplied."""
+    fields = {}
+    for api_key, meta_key in ANDROID_METADATA_FIELD_MAP.items():
+        val = source.get(api_key)
+        if val:
+            fields[meta_key] = val
+    return fields
+
+
+def _download_to_temp(url, suffix):
+    """Stream a URL to a temp file under UPLOAD_FOLDER, honoring
+    MAX_CONTENT_LENGTH. Returns the temp file path; raises ValueError on
+    any failure (the temp file is removed first). Mirrors
+    SourceManager.download_ipa_from_url's streaming logic, kept separate
+    since Android downloads are not IPAs and do not go through
+    ipa_storage."""
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    fd, filepath = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix=suffix)
+    os.close(fd)
+    try:
+        logging.info(f"Downloading APK from: {url}")
+        response = requests.get(url, stream=True, timeout=300)
+        response.raise_for_status()
+        total = 0
+        limit = app.config.get("MAX_CONTENT_LENGTH") or (2 * 1024 * 1024 * 1024)
+        with open(filepath, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=1 << 20):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > limit:
+                    raise ValueError(f"Download exceeded size limit of {limit} bytes")
+                f.write(chunk)
+        return filepath
+    except Exception as e:
+        if os.path.exists(filepath):
+            try:
+                os.remove(filepath)
+            except OSError:
+                pass
+        raise ValueError(f"Failed to download from {url}: {e}")
+
+
+@app.route('/fdroid/repo/<path:filename>')
+def fdroid_repo_file(filename):
+    """Serve the F-Droid repo (index, jars, APKs, icons) that the
+    fdroid-index sidecar builds. Must stay public: the F-Droid client
+    sends no credentials. send_from_directory rejects path traversal on
+    its own (safe_join), so a crafted "../..." filename 404s here too."""
+    try:
+        ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+        mimetype = FDROID_REPO_MIME_TYPES.get(ext)
+        if mimetype:
+            return send_from_directory(FDROID_REPO_DIR, filename, mimetype=mimetype)
+        return send_from_directory(FDROID_REPO_DIR, filename)
+    except Exception as e:
+        logging.error(f"Error serving fdroid repo file: {str(e)}")
+        return jsonify({"error": "Not found"}), 404
+
+
+@app.route('/fdroid/qr')
+def fdroid_qr():
+    try:
+        subscribe_url = android_repo.status().get('subscribe_url')
+        if not subscribe_url:
+            return jsonify({"error": "F-Droid repo not initialised — start the fdroid-index service"}), 503
+
+        qr = qrcode.QRCode(version=1, box_size=10, border=5)
+        qr.add_data(subscribe_url)
+        qr.make(fit=True)
+
+        img = qr.make_image(fill_color="black", back_color="white")
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        buf.seek(0)
+
+        return send_file(buf, mimetype='image/png')
+    except Exception as e:
+        logging.error(f"Android QR generation error: {str(e)}")
+        return jsonify({"error": "QR generation failed"}), 500
+
+
+@app.route('/api/android/status')
+@requires_auth
+def android_status():
+    try:
+        return jsonify(android_repo.status())
+    except Exception as e:
+        logging.error(f"Error getting Android repo status: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/android/apps')
+@requires_auth
+def android_apps():
+    try:
+        return jsonify(android_repo.list_apps())
+    except Exception as e:
+        logging.error(f"Error listing Android apps: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/android/add-apk', methods=['POST'])
+@requires_auth
+def android_add_apk():
+    temp_path = None
+    try:
+        apk_file = request.files.get('apkFile')
+        download_from_url = request.form.get('downloadFromUrl', 'false').lower() == 'true'
+        download_url = request.form.get('downloadURL', '')
+        package_hint = request.form.get('package') or None
+
+        if apk_file and apk_file.filename:
+            if not apk_file.filename.lower().endswith('.apk'):
+                return jsonify({"success": False, "error": "File must be a .apk"}), 400
+            os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+            fd, temp_path = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix='.apk')
+            os.close(fd)
+            apk_file.save(temp_path)
+        elif download_from_url:
+            if not download_url:
+                return jsonify({"success": False, "error": "downloadURL is required when downloadFromUrl is set"}), 400
+            if not download_url.lower().split('?')[0].endswith('.apk'):
+                return jsonify({"success": False, "error": "downloadURL must point to a .apk"}), 400
+            temp_path = _download_to_temp(download_url, '.apk')
+        else:
+            return jsonify({"success": False, "error": "Either an APK file or downloadFromUrl is required"}), 400
+
+        success, result = android_repo.add_apk(temp_path, expected_package=package_hint)
+
+        if not success:
+            return jsonify({"success": True, "message": result})
+
+        fields = _android_metadata_fields_from(request.form)
+        if fields:
+            android_repo.write_metadata(result["package"], fields)
+
+        notify("android_add_apk", f"New Android APK published: {result['package']} {result['version_name']}")
+        return jsonify({
+            "success": True,
+            "message": f"Added {result['package']} version {result['version_code']}",
+            "package": result["package"],
+            "versionCode": result["version_code"],
+            "pending": True,
+        })
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error adding APK: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 400
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
+@app.route('/api/android/update-app', methods=['POST'])
+@requires_auth
+def android_update_app():
+    try:
+        data = request.get_json() if request.is_json else {}
+        package = data.get('package')
+        if not package:
+            return jsonify({"success": False, "error": "package is required"}), 400
+        fields = _android_metadata_fields_from(data)
+        android_repo.write_metadata(package, fields)
+        return jsonify({"success": True, "message": f"Updated metadata for {package}"})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error updating Android app metadata: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 400
+
+
+@app.route('/api/android/delete-version', methods=['POST'])
+@requires_auth
+def android_delete_version():
+    try:
+        data = request.get_json() if request.is_json else {}
+        package = data.get('package')
+        version_code = data.get('versionCode')
+        if not package or version_code is None:
+            return jsonify({"success": False, "error": "package and versionCode are required"}), 400
+        removed = android_repo.delete_version(package, version_code)
+        if not removed:
+            return jsonify({"success": False, "error": "Version not found"}), 404
+        return jsonify({"success": True, "message": f"Deleted {package} version {version_code}"})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error deleting Android version: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 400
+
+
+@app.route('/api/android/delete-app', methods=['POST'])
+@requires_auth
+def android_delete_app():
+    try:
+        data = request.get_json() if request.is_json else {}
+        package = data.get('package')
+        if not package:
+            return jsonify({"success": False, "error": "package is required"}), 400
+        removed = android_repo.delete_app(package)
+        if not removed:
+            return jsonify({"success": False, "error": "App not found"}), 404
+        return jsonify({"success": True, "message": f"Deleted {package}"})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error deleting Android app: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 400
+
+
+@app.route('/api/android/repo-config', methods=['POST'])
+@requires_auth
+def android_repo_config():
+    try:
+        data = request.get_json() if request.is_json else {}
+        name = data.get('name') or 'Feather Android'
+        description = data.get('description', '')
+        android_repo.write_repo_config(name, description)
+        return jsonify({"success": True, "message": "Repository configuration updated"})
+    except Exception as e:
+        logging.error(f"Error updating Android repo config: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 400
+
+
+@app.route('/api/android/request-update', methods=['POST'])
+@requires_auth
+def android_request_update():
+    try:
+        android_repo.request_update()
+        return jsonify({"success": True, "message": "Index rebuild requested"})
+    except Exception as e:
+        logging.error(f"Error requesting Android index update: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 400
+
+
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({"error": "Endpoint not found"}), 404
