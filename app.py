@@ -1,6 +1,7 @@
-from flask import Flask, render_template, request, jsonify, send_file, redirect, session
+from flask import Flask, render_template, request, jsonify, send_file, redirect, session, send_from_directory
 import json
 import os
+import re
 import copy
 import logging
 import qrcode
@@ -73,6 +74,26 @@ UPLOAD_FOLDER = os.path.join(DATA_DIR, "uploads")
 IPA_FOLDER = os.path.join(DATA_DIR, "ipas")
 ICON_FOLDER = os.path.join(DATA_DIR, "icons")
 BACKUP_FOLDER = os.path.join(DATA_DIR, "backups")
+# Plan 073: Android / F-Droid repository. Everything lives under
+# DATA_DIR/fdroid, which is ALSO the working directory of the fdroid-index
+# sidecar (compose service, profile "android"). Layout inside it:
+#   repo/          APKs + the signed index the sidecar writes (served at /fdroid/repo/)
+#   metadata/      one <package>.yml per app, written by feather
+#   repo-config.json     repo name/description, written by feather, read by the sidecar
+#   .update-requested    marker: feather touches it, the sidecar consumes it
+#   last-update.json     sidecar's last result {ok, finished_at, log_tail}
+#   fingerprint.txt      64-hex SHA-256 of the signing cert, written by the sidecar
+#   config.yml / keystore.p12   owned by the sidecar (root); feather never reads them
+FDROID_DIR = os.path.join(DATA_DIR, "fdroid")
+FDROID_REPO_DIR = os.path.join(FDROID_DIR, "repo")
+FDROID_METADATA_DIR = os.path.join(FDROID_DIR, "metadata")
+FDROID_REPO_CONFIG = os.path.join(FDROID_DIR, "repo-config.json")
+FDROID_UPDATE_MARKER = os.path.join(FDROID_DIR, ".update-requested")
+FDROID_LAST_UPDATE = os.path.join(FDROID_DIR, "last-update.json")
+FDROID_FINGERPRINT = os.path.join(FDROID_DIR, "fingerprint.txt")
+ALLOWED_APK_EXTENSIONS = {'apk'}
+# Android package names: Java identifiers separated by dots, at least two segments.
+ANDROID_PACKAGE_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$')
 SOURCE_ARTWORK_URL = "https://f002.backblazeb2.com/file/S30000PUBLIC/MEDIA-PUBLIC/feather-tinker-1024.png"
 LEGACY_SOURCE_ARTWORK_URLS = {
     "iconURL": "https://f000.backblazeb2.com/file/rileytestut/ExampleSource/OctoSource.png",
@@ -2281,6 +2302,40 @@ def _extract_ipa_icon(ipa_path):
                 return None
     except Exception:
         return None
+
+
+def _inspect_apk(path):
+    """Read identity and version out of an APK's binary AndroidManifest.
+
+    Returns a dict {package, version_code (int), version_name, min_sdk,
+    target_sdk, app_name} or raises ValueError with an operator-readable
+    message. pyaxmlparser returns version_code as a *string*; it is
+    converted here so callers never compare "10" < "9".
+    """
+    from pyaxmlparser import APK  # imported lazily: keeps app import fast for tests
+    try:
+        apk = APK(path)
+    except Exception as e:
+        raise ValueError(f"Not a readable APK: {e}")
+    if not apk.is_valid_APK():
+        raise ValueError("Not a valid APK (no AndroidManifest.xml)")
+    package = apk.package or ""
+    if not ANDROID_PACKAGE_RE.match(package):
+        raise ValueError(f"APK declares an invalid package name: {package!r}")
+    try:
+        version_code = int(apk.version_code)
+    except (TypeError, ValueError):
+        raise ValueError(f"APK declares a non-integer versionCode: {apk.version_code!r}")
+    if version_code <= 0:
+        raise ValueError(f"APK declares versionCode {version_code}; must be > 0")
+    return {
+        "package": package,
+        "version_code": version_code,
+        "version_name": apk.version_name or str(version_code),
+        "min_sdk": apk.get_min_sdk_version(),
+        "target_sdk": apk.get_target_sdk_version(),
+        "app_name": apk.get_app_name() or package,
+    }
 
 
 def _apply_icon_to_existing(bundle_id, existing, ipa_path, *, provider, project,
