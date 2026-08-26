@@ -1852,6 +1852,7 @@ class AndroidRepoManager:
 
         index = self.load_index()
         index_timestamp = (index.get('repo') or {}).get('timestamp') if index else None
+        cfg = self.repo_config()
 
         return {
             "configured": configured,
@@ -1861,6 +1862,11 @@ class AndroidRepoManager:
             "pending": os.path.exists(FDROID_UPDATE_MARKER),
             "last_update": last_update,
             "index_timestamp": index_timestamp,
+            # Convenience for the admin UI -- not part of the plan's contract
+            # sketch, sourced from repo_config() so the Android tab can
+            # pre-fill its name/description fields without a second route.
+            "name": cfg.get("name", ""),
+            "description": cfg.get("description", ""),
         }
 
     def repo_config(self):

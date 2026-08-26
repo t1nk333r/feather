@@ -910,6 +910,80 @@
             <button type="button" class="btn" id="diagnosticsRefreshBtn" onclick="runDiagnostics()">Refresh</button>
             <div id="diagnosticsResults" style="margin-top: 20px;"></div>
         </div>
+
+        <div id="android" class="tab-content">
+            <h2 style="margin-bottom: 20px;">Android Repository</h2>
+            <p style="color: var(--label-secondary); margin-bottom: 20px;">
+                A third-party F-Droid repository for Android devices, built and signed
+                by the fdroid-index sidecar. Requires the "android" Compose profile.
+            </p>
+
+            <div id="androidRepoStatus">
+                <p style="color: var(--label-secondary);">Loading status...</p>
+            </div>
+
+            <div class="form-group" style="max-width: 480px; margin-top: 20px;">
+                <label>Repository Name:</label>
+                <input type="text" id="androidRepoName" placeholder="Feather Android">
+                <label style="margin-top: 10px;">Description:</label>
+                <textarea id="androidRepoDescription" placeholder="Optional description"></textarea>
+            </div>
+            <button type="button" class="btn" onclick="saveAndroidRepoConfig()">Save Repository Info</button>
+            <button type="button" class="btn btn-secondary" onclick="requestAndroidUpdate()">Rebuild Index</button>
+
+            <h2 style="margin-top: 40px; margin-bottom: 20px;">Add APK</h2>
+            <form id="addApkForm">
+                <div class="form-group">
+                    <label>APK File:</label>
+                    <div style="margin-bottom: 10px;">
+                        <input type="file" id="apkFile" name="apkFile" accept=".apk" style="margin-bottom: 10px; width: 100%;">
+                        <div style="display: flex; align-items: center; gap: 8px; margin-top: 10px;">
+                            <input type="checkbox" id="apkDownloadFromUrl" name="downloadFromUrl" value="true" onchange="toggleApkDownloadMethod()" style="width: auto; margin: 0; cursor: pointer;">
+                            <label for="apkDownloadFromUrl" style="margin: 0; font-weight: normal; cursor: pointer; user-select: none;">Use URL instead</label>
+                        </div>
+                    </div>
+                    <input type="url" id="apkDownloadURL" name="downloadURL" placeholder="https://example.com/app.apk" style="display: none; width: 100%;">
+                </div>
+                <div class="form-group">
+                    <label>Package (optional -- must match the APK if set):</label>
+                    <input type="text" name="package" placeholder="org.example.app">
+                </div>
+                <div class="form-group">
+                    <label>Name (optional -- overrides the APK's app label):</label>
+                    <input type="text" name="name" maxlength="50" placeholder="My Android App">
+                </div>
+                <div class="form-group">
+                    <label>Summary:</label>
+                    <input type="text" name="summary" maxlength="80" placeholder="Short one-line summary">
+                </div>
+                <div class="form-group">
+                    <label>Description:</label>
+                    <textarea name="description" maxlength="4000" placeholder="Longer description..."></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Author Name:</label>
+                    <input type="text" name="authorName" placeholder="Developer Name">
+                </div>
+                <div class="form-group">
+                    <label>Website:</label>
+                    <input type="url" name="website" placeholder="https://example.com">
+                </div>
+                <div class="form-group">
+                    <label>Source Code URL:</label>
+                    <input type="url" name="sourceCode" placeholder="https://github.com/example/app">
+                </div>
+                <div class="form-group">
+                    <label>License (SPDX id):</label>
+                    <input type="text" name="license" placeholder="Apache-2.0">
+                </div>
+                <button type="submit" class="btn">Add APK</button>
+            </form>
+
+            <h2 style="margin-top: 40px; margin-bottom: 20px;">Android Apps</h2>
+            <div id="androidAppsList">
+                <p style="color: var(--label-secondary); text-align: center; padding: 40px;">Loading...</p>
+            </div>
+        </div>
         </main>
 
         <nav class="tabbar">
@@ -930,6 +1004,9 @@
             </button>
             <button class="tab" onclick="switchTab('health', this)" aria-label="Health" title="Health">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2-5 3.5 11L15 12h6"/></svg>
+            </button>
+            <button class="tab" onclick="switchTab('android', this)" aria-label="Android" title="Android">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3.5 6.5 5.5M16 3.5 17.5 5.5"/><rect x="5" y="7" width="14" height="11" rx="4"/><path d="M9 11v2M15 11v2"/><path d="M3 10v4M21 10v4"/></svg>
             </button>
         </nav>
 
@@ -1137,6 +1214,8 @@
                 loadSourceInfo();
             } else if (tabName === 'import-repo') {
                 loadAutoImport();
+            } else if (tabName === 'android') {
+                loadAndroid();
             }
         }
 
@@ -1146,6 +1225,24 @@
             const fileInput = document.getElementById('ipaFile');
             const urlInput = document.getElementById('downloadURL');
             
+            if (checkbox.checked) {
+                fileInput.style.display = 'none';
+                urlInput.style.display = 'block';
+                urlInput.required = true;
+                fileInput.required = false;
+            } else {
+                fileInput.style.display = 'block';
+                urlInput.style.display = 'none';
+                urlInput.required = false;
+                fileInput.required = true;
+            }
+        }
+
+        function toggleApkDownloadMethod() {
+            const checkbox = document.getElementById('apkDownloadFromUrl');
+            const fileInput = document.getElementById('apkFile');
+            const urlInput = document.getElementById('apkDownloadURL');
+
             if (checkbox.checked) {
                 fileInput.style.display = 'none';
                 urlInput.style.display = 'block';
@@ -1276,6 +1373,44 @@
                 }
             } catch (error) {
                 showToast('Error adding app: ' + error.message, 'error');
+            } finally {
+                setButtonLoading(submitBtn, false);
+            }
+        });
+
+        document.getElementById('addApkForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const submitBtn = e.target.querySelector('button[type="submit"]');
+            setButtonLoading(submitBtn, true);
+
+            const formData = new FormData(e.target);
+            const apkFile = document.getElementById('apkFile').files[0];
+            const useUrl = document.getElementById('apkDownloadFromUrl').checked;
+
+            if (apkFile && !useUrl) {
+                formData.append('apkFile', apkFile);
+            }
+            if (useUrl) {
+                formData.append('downloadFromUrl', 'true');
+            }
+
+            try {
+                const response = await fetch('/api/android/add-apk', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    showToast(result.message || 'APK added successfully!', 'success');
+                    e.target.reset();
+                    toggleApkDownloadMethod(); // Reset UI
+                    loadAndroidApps();
+                } else {
+                    showToast(result.error || 'Unknown error occurred', 'error');
+                }
+            } catch (error) {
+                showToast('Error adding APK: ' + error.message, 'error');
             } finally {
                 setButtonLoading(submitBtn, false);
             }
@@ -2205,6 +2340,183 @@
                 if (result.success) {
                     showToast(result.message || 'App deleted successfully!', 'success');
                     loadApps();
+                } else {
+                    showToast(result.error || 'Failed to delete app', 'error');
+                }
+            } catch (error) {
+                showToast('Error deleting app: ' + error.message, 'error');
+            }
+        }
+
+        async function loadAndroid() {
+            loadAndroidStatus();
+            loadAndroidApps();
+        }
+
+        async function loadAndroidStatus() {
+            const el = document.getElementById('androidRepoStatus');
+            try {
+                const response = await fetch('/api/android/status');
+                const data = await response.json();
+
+                document.getElementById('androidRepoName').value = data.name || '';
+                document.getElementById('androidRepoDescription').value = data.description || '';
+
+                if (!data.configured) {
+                    el.innerHTML = `<div class="info-box"><strong>Not initialised yet.</strong> Start the fdroid-index Compose service (profile "android") to generate a signing key, then come back here.</div>`;
+                    return;
+                }
+
+                let statusLine = data.pending ? 'Rebuild pending...' : 'Up to date';
+                if (data.last_update) {
+                    statusLine += data.last_update.ok
+                        ? ` &middot; last build finished ${escapeHtml(data.last_update.finished_at || '')}`
+                        : ` &middot; <span style="color: var(--danger);">last build FAILED</span> at ${escapeHtml(data.last_update.finished_at || '')}`;
+                }
+
+                el.innerHTML = `
+                    <p><strong>Status:</strong> ${statusLine}</p>
+                    <img src="/fdroid/qr?_=${Date.now()}" alt="F-Droid repo QR code" style="max-width: 220px; display: block; margin: 16px 0;">
+                    <div class="source-url">
+                        <strong>Subscribe URL:</strong><br>
+                        <span id="androidSubscribeUrl">${escapeHtml(data.subscribe_url || '')}</span>
+                    </div>
+                    <button type="button" class="btn btn-secondary" style="margin-top: 10px;" onclick="copyAndroidSubscribeUrl()">Copy URL</button>
+                `;
+            } catch (error) {
+                el.innerHTML = `<p style="color: var(--danger);">Failed to load status: ${escapeHtml(error.message)}</p>`;
+            }
+        }
+
+        function copyAndroidSubscribeUrl() {
+            const el = document.getElementById('androidSubscribeUrl');
+            if (!el || !el.textContent) return;
+            navigator.clipboard.writeText(el.textContent).then(() => {
+                showToast('Subscribe URL copied', 'success');
+            }).catch(() => {
+                showToast('Could not copy URL', 'error');
+            });
+        }
+
+        async function saveAndroidRepoConfig() {
+            const name = document.getElementById('androidRepoName').value.trim();
+            const description = document.getElementById('androidRepoDescription').value.trim();
+            try {
+                const response = await fetch('/api/android/repo-config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, description })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    showToast(result.message || 'Repository info saved', 'success');
+                    loadAndroidStatus();
+                } else {
+                    showToast(result.error || 'Failed to save repository info', 'error');
+                }
+            } catch (error) {
+                showToast('Error saving repository info: ' + error.message, 'error');
+            }
+        }
+
+        async function requestAndroidUpdate() {
+            try {
+                const response = await fetch('/api/android/request-update', { method: 'POST' });
+                const result = await response.json();
+                if (result.success) {
+                    showToast(result.message || 'Rebuild requested', 'success');
+                    loadAndroidStatus();
+                } else {
+                    showToast(result.error || 'Failed to request rebuild', 'error');
+                }
+            } catch (error) {
+                showToast('Error requesting rebuild: ' + error.message, 'error');
+            }
+        }
+
+        async function loadAndroidApps() {
+            const el = document.getElementById('androidAppsList');
+            try {
+                const response = await fetch('/api/android/apps');
+                const apps = await response.json();
+
+                if (!apps || apps.length === 0) {
+                    el.innerHTML = '<p style="color: var(--label-secondary); text-align: center; padding: 40px;">No Android apps added yet.</p>';
+                    return;
+                }
+
+                el.innerHTML = apps.map(app => {
+                    const versionsHtml = (app.versions || []).map(v => {
+                        const badge = v.published
+                            ? `<span style="color: var(--success);">Published</span>`
+                            : `<span style="color: var(--label-secondary);">Pending</span>`;
+                        const sizeText = v.size ? `${(v.size / 1048576).toFixed(1)} MB` : 'unknown size';
+                        return `
+                            <div style="display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-top: 1px solid var(--separator);">
+                                <span>${escapeHtml(v.versionName || String(v.versionCode))} (${v.versionCode}) &middot; ${sizeText} &middot; ${badge}</span>
+                                <button class="btn btn-danger" style="padding: 6px 12px; font-size: 0.85em;" onclick="deleteAndroidVersion('${escapeHtml(app.package)}', ${v.versionCode})">Delete</button>
+                            </div>
+                        `;
+                    }).join('');
+
+                    const mixedSignersWarning = app.mixed_signers
+                        ? `<p style="color: var(--danger); margin-top: 6px;"><strong>Warning:</strong> published versions have different signing certificates -- the F-Droid client will refuse this update.</p>`
+                        : '';
+
+                    return `
+                        <div class="app-card">
+                            <div class="app-header">
+                                <div class="app-info">
+                                    <h3>${escapeHtml(app.name)}</h3>
+                                    <p><strong>Package:</strong> ${escapeHtml(app.package)}</p>
+                                    <p>${escapeHtml(app.summary || '')}</p>
+                                    ${mixedSignersWarning}
+                                </div>
+                                <div class="btn-group">
+                                    <button class="btn btn-danger" onclick="deleteAndroidApp('${escapeHtml(app.package)}')">Delete App</button>
+                                </div>
+                            </div>
+                            ${versionsHtml}
+                        </div>
+                    `;
+                }).join('');
+            } catch (error) {
+                el.innerHTML = `<p style="color: var(--danger); text-align: center; padding: 20px;">Failed to load Android apps: ${escapeHtml(error.message)}</p>`;
+            }
+        }
+
+        async function deleteAndroidVersion(pkg, versionCode) {
+            if (!confirm(`Delete version ${versionCode} of ${pkg}? This removes the APK and cannot be undone.`)) return;
+            try {
+                const response = await fetch('/api/android/delete-version', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ package: pkg, versionCode })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    showToast(result.message || 'Version deleted', 'success');
+                    loadAndroidApps();
+                } else {
+                    showToast(result.error || 'Failed to delete version', 'error');
+                }
+            } catch (error) {
+                showToast('Error deleting version: ' + error.message, 'error');
+            }
+        }
+
+        async function deleteAndroidApp(pkg) {
+            if (!confirm('Are you sure you want to delete this Android app? This action cannot be undone.')) return;
+            try {
+                const response = await fetch('/api/android/delete-app', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ package: pkg })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    showToast(result.message || 'App deleted', 'success');
+                    loadAndroidApps();
                 } else {
                     showToast(result.error || 'Failed to delete app', 'error');
                 }
