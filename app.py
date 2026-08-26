@@ -3,6 +3,8 @@ import json
 import os
 import re
 import copy
+import errno
+import shutil
 import logging
 import qrcode
 import io
@@ -1972,7 +1974,20 @@ class AndroidRepoManager:
             if os.path.exists(dest):
                 return False, "already present"
             os.makedirs(FDROID_REPO_DIR, exist_ok=True)
-            os.replace(src_path, dest)
+            try:
+                os.replace(src_path, dest)
+            except OSError as e:
+                # UPLOAD_FOLDER and FDROID_REPO_DIR are usually the same
+                # filesystem (both under DATA_DIR), but compose.yml mounts
+                # ./data/fdroid as its own bind mount alongside ./data --
+                # same layout as ipas/ and icons/ -- which some Docker
+                # storage/mount configurations surface to the container as
+                # a different device, making a plain rename cross-device.
+                # Fall back to copy+remove in that case only.
+                if e.errno != errno.EXDEV:
+                    raise
+                shutil.copy2(src_path, dest)
+                os.remove(src_path)
 
         if not os.path.exists(self.metadata_path(package)):
             self.write_metadata(package, {"Name": info["app_name"]})
