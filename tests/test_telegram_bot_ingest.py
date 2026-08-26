@@ -1101,3 +1101,39 @@ def test_add_command_two_tokens_is_usage_error(tmp_path):
     assert len(bot.sent_messages) == 1
     assert "Usage" in bot.sent_messages[0][1]
     assert ALLOWED_USER_ID in pending  # nothing was consumed
+
+
+# ---------------------------------------------------------------------------
+# 37. test_mount_mismatch_reply_keeps_root_and_path_readable (plan 022) --
+#     BOT_API_FILE_ROOT is a mountpoint, not a secret. Redacting it mangled
+#     the one error message operators most need to read, because the
+#     reported path is *prefixed* by the root. A token that happens to sit
+#     mid-path must still be scrubbed; the root and path around it must not.
+# ---------------------------------------------------------------------------
+
+
+def test_mount_mismatch_reply_keeps_root_and_path_readable():
+    token = "123456:FAKE_TOKEN_FOR_TESTS"
+    file_root = "/var/lib/telegram-bot-api"
+    # Mirrors production: getFile reported a path under the file root that
+    # does not exist inside this worker's mount -- a MountMismatchError.
+    reported_path = f"{file_root}/{token}/documents/file_0.ipa"
+
+    config = ingest.load_config(
+        make_env(TELEGRAM_BOT_TOKEN=token, BOT_API_FILE_ROOT=file_root)
+    )
+
+    bot = FakeBotAPI(get_file_result={"file_path": reported_path})
+    feather = FakeFeatherClient()
+    pending = {}
+
+    ingest.process_update(document_update(ALLOWED_USER_ID), config, bot, feather, pending)
+
+    assert len(bot.sent_messages) == 2  # the "Fetching..." ack, then the error
+    error_text = bot.sent_messages[1][1]
+
+    assert "MountMismatchError" in error_text
+    assert file_root in error_text
+    assert "documents/file_0.ipa" in error_text
+    assert token not in error_text
+    assert "<REDACTED>" in error_text

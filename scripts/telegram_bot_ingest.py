@@ -109,9 +109,12 @@ def _redact(text, *secrets):
     text, rather than patched in at the one call site that is known to
     leak today.
 
-    Accepts multiple secrets (token, feather admin password, the local
-    file-root config value) so callers can scrub everything sensitive that
-    might appear in a single pass.
+    Accepts multiple secrets (bot token, feather admin password, Telegram
+    API hash) so callers can scrub everything sensitive that might appear
+    in a single pass. Only genuine credentials belong here -- non-secret
+    configuration (e.g. BOT_API_FILE_ROOT, a mountpoint) must NOT be
+    passed, because scrubbing a path prefix destroys the diagnostic value
+    of path errors.
     """
     for secret in secrets:
         if secret:
@@ -132,7 +135,7 @@ def _log_exception(config, msg):
             f"{msg}\n{traceback.format_exc()}",
             config.get("bot_token"),
             config.get("feather_admin_password"),
-            config.get("bot_api_file_root"),
+            config.get("telegram_api_hash"),
         )
     )
 
@@ -333,7 +336,7 @@ def extract_ipa_metadata(path, config=None):
             secrets = [
                 config.get("bot_token"),
                 config.get("feather_admin_password"),
-                config.get("bot_api_file_root"),
+                config.get("telegram_api_hash"),
             ]
         logger.warning(_redact(f"Failed to extract metadata from IPA {path}: {e}", *secrets))
         return None, None, None
@@ -699,7 +702,7 @@ def process_update(update, config, bot, feather, pending):
                     f"Something went wrong: {type(e).__name__}: {e}",
                     config.get("bot_token"),
                     config.get("feather_admin_password"),
-                    config.get("bot_api_file_root"),
+                    config.get("telegram_api_hash"),
                 ),
             )
         except Exception:
