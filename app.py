@@ -17,6 +17,7 @@ import plistlib
 import zlib
 import struct
 import fnmatch
+import yaml
 from PIL import Image
 from functools import wraps
 from botocore.exceptions import ClientError
@@ -1679,8 +1680,347 @@ class SourceManager:
             success = self.save_source(source_data)
             return success, "Source information updated successfully" if success else "Failed to update source information"
 
+
+def _safe_base_url():
+    """resolve_base_url() outside a request context raises RuntimeError.
+    Callers that may run outside a request (module-scope smoke checks,
+    scripts) use this instead and treat None as "unknown right now"."""
+    try:
+        return resolve_base_url()
+    except RuntimeError:
+        return None
+
+
+class AndroidRepoManager:
+    """Feather's side of the F-Droid repo. It owns repo/*.apk, metadata/*.yml
+    and repo-config.json; the fdroid-index sidecar owns everything else
+    under FDROID_DIR. Every mutation ends with request_update(), which is
+    the only signal the sidecar listens for. Single-process lock, same
+    caveat as SourceManager."""
+
+    METADATA_KEYS = ("Name", "Summary", "Description", "AuthorName", "WebSite", "SourceCode", "License", "Categories")
+    _LIMITS = {"Name": 50, "Summary": 80, "Description": 4000}
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        os.makedirs(FDROID_REPO_DIR, exist_ok=True)
+        os.makedirs(FDROID_METADATA_DIR, exist_ok=True)
+
+    # --- paths -------------------------------------------------------------
+    @staticmethod
+    def apk_filename(package, version_code):
+        return f"{package}_{int(version_code)}.apk"     # matches fdroid's own --rename-apks convention
+
+    def apk_path(self, package, version_code):
+        if not ANDROID_PACKAGE_RE.match(package or ""):
+            raise ValueError(f"Invalid package name: {package!r}")
+        return os.path.join(FDROID_REPO_DIR, self.apk_filename(package, int(version_code)))
+
+    def metadata_path(self, package):
+        return os.path.join(FDROID_METADATA_DIR, f"{package}.yml")
+
+    # --- reads ---------------------------------------------------------
+    def _read_metadata(self, package):
+        path = self.metadata_path(package)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, 'r') as f:
+                return yaml.safe_load(f) or {}
+        except Exception as e:
+            logging.error(f"Error reading Android metadata for {package}: {str(e)}")
+            return None
+
+    def load_index(self):
+        """repo/index-v1.json as written by the sidecar, or None if it has never run."""
+        path = os.path.join(FDROID_REPO_DIR, "index-v1.json")
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logging.error(f"Error reading index-v1.json: {str(e)}")
+            return None
+
+    def list_apps(self):
+        """Merge of metadata/*.yml (what feather intends) and index-v1.json
+        (what is published)."""
+        index = self.load_index()
+        index_apps = {}
+        index_packages = {}
+        if index:
+            for entry in index.get('apps', []):
+                pkg = entry.get('packageName')
+                if pkg:
+                    index_apps[pkg] = entry
+            index_packages = index.get('packages', {}) or {}
+
+        packages = set(index_apps.keys())
+        if os.path.isdir(FDROID_METADATA_DIR):
+            for fn in os.listdir(FDROID_METADATA_DIR):
+                if fn.endswith('.yml'):
+                    packages.add(fn[:-4])
+
+        apk_re = re.compile(r'^(.+)_(\d+)\.apk$')
+        disk_versions = {}  # package -> {version_code: filename}
+        if os.path.isdir(FDROID_REPO_DIR):
+            for fn in os.listdir(FDROID_REPO_DIR):
+                m = apk_re.match(fn)
+                if not m:
+                    continue
+                pkg, vc = m.group(1), int(m.group(2))
+                packages.add(pkg)
+                disk_versions.setdefault(pkg, {})[vc] = fn
+
+        marker_pending = os.path.exists(FDROID_UPDATE_MARKER)
+        apps = []
+        for package in sorted(packages):
+            meta = self._read_metadata(package) or {}
+            index_entry = index_apps.get(package, {})
+            name = meta.get('Name') or index_entry.get('name') or package
+            summary = meta.get('Summary', '')
+
+            idx_pkg_list = index_packages.get(package, []) or []
+            idx_by_vc = {p.get('versionCode'): p for p in idx_pkg_list}
+            pkg_disk_versions = disk_versions.get(package, {})
+            all_vcs = set(pkg_disk_versions.keys()) | set(idx_by_vc.keys())
+
+            versions = []
+            for vc in sorted(all_vcs, reverse=True):
+                idx_v = idx_by_vc.get(vc)
+                fn = pkg_disk_versions.get(vc) or (idx_v.get('apkName') if idx_v else self.apk_filename(package, vc))
+                size = None
+                if idx_v is not None:
+                    size = idx_v.get('size')
+                elif fn:
+                    full = os.path.join(FDROID_REPO_DIR, fn)
+                    if os.path.exists(full):
+                        size = os.path.getsize(full)
+                versions.append({
+                    "versionCode": vc,
+                    "versionName": idx_v.get('versionName') if idx_v else None,
+                    "apkName": fn,
+                    "size": size,
+                    "minSdkVersion": idx_v.get('minSdkVersion') if idx_v else None,
+                    "signer": idx_v.get('signer') if idx_v else None,
+                    "published": idx_v is not None,
+                })
+
+            signers = {v['signer'] for v in versions if v.get('signer')}
+            pending = marker_pending or any(not v['published'] for v in versions)
+            apps.append({
+                "package": package,
+                "name": name,
+                "summary": summary,
+                "versions": versions,
+                "pending": pending,
+                "mixed_signers": len(signers) > 1,
+            })
+        return apps
+
+    def status(self):
+        configured = os.path.exists(FDROID_FINGERPRINT)
+        fingerprint = None
+        if configured:
+            try:
+                with open(FDROID_FINGERPRINT, 'r') as f:
+                    fingerprint = f.read().strip() or None
+            except Exception as e:
+                logging.error(f"Error reading fingerprint.txt: {str(e)}")
+                fingerprint = None
+            configured = fingerprint is not None
+
+        base = _safe_base_url()
+        if base:
+            repo_url = base.rstrip('/') + '/fdroid/repo'
+        else:
+            repo_url = self.repo_config().get('repo_url', '')
+
+        subscribe_url = None
+        if configured and fingerprint and repo_url:
+            subscribe_url = f"{repo_url}?fingerprint={fingerprint}"
+
+        last_update = None
+        if os.path.exists(FDROID_LAST_UPDATE):
+            try:
+                with open(FDROID_LAST_UPDATE, 'r') as f:
+                    last_update = json.load(f)
+            except Exception as e:
+                logging.error(f"Error reading last-update.json: {str(e)}")
+                last_update = None
+
+        index = self.load_index()
+        index_timestamp = (index.get('repo') or {}).get('timestamp') if index else None
+
+        return {
+            "configured": configured,
+            "fingerprint": fingerprint,
+            "repo_url": repo_url,
+            "subscribe_url": subscribe_url,
+            "pending": os.path.exists(FDROID_UPDATE_MARKER),
+            "last_update": last_update,
+            "index_timestamp": index_timestamp,
+        }
+
+    def repo_config(self):
+        """repo-config.json or defaults {'name': 'Feather Android', 'description': ''}"""
+        if os.path.exists(FDROID_REPO_CONFIG):
+            try:
+                with open(FDROID_REPO_CONFIG, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                logging.error(f"Error reading repo-config.json: {str(e)}")
+        return {"name": "Feather Android", "description": ""}
+
+    # --- writes (all under self._lock, all end with request_update) --------
+    def _write_repo_config_file(self, cfg):
+        os.makedirs(FDROID_DIR, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=FDROID_DIR, prefix=".repo-config-", suffix=".json.tmp")
+        try:
+            with os.fdopen(fd, 'w') as f:
+                json.dump(cfg, f, indent=2)
+            os.replace(tmp_path, FDROID_REPO_CONFIG)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
+
+    def write_repo_config(self, name, description):
+        base = _safe_base_url()
+        repo_url = (base.rstrip('/') + '/fdroid/repo') if base else self.repo_config().get('repo_url', '')
+        cfg = {"name": name, "description": description, "repo_url": repo_url}
+        with self._lock:
+            self._write_repo_config_file(cfg)
+        self.request_update()
+
+    def _ensure_repo_config_has_url(self):
+        """Called from add_apk: if repo-config.json does not exist yet, write
+        a minimal one so the sidecar always has a repo_url once feather has
+        served at least one request."""
+        if os.path.exists(FDROID_REPO_CONFIG):
+            return
+        base = _safe_base_url()
+        if not base:
+            return
+        cfg = {"name": "Feather Android", "description": "", "repo_url": base.rstrip('/') + '/fdroid/repo'}
+        with self._lock:
+            if not os.path.exists(FDROID_REPO_CONFIG):
+                self._write_repo_config_file(cfg)
+
+    def write_metadata(self, package, fields):
+        """fields: subset of METADATA_KEYS. Merges into the existing yml.
+        Enforce: Name <= 50, Summary <= 80, Description <= 4000, Categories is
+        a list (default ['Feather'])."""
+        if not ANDROID_PACKAGE_RE.match(package or ""):
+            raise ValueError(f"Invalid package name: {package!r}")
+        for key, limit in self._LIMITS.items():
+            val = fields.get(key)
+            if val is not None and len(val) > limit:
+                raise ValueError(f"{key} must be at most {limit} characters")
+
+        with self._lock:
+            data = self._read_metadata(package) or {}
+            for key in self.METADATA_KEYS:
+                if key not in fields or fields[key] is None:
+                    continue
+                if key == "Categories":
+                    val = fields[key]
+                    if isinstance(val, str):
+                        val = [c.strip() for c in val.split(',') if c.strip()]
+                    if not isinstance(val, list) or not val:
+                        raise ValueError("Categories must be a non-empty list")
+                    data[key] = list(val)
+                else:
+                    data[key] = fields[key]
+            if not data.get("Categories"):
+                data["Categories"] = ["Feather"]
+
+            os.makedirs(FDROID_METADATA_DIR, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(dir=FDROID_METADATA_DIR, prefix=f".{package}-", suffix=".yml.tmp")
+            try:
+                with os.fdopen(fd, 'w') as f:
+                    yaml.safe_dump(data, f, sort_keys=True, allow_unicode=True, default_flow_style=False)
+                os.replace(tmp_path, self.metadata_path(package))
+            except Exception:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                raise
+        self.request_update()
+
+    def add_apk(self, src_path, expected_package=None):
+        """Inspect src_path with _inspect_apk. If expected_package is given and
+        differs -> ValueError. If the destination apk already exists -> return
+        (False, 'already present') WITHOUT overwriting. Else move src -> dest.
+        Create metadata yml if missing, using app_name as Name. Return
+        (True, info_dict)."""
+        info = _inspect_apk(src_path)
+        package = info["package"]
+        if expected_package and expected_package != package:
+            raise ValueError(
+                f"APK package {package!r} does not match expected package {expected_package!r}"
+            )
+
+        dest = self.apk_path(package, info["version_code"])
+        with self._lock:
+            if os.path.exists(dest):
+                return False, "already present"
+            os.makedirs(FDROID_REPO_DIR, exist_ok=True)
+            os.replace(src_path, dest)
+
+        if not os.path.exists(self.metadata_path(package)):
+            self.write_metadata(package, {"Name": info["app_name"]})
+        self._ensure_repo_config_has_url()
+        self.request_update()
+        return True, info
+
+    def delete_version(self, package, version_code):
+        if not ANDROID_PACKAGE_RE.match(package or ""):
+            raise ValueError(f"Invalid package name: {package!r}")
+        try:
+            version_code = int(version_code)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid versionCode: {version_code!r}")
+        path = self.apk_path(package, version_code)
+        with self._lock:
+            if not os.path.exists(path):
+                return False
+            os.remove(path)
+        self.request_update()
+        return True
+
+    def delete_app(self, package):
+        if not ANDROID_PACKAGE_RE.match(package or ""):
+            raise ValueError(f"Invalid package name: {package!r}")
+        removed_something = False
+        with self._lock:
+            if os.path.isdir(FDROID_REPO_DIR):
+                prefix = f"{package}_"
+                for fn in os.listdir(FDROID_REPO_DIR):
+                    if fn.startswith(prefix) and fn.endswith(".apk"):
+                        try:
+                            os.remove(os.path.join(FDROID_REPO_DIR, fn))
+                            removed_something = True
+                        except OSError:
+                            pass
+            meta_path = self.metadata_path(package)
+            if os.path.exists(meta_path):
+                os.remove(meta_path)
+                removed_something = True
+        self.request_update()
+        return removed_something
+
+    def request_update(self):
+        os.makedirs(FDROID_DIR, exist_ok=True)
+        open(FDROID_UPDATE_MARKER, 'a').close()
+
+
 # Initialize source manager
 source_manager = SourceManager(SOURCE_FILE)
+
+# Plan 073: Android / F-Droid repository manager (own directory tree under
+# DATA_DIR/fdroid; does not touch source_manager's data at all).
+android_repo = AndroidRepoManager()
 
 # Initialize IPA storage backend. STORAGE_BACKEND defaults to "local", so
 # merging this is a no-op until the flag is deliberately flipped to
