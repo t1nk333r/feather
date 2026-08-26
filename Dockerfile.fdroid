@@ -1,0 +1,7 @@
+# Plan 073: the fdroid-index sidecar. The official fdroidserver image plus
+# one loop script. Runs as root by necessity -- see scripts/fdroid_index_loop.sh.
+FROM registry.gitlab.com/fdroid/docker-executable-fdroidserver:master
+COPY scripts/fdroid_index_loop.sh /usr/local/bin/fdroid-index-loop
+RUN chmod 755 /usr/local/bin/fdroid-index-loop
+WORKDIR /repo
+ENTRYPOINT ["/bin/sh", "/usr/local/bin/fdroid-index-loop"]

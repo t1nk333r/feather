@@ -17,6 +17,10 @@
 # importer (Plan 029) -- same rule, do NOT blanket-exclude scripts/
 !scripts/release_source_ingest.py
 
+# Dockerfile.fdroid needs this one script for the opt-in Android/F-Droid
+# sidecar (Plan 073) -- same rule, do NOT blanket-exclude scripts/
+!scripts/fdroid_index_loop.sh
+
 # Belt and braces: even if something above is loosened later, these must
 # never enter a build context.
 .env
