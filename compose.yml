@@ -4,7 +4,7 @@ services:
     # CI-built image (the one that was actually smoke-tested), while
     # `docker compose build` still works locally and tags the result as
     # this name.
-    image: ghcr.io/d7eeem/feather:latest
+    image: ghcr.io/t1nk333r/feather:latest
     build: .
     container_name: altstore-source-manager
     ports:
@@ -63,7 +63,7 @@ services:
     # CI-built image (the one that was actually smoke-tested), while
     # `docker compose build` still works locally and tags the result as
     # this name.
-    image: ghcr.io/d7eeem/feather-bot:latest
+    image: ghcr.io/t1nk333r/feather-bot:latest
     build:
       context: .
       dockerfile: Dockerfile.bot
@@ -87,7 +87,7 @@ services:
   # and it publishes through feather's HTTP API like ipa-ingest-bot does.
   release-import:
     profiles: ["release-import"]
-    image: ghcr.io/d7eeem/feather:latest
+    image: ghcr.io/t1nk333r/feather:latest
     build: .
     container_name: feather-release-import
     entrypoint: ["python", "/app/scripts/release_source_ingest.py"]
@@ -117,7 +117,7 @@ services:
   # its only mount is this one directory.
   fdroid-index:
     profiles: ["android"]
-    image: ghcr.io/d7eeem/feather-fdroid:latest
+    image: ghcr.io/t1nk333r/feather-fdroid:latest
     build:
       context: .
       dockerfile: Dockerfile.fdroid

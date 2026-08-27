@@ -12,9 +12,9 @@ pipeline {
 
   environment {
     REGISTRY = 'ghcr.io'
-    IMAGE = 'ghcr.io/d7eeem/feather'
-    BOT_IMAGE = 'ghcr.io/d7eeem/feather-bot'
-    FDROID_IMAGE = 'ghcr.io/d7eeem/feather-fdroid'
+    IMAGE = 'ghcr.io/t1nk333r/feather'
+    BOT_IMAGE = 'ghcr.io/t1nk333r/feather-bot'
+    FDROID_IMAGE = 'ghcr.io/t1nk333r/feather-fdroid'
   }
 
   stages {
