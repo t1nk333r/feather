@@ -7,10 +7,11 @@
 >
 > **Drift check (run first)**:
 > ```
-> cd /home/t1nk33r/Documents/feather
-> git rev-parse --short HEAD
-> grep -n "bot_api_file_root" scripts/telegram_bot_ingest.py
-> ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q   # expect 91 passed
+> cd /home/t1nk33r/Projects/feather
+> git rev-parse --short HEAD                                   # 764bd16 when refreshed
+> grep -n "bot_api_file_root" scripts/telegram_bot_ingest.py  # _redact args at ~135, ~336, ~702
+> ADMIN_PASSWORD=x python -m pytest tests/ -q -p no:cacheprovider   # expect 243 passed
+> # No .venv exists any more: install requirements.txt + pytest==8.3.4 in a venv, or run in python:3.11-slim.
 > ```
 
 ## Status
@@ -20,7 +21,7 @@
 - **Risk**: LOW — narrowing what is scrubbed; the token and password stay scrubbed
 - **Depends on**: 020 (DONE)
 - **Category**: bug (observability)
-- **Planned at**: 2026-08-12
+- **Planned at**: 2026-08-12; **refreshed 2026-08-26 at `764bd16`** (finding re-verified, counts/paths updated)
 
 ## Why this matters
 
@@ -62,7 +63,7 @@ def _redact(text, *secrets):
     """
 ```
 
-The bug is in **what callers pass**, plus that docstring sentence describing the file root as sensitive. Call sites are at roughly lines 131, 323 and 580 (`grep -n "_redact(" scripts/telegram_bot_ingest.py`).
+The bug is in **what callers pass**, plus that docstring sentence describing the file root as sensitive. Call sites are at lines 131–137 (`_log_exception`-style traceback logger), 330–338 (metadata-extraction warning) and 698–704 (user-facing `Something went wrong` message) (`grep -n "_redact(" scripts/telegram_bot_ingest.py`).
 
 ## What counts as a secret here
 
@@ -84,7 +85,7 @@ The bug is in **what callers pass**, plus that docstring sentence describing the
 - Removing redaction of the token or the admin password. STOP condition.
 - `compose.yml`, `app.py`, `.env.example`, `Dockerfile.bot`, `requirements.txt`, `.github/`.
 - The allowlist, the five validation checks, `resolve_local_path`'s raising behaviour, the Plan 021 extractor.
-- The 91 existing tests, **except** any that assert the file root is redacted — if one does, it encodes the bug and should be updated. Say clearly which test you changed and why; do not touch any other.
+- The 243 existing tests, **except** any that assert the file root is redacted — if one does, it encodes the bug and should be updated. Say clearly which test you changed and why; do not touch any other.
 
 ## Steps
 
@@ -114,7 +115,7 @@ Assert all of:
 
 ### Step 3: Full suite
 
-`ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q` → **92** (91 + 1), or 91 + 1 with one pre-existing test corrected if one asserted the old behaviour. State which.
+`ADMIN_PASSWORD=x python -m pytest tests/ -q` → **244** (243 + 1), or 243 + 1 with one pre-existing test corrected if one asserted the old behaviour. State which.
 
 ## Done criteria
 
@@ -125,7 +126,7 @@ ALL must hold:
 - [ ] The feather admin password is still redacted
 - [ ] A `MountMismatchError` message retains the real root and path while the token stays `<REDACTED>` — proven by the new test
 - [ ] That new test fails when the file root is re-added to the secrets list (report both runs)
-- [ ] `ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q` passes; state the count and name any pre-existing test you changed
+- [ ] `ADMIN_PASSWORD=x python -m pytest tests/ -q` passes; state the count and name any pre-existing test you changed
 - [ ] `git status --short` shows only the two in-scope files
 - [ ] `plans/README.md` status row updated
 
