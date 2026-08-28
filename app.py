@@ -13,6 +13,8 @@ import tempfile
 import hashlib
 import hmac
 import threading
+import time
+import uuid
 import boto3
 import zipfile
 import plistlib
@@ -97,6 +99,7 @@ FDROID_FINGERPRINT = os.path.join(FDROID_DIR, "fingerprint.txt")
 ALLOWED_APK_EXTENSIONS = {'apk'}
 # Android package names: Java identifiers separated by dots, at least two segments.
 ANDROID_PACKAGE_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$')
+ANDROID_APK_FILENAME_RE = re.compile(r'^(.+)_(\d+)\.apk$')
 SOURCE_ARTWORK_URL = "https://f002.backblazeb2.com/file/S30000PUBLIC/MEDIA-PUBLIC/feather-tinker-1024.png"
 LEGACY_SOURCE_ARTWORK_URLS = {
     "iconURL": "https://f000.backblazeb2.com/file/rileytestut/ExampleSource/OctoSource.png",
@@ -134,7 +137,7 @@ TELEGRAM_NOTIFY_CHAT_ID = os.environ.get("TELEGRAM_NOTIFY_CHAT_ID")
 TELEGRAM_API_BASE = os.environ.get("BOT_API_BASE_URL", "https://api.telegram.org")
 TELEGRAM_NOTIFY_EVENTS = set(
     event.strip()
-    for event in os.environ.get("TELEGRAM_NOTIFY_EVENTS", "add_app,add_version,delete_app").split(",")
+    for event in os.environ.get("TELEGRAM_NOTIFY_EVENTS", "add_app,add_version,delete_app,android_add_apk").split(",")
     if event.strip()
 )
 
@@ -916,6 +919,87 @@ class GarageIconStorage:
         return f"{GARAGE_PUBLIC_BASE_URL.rstrip('/')}/{self._key(bundle_id, ext)}"
 
 
+_NEWS_KEYS = {
+    'title', 'identifier', 'caption', 'date', 'tintColor', 'imageURL', 'notify',
+    'url', 'appID',
+}
+
+
+def _editorial_text(value, field, limit, required=False):
+    if value is None and not required:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    value = value.strip()
+    if required and not value:
+        raise ValueError(f"{field} is required")
+    if len(value) > limit or any(ord(ch) < 32 and ch not in ('\n', '\t') for ch in value):
+        raise ValueError(f"{field} is invalid or too long")
+    return value or None
+
+
+def _normalize_featured_apps(payload, source_data):
+    if not isinstance(payload, dict) or not isinstance(payload.get('bundleIdentifiers'), list):
+        raise ValueError("bundleIdentifiers must be an array")
+    values = payload['bundleIdentifiers']
+    if len(values) > 5 or any(not isinstance(value, str) or not value for value in values):
+        raise ValueError("Choose zero to five bundle identifiers")
+    if len(set(values)) != len(values):
+        raise ValueError("Featured apps cannot contain duplicates")
+    known = {app.get('bundleIdentifier') for app in source_data.get('apps', []) if isinstance(app, dict)}
+    if any(value not in known for value in values):
+        raise ValueError("Featured apps must reference existing apps")
+    return list(values)
+
+
+def _normalize_news_item(raw, source_data):
+    if not isinstance(raw, dict):
+        raise ValueError("News item must be an object")
+    if set(raw) - _NEWS_KEYS:
+        raise ValueError("News item contains unsupported fields")
+    item = {
+        'title': _editorial_text(raw.get('title'), 'title', 200, True),
+        'identifier': _editorial_text(raw.get('identifier'), 'identifier', 128, True),
+        'caption': _editorial_text(raw.get('caption'), 'caption', 1000, True),
+    }
+    if not re.fullmatch(r'[A-Za-z0-9._-]+', item['identifier']):
+        raise ValueError("identifier may contain only letters, digits, dot, underscore, and hyphen")
+    date_raw = _editorial_text(raw.get('date'), 'date', 64, True)
+    try:
+        parsed = datetime.fromisoformat(date_raw[:-1] + '+00:00' if date_raw.endswith('Z') else date_raw)
+    except ValueError:
+        raise ValueError("date must be a timezone-aware ISO-8601 value")
+    if parsed.tzinfo is None:
+        raise ValueError("date must include a timezone")
+    item['date'] = parsed.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    color = raw.get('tintColor')
+    if color not in (None, ''):
+        if not isinstance(color, str) or not re.fullmatch(r'#?[0-9A-Fa-f]{6}', color.strip()):
+            raise ValueError("tintColor must be a six-digit hex color")
+        item['tintColor'] = '#' + color.strip().lstrip('#').upper()
+    for field in ('imageURL', 'url'):
+        value = raw.get(field)
+        if value in (None, ''):
+            continue
+        value = _editorial_text(value, field, 2048, False)
+        parsed_url = urlparse(value)
+        if parsed_url.scheme not in ('http', 'https') or not parsed_url.hostname or parsed_url.username or parsed_url.password:
+            raise ValueError(f"{field} must be an absolute HTTP(S) URL without credentials")
+        item[field] = value
+    if 'notify' in raw:
+        if not isinstance(raw['notify'], bool):
+            raise ValueError("notify must be a boolean")
+        item['notify'] = raw['notify']
+    app_id = raw.get('appID')
+    if app_id not in (None, ''):
+        app_id = _editorial_text(app_id, 'appID', 256, False)
+        known = {app.get('bundleIdentifier') for app in source_data.get('apps', []) if isinstance(app, dict)}
+        if app_id not in known:
+            raise ValueError("appID must reference an existing app")
+        item['appID'] = app_id
+    return item
+
+
 class SourceManager:
     """Manages the AltSource data and file operations"""
     
@@ -1254,6 +1338,26 @@ class SourceManager:
                 except OSError:
                     pass
             return False
+
+    def restore_backup(self, filename, expected_sha256, allow_missing_artifacts=False):
+        """Validate and atomically restore one exact catalog snapshot."""
+        with self._lock:
+            path = _resolve_backup_path(filename)
+            actual_sha256 = _sha256_file(path)
+            if not isinstance(expected_sha256, str) or not hmac.compare_digest(actual_sha256, expected_sha256):
+                return False, "Snapshot changed since preview", None
+            candidate, error = _load_catalog_snapshot(path)
+            if error:
+                return False, error, None
+            current = self.load_source()
+            issues = _scan_catalog_health(candidate)
+            blocking = [issue for issue in issues if issue.get('kind') in ('missing-ipa', 'not-a-zip', 'empty-or-nonpublic-downloadURL')]
+            if blocking and not allow_missing_artifacts:
+                return False, "Snapshot references missing or invalid IPA artifacts", None
+            diff = _catalog_structural_diff(current or {}, candidate)
+            if not self.save_source(candidate):
+                return False, "Failed to restore catalog", None
+            return True, "Catalog restored", {"diff": diff, "issues": issues}
     
     def get_current_dates(self):
         """Get properly formatted dates for Feather compatibility"""
@@ -1273,6 +1377,19 @@ class SourceManager:
             dates = self.get_current_dates()
             bundle_id = data['bundleIdentifier']
             version = data['version']
+
+            # Match add_version's idempotency rule before touching storage.
+            # Manual form retries must not overwrite an existing binary or
+            # append a duplicate catalog version.
+            for existing_app in source_data.get('apps', []):
+                if existing_app.get('bundleIdentifier') == bundle_id:
+                    if any(
+                        isinstance(existing_version, dict)
+                        and existing_version.get('version') == version
+                        for existing_version in existing_app.get('versions', [])
+                    ):
+                        return True, f"Version {version} already exists; nothing to add"
+
             download_url = data.get('downloadURL', '')
             icon_url = data.get('iconURL', '')
         
@@ -1325,12 +1442,19 @@ class SourceManager:
                 "addedDate": dates['feather_date'],
                 "versions": [{
                     "version": version,
+                    "buildVersion": str(data.get('buildVersion') or version),
                     "date": dates['version_date'],
                     "downloadURL": download_url,
-                    "minOSVersion": data.get('minOSVersion', '14.0'),
+                    "minOSVersion": data.get('minOSVersion') or '14.0',
                     "size": file_size
                 }]
             }
+            permissions = data.get('appPermissions')
+            if isinstance(permissions, dict) and permissions.get('privacy'):
+                new_app['appPermissions'] = {
+                    "entitlements": [],
+                    "privacy": dict(permissions['privacy']),
+                }
         
             # Check if app already exists
             existing_index = None
@@ -1568,6 +1692,7 @@ class SourceManager:
 
             new_version = {
                 "version": version,
+                "buildVersion": str(version_data.get('buildVersion') or version),
                 "date": dates['version_date'],
                 "downloadURL": download_url,
                 "minOSVersion": min_os,
@@ -1682,6 +1807,47 @@ class SourceManager:
             success = self.save_source(source_data)
             return success, "Source information updated successfully" if success else "Failed to update source information"
 
+    def update_featured_apps(self, payload):
+        with self._lock:
+            source_data = self.load_source()
+            if not source_data:
+                return False, "Failed to load source data", None
+            values = _normalize_featured_apps(payload, source_data)
+            source_data['featuredApps'] = values
+            success = self.save_source(source_data)
+            return success, "Featured apps updated" if success else "Failed to update featured apps", values
+
+    def upsert_news_item(self, payload):
+        with self._lock:
+            source_data = self.load_source()
+            if not source_data:
+                return False, "Failed to load source data", None
+            item = _normalize_news_item(payload, source_data)
+            news = source_data.get('news', [])
+            if not isinstance(news, list):
+                return False, "Stored news data is invalid", None
+            news = [entry for entry in news if isinstance(entry, dict) and entry.get('identifier') != item['identifier']]
+            news.append(item)
+            news.sort(key=lambda entry: (entry.get('date', ''), entry.get('identifier', '')), reverse=True)
+            source_data['news'] = news
+            success = self.save_source(source_data)
+            return success, "News item saved" if success else "Failed to save news item", item
+
+    def delete_news_item(self, identifier):
+        with self._lock:
+            source_data = self.load_source()
+            if not source_data:
+                return False, "Failed to load source data"
+            news = source_data.get('news', [])
+            if not isinstance(news, list):
+                return False, "Stored news data is invalid"
+            kept = [entry for entry in news if not isinstance(entry, dict) or entry.get('identifier') != identifier]
+            if len(kept) == len(news):
+                return False, "News item not found"
+            source_data['news'] = kept
+            success = self.save_source(source_data)
+            return success, "News item deleted" if success else "Failed to delete news item"
+
 
 def _safe_base_url():
     """resolve_base_url() outside a request context raises RuntimeError.
@@ -1764,11 +1930,10 @@ class AndroidRepoManager:
                 if fn.endswith('.yml'):
                     packages.add(fn[:-4])
 
-        apk_re = re.compile(r'^(.+)_(\d+)\.apk$')
         disk_versions = {}  # package -> {version_code: filename}
         if os.path.isdir(FDROID_REPO_DIR):
             for fn in os.listdir(FDROID_REPO_DIR):
-                m = apk_re.match(fn)
+                m = ANDROID_APK_FILENAME_RE.match(fn)
                 if not m:
                     continue
                 pkg, vc = m.group(1), int(m.group(2))
@@ -1821,7 +1986,9 @@ class AndroidRepoManager:
             })
         return apps
 
-    def status(self):
+    def status(self, sync_url=False):
+        if sync_url and self._sync_repo_config_url():
+            self.request_update()
         configured = os.path.exists(FDROID_FINGERPRINT)
         fingerprint = None
         if configured:
@@ -1902,19 +2069,53 @@ class AndroidRepoManager:
             self._write_repo_config_file(cfg)
         self.request_update()
 
-    def _ensure_repo_config_has_url(self):
-        """Called from add_apk: if repo-config.json does not exist yet, write
-        a minimal one so the sidecar always has a repo_url once feather has
-        served at least one request."""
-        if os.path.exists(FDROID_REPO_CONFIG):
-            return
+    def _sync_repo_config_url(self):
+        """Persist the request/config-derived public URL when it changes."""
         base = _safe_base_url()
         if not base:
-            return
-        cfg = {"name": "Feather Android", "description": "", "repo_url": base.rstrip('/') + '/fdroid/repo'}
+            if not self.repo_config().get('repo_url'):
+                logging.warning(
+                    "Android repo URL is unknown; the sidecar will advertise its "
+                    "localhost fallback until PUBLIC_BASE_URL is set"
+                )
+            return False
+        want = base.rstrip('/') + '/fdroid/repo'
+        cfg = self.repo_config()
+        if cfg.get('repo_url') == want:
+            return False
+        cfg = {
+            "name": cfg.get("name") or "Feather Android",
+            "description": cfg.get("description") or "",
+            "repo_url": want,
+        }
         with self._lock:
-            if not os.path.exists(FDROID_REPO_CONFIG):
-                self._write_repo_config_file(cfg)
+            self._write_repo_config_file(cfg)
+        return True
+
+    def validate_metadata(self, fields):
+        """Validate and normalize API metadata without mutating storage."""
+        normalized = {}
+        for key, value in fields.items():
+            if key not in self.METADATA_KEYS or value is None:
+                continue
+            if key == "Categories":
+                if isinstance(value, str):
+                    value = [category.strip() for category in value.split(',') if category.strip()]
+                if (
+                    not isinstance(value, list)
+                    or not value
+                    or any(not isinstance(category, str) or not category.strip() for category in value)
+                ):
+                    raise ValueError("Categories must be a non-empty list of strings")
+                normalized[key] = [category.strip() for category in value]
+                continue
+            if not isinstance(value, str):
+                raise ValueError(f"{key} must be a string")
+            limit = self._LIMITS.get(key)
+            if limit is not None and len(value) > limit:
+                raise ValueError(f"{key} must be at most {limit} characters")
+            normalized[key] = value
+        return normalized
 
     def write_metadata(self, package, fields):
         """fields: subset of METADATA_KEYS. Merges into the existing yml.
@@ -1922,10 +2123,7 @@ class AndroidRepoManager:
         a list (default ['Feather'])."""
         if not ANDROID_PACKAGE_RE.match(package or ""):
             raise ValueError(f"Invalid package name: {package!r}")
-        for key, limit in self._LIMITS.items():
-            val = fields.get(key)
-            if val is not None and len(val) > limit:
-                raise ValueError(f"{key} must be at most {limit} characters")
+        fields = self.validate_metadata(fields)
 
         with self._lock:
             data = self._read_metadata(package) or {}
@@ -1933,12 +2131,7 @@ class AndroidRepoManager:
                 if key not in fields or fields[key] is None:
                     continue
                 if key == "Categories":
-                    val = fields[key]
-                    if isinstance(val, str):
-                        val = [c.strip() for c in val.split(',') if c.strip()]
-                    if not isinstance(val, list) or not val:
-                        raise ValueError("Categories must be a non-empty list")
-                    data[key] = list(val)
+                    data[key] = list(fields[key])
                 else:
                     data[key] = fields[key]
             if not data.get("Categories"):
@@ -1972,7 +2165,7 @@ class AndroidRepoManager:
         dest = self.apk_path(package, info["version_code"])
         with self._lock:
             if os.path.exists(dest):
-                return False, "already present"
+                return False, info
             os.makedirs(FDROID_REPO_DIR, exist_ok=True)
             try:
                 os.replace(src_path, dest)
@@ -1986,12 +2179,23 @@ class AndroidRepoManager:
                 # Fall back to copy+remove in that case only.
                 if e.errno != errno.EXDEV:
                     raise
-                shutil.copy2(src_path, dest)
+                tmp_dest = os.path.join(FDROID_REPO_DIR, f".{os.path.basename(dest)}.part")
+                try:
+                    shutil.copy2(src_path, tmp_dest)
+                    with open(tmp_dest, 'rb') as copied:
+                        os.fsync(copied.fileno())
+                    os.replace(tmp_dest, dest)
+                finally:
+                    if os.path.exists(tmp_dest):
+                        try:
+                            os.remove(tmp_dest)
+                        except OSError:
+                            pass
                 os.remove(src_path)
 
         if not os.path.exists(self.metadata_path(package)):
             self.write_metadata(package, {"Name": info["app_name"]})
-        self._ensure_repo_config_has_url()
+        self._sync_repo_config_url()
         self.request_update()
         return True, info
 
@@ -2016,14 +2220,15 @@ class AndroidRepoManager:
         removed_something = False
         with self._lock:
             if os.path.isdir(FDROID_REPO_DIR):
-                prefix = f"{package}_"
                 for fn in os.listdir(FDROID_REPO_DIR):
-                    if fn.startswith(prefix) and fn.endswith(".apk"):
-                        try:
-                            os.remove(os.path.join(FDROID_REPO_DIR, fn))
-                            removed_something = True
-                        except OSError:
-                            pass
+                    match = ANDROID_APK_FILENAME_RE.match(fn)
+                    if not match or match.group(1) != package:
+                        continue
+                    try:
+                        os.remove(os.path.join(FDROID_REPO_DIR, fn))
+                        removed_something = True
+                    except OSError:
+                        pass
             meta_path = self.metadata_path(package)
             if os.path.exists(meta_path):
                 os.remove(meta_path)
@@ -2102,7 +2307,7 @@ def serve_source():
         return jsonify(normalize_source(source_data))
     except Exception as e:
         logging.error(f"Error serving source: {str(e)}")
-        return jsonify({"error": str(e)}), 404
+        return jsonify({"error": "Source unavailable"}), 404
 
 @app.route('/ipas/<bundle_id>/<filename>')
 def serve_ipa(bundle_id, filename):
@@ -2131,7 +2336,7 @@ def serve_ipa(bundle_id, filename):
         return send_file(filepath, mimetype='application/octet-stream', as_attachment=True, download_name=filename)
     except Exception as e:
         logging.error(f"Error serving IPA: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "IPA unavailable"}), 500
 
 @app.route('/icons/<bundle_id>/icon.<ext>')
 def serve_icon(bundle_id, ext):
@@ -2160,7 +2365,7 @@ def serve_icon(bundle_id, ext):
         return send_file(filepath, mimetype=mimetype)
     except Exception as e:
         logging.error(f"Error serving icon: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Icon unavailable"}), 500
 
 @app.route('/qr')
 def generate_qr():
@@ -2239,9 +2444,16 @@ def add_app():
                 'localizedDescription': request.form.get('localizedDescription', ''),
                 'iconURL': request.form.get('iconURL', ''),
                 'version': request.form.get('version'),
+                'buildVersion': request.form.get('buildVersion'),
                 'downloadURL': request.form.get('downloadURL', ''),
                 'minOSVersion': request.form.get('minOSVersion', '14.0')
             }
+            privacy_raw = request.form.get('privacy')
+            if privacy_raw:
+                privacy = json.loads(privacy_raw)
+                if not isinstance(privacy, dict):
+                    raise ValueError("privacy must be a JSON object")
+                data['appPermissions'] = {"entitlements": [], "privacy": privacy}
         else:
             # JSON request (backward compatibility)
             data = request.get_json() if request.is_json else {}
@@ -2366,6 +2578,7 @@ def add_version():
             bundle_id = request.form.get('bundleIdentifier')
             data = {
                 'version': request.form.get('version'),
+                'buildVersion': request.form.get('buildVersion'),
                 'downloadURL': request.form.get('downloadURL', ''),
                 'minOSVersion': request.form.get('minOSVersion', '')
             }
@@ -2741,6 +2954,122 @@ def _apply_icon_to_existing(bundle_id, existing, ipa_path, *, provider, project,
 
 
 # ---------------------------------------------------------------------------
+# Import provenance: private, bounded operational history outside source.json.
+# ---------------------------------------------------------------------------
+
+_IMPORT_HISTORY_LOCK = threading.Lock()
+_IMPORT_HISTORY_MAX = 200
+_IMPORT_HISTORY_STRING_FIELDS = {
+    "jobId", "provider", "project", "releaseId", "releaseTag", "assetId",
+    "assetName", "bundleIdentifier", "version", "buildVersion", "platform",
+    "sha256", "message",
+}
+
+
+def _import_history_path():
+    return os.path.join(DATA_DIR, "import-history.json")
+
+
+def _clean_history_text(value, limit=256):
+    if not isinstance(value, str):
+        return None
+    value = _redact_secret(value)
+    value = ''.join(ch for ch in value if ch >= ' ' and ch != '\x7f').strip()
+    return value[:limit] or None
+
+
+def _normalize_import_record(raw, force_trigger=None):
+    if not isinstance(raw, dict):
+        raise ValueError("Import record must be an object")
+    trigger = force_trigger or raw.get("trigger")
+    if trigger not in ("one-off", "auto", "standalone"):
+        raise ValueError("Invalid import trigger")
+    status = raw.get("status")
+    if status not in ("published", "skipped", "error"):
+        raise ValueError("Invalid import status")
+    stage = raw.get("stage")
+    if stage not in ("selection", "download", "preflight", "publish"):
+        raise ValueError("Invalid import stage")
+    record = {
+        "id": uuid.uuid4().hex,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "trigger": trigger,
+        "status": status,
+        "stage": stage,
+    }
+    duration = raw.get("durationMs")
+    if isinstance(duration, int) and not isinstance(duration, bool) and 0 <= duration <= 604800000:
+        record["durationMs"] = duration
+    for key in _IMPORT_HISTORY_STRING_FIELDS:
+        value = _clean_history_text(raw.get(key), 500 if key == "message" else 256)
+        if value is not None:
+            record[key] = value
+    return record
+
+
+def load_import_history():
+    try:
+        with open(_import_history_path(), 'r') as handle:
+            data = json.load(handle)
+        if not isinstance(data, dict) or data.get("schemaVersion") != 1 or not isinstance(data.get("records"), list):
+            raise ValueError("unsupported import history schema")
+        return data
+    except FileNotFoundError:
+        return {"schemaVersion": 1, "records": []}
+    except Exception as exc:
+        logging.warning("Could not load import history: %s", exc)
+        return {"schemaVersion": 1, "records": []}
+
+
+def append_import_record(raw, force_trigger=None):
+    """Best-effort append; provenance can never determine import success."""
+    try:
+        record = _normalize_import_record(raw, force_trigger=force_trigger)
+        with _IMPORT_HISTORY_LOCK:
+            data = load_import_history()
+            data["records"] = (data.get("records", []) + [record])[-_IMPORT_HISTORY_MAX:]
+            path = _import_history_path()
+            directory = os.path.dirname(path) or '.'
+            os.makedirs(directory, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(dir=directory, prefix='.import-history-', suffix='.tmp')
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, 'w') as handle:
+                    json.dump(data, handle, indent=2)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp_path, path)
+                os.chmod(path, 0o600)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+        return True
+    except Exception:
+        logging.exception("Failed to append import history")
+        return False
+
+
+def _candidate_history_fields(candidate):
+    if candidate is None:
+        return {}
+    return {
+        "provider": candidate.provider, "project": candidate.project,
+        "releaseId": candidate.release_id, "releaseTag": candidate.release_tag,
+        "assetId": candidate.asset_id, "assetName": candidate.asset_name,
+    }
+
+
+def _inspection_history_fields(inspection):
+    if inspection is None:
+        return {}
+    return {
+        "bundleIdentifier": inspection.bundle_identifier,
+        "version": inspection.version, "buildVersion": inspection.build_version,
+        "platform": inspection.platform,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Auto-import (Plan 048): an app-managed job store + in-process scheduler
 # that runs the same release-ingest engine as /api/import-release above, on
 # a schedule, without a host crontab or .env manifest.
@@ -2778,30 +3107,44 @@ def load_auto_import():
         return copy.deepcopy(_AUTO_IMPORT_DEFAULT)
 
 
+def _save_auto_import_unlocked(data):
+    """Write the store while the caller owns _AUTO_IMPORT_WRITE_LOCK."""
+    tmp_path = None
+    try:
+        path = _auto_import_path()
+        directory = os.path.dirname(path) or "."
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".auto-import-", suffix=".json.tmp")
+        with os.fdopen(fd, 'w') as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        return True
+    except Exception as e:
+        logging.error(f"Error saving auto-import store: {str(e)}")
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        return False
+
+
 def save_auto_import(data):
-    """Atomically write the auto-import job store: temp file + os.replace,
-    mirroring SourceManager.save_source's write pattern."""
+    """Atomically replace the auto-import store."""
     with _AUTO_IMPORT_WRITE_LOCK:
-        tmp_path = None
-        try:
-            path = _auto_import_path()
-            directory = os.path.dirname(path) or "."
-            os.makedirs(directory, exist_ok=True)
-            fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".auto-import-", suffix=".json.tmp")
-            with os.fdopen(fd, 'w') as f:
-                json.dump(data, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, path)
-            return True
-        except Exception as e:
-            logging.error(f"Error saving auto-import store: {str(e)}")
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
-            return False
+        return _save_auto_import_unlocked(data)
+
+
+def mutate_auto_import(fn):
+    """Atomically load, mutate, and save the auto-import store."""
+    with _AUTO_IMPORT_WRITE_LOCK:
+        data = load_auto_import()
+        result = fn(data)
+        if not _save_auto_import_unlocked(data):
+            raise OSError("Failed to save auto-import store")
+        return result
 
 
 def _validate_auto_import_job(raw):
@@ -2832,6 +3175,10 @@ def _validate_auto_import_job(raw):
     asset_glob = (raw.get('assetGlob') or '*.ipa').strip()
     if not asset_glob:
         raise ValueError("assetGlob is required")
+    asset_exclude_raw = raw.get('assetExcludeGlob')
+    if asset_exclude_raw is not None and not isinstance(asset_exclude_raw, str):
+        raise ValueError("assetExcludeGlob must be a string")
+    asset_exclude_glob = (asset_exclude_raw or '').strip() or None
 
     hosts_in = raw.get('allowedDownloadHosts') or []
     if not isinstance(hosts_in, list):
@@ -2852,6 +3199,7 @@ def _validate_auto_import_job(raw):
         "project": project,
         "bundleIdentifier": bundle_id,
         "assetGlob": asset_glob,
+        "assetExcludeGlob": asset_exclude_glob,
         "includePrereleases": bool(raw.get('includePrereleases')),
         "createIfMissing": create_if_missing,
         "name": name,
@@ -2868,6 +3216,11 @@ def _run_auto_import_job(job, base_url, session_req, tokens):
     result dict, and persists it onto the stored job's lastRunAt/lastResult."""
     tmp_path = None
     result = None
+    started = time.monotonic()
+    candidate = None
+    inspection = None
+    digest = None
+    stage = "selection"
     try:
         job_obj = release_ingest.Job(
             id=job.get('id') or '',
@@ -2875,6 +3228,7 @@ def _run_auto_import_job(job, base_url, session_req, tokens):
             project=job.get('project') or '',
             bundle_identifier=job.get('bundleIdentifier') or "",
             asset_glob=job.get('assetGlob') or "*.ipa",
+            asset_exclude_glob=job.get('assetExcludeGlob') or None,
             include_prereleases=bool(job.get('includePrereleases')),
             create_if_missing=bool(job.get('createIfMissing')),
             allowed_download_hosts=frozenset(
@@ -2884,28 +3238,48 @@ def _run_auto_import_job(job, base_url, session_req, tokens):
             developer_name=job.get('developerName') or None,
         )
         candidate = release_ingest.select_candidate(job_obj, session_req, tokens, timeout=30)
+        stage = "download"
         fd, tmp_path = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix=".ipa")
         os.close(fd)
-        release_ingest.stream_download(
+        _downloaded, digest = release_ingest.stream_download(
             session_req, candidate, job_obj, tmp_path, tokens,
             release_ingest.DEFAULT_TIMEOUT, release_ingest.DEFAULT_MAX_BYTES,
         )
-        bundle_id, version, detected_name = release_ingest.extract_ipa_metadata(
+        stage = "preflight"
+        inspection = release_ingest.inspect_ipa_metadata(
             tmp_path, candidate.asset_name, job_obj, candidate)
+        bundle_id = inspection.bundle_identifier
+        version = inspection.version
+        detected_name = inspection.name
+        preflight = {
+            "platform": inspection.platform,
+            "bundleIdentifier": bundle_id,
+            "name": detected_name,
+            "version": version,
+            "buildVersion": inspection.build_version,
+            "minOSVersion": inspection.minimum_os_version,
+            "deviceFamilies": list(inspection.device_families),
+            "privacyKeys": sorted(inspection.privacy),
+        }
 
         existing = source_manager.get_app(bundle_id)
         already_present = bool(existing) and any(
             isinstance(v, dict) and v.get('version') == version for v in existing.get('versions', [])
         )
         if already_present:
-            result = {"status": "skipped", "version": version}
+            result = {"status": "skipped", "version": version, "preflight": preflight}
         else:
+            stage = "publish"
             ok = False
             message = ""
             fs = FileStorage(stream=open(tmp_path, "rb"), filename=f"{secure_filename(version)}.ipa")
             if existing:
                 ok, message = source_manager.add_version(
-                    bundle_id, {"version": version}, ipa_file=fs, base_url=base_url)
+                    bundle_id, {
+                        "version": version,
+                        "buildVersion": inspection.build_version,
+                        "minOSVersion": inspection.minimum_os_version,
+                    }, ipa_file=fs, base_url=base_url)
                 if ok:
                     _apply_icon_to_existing(
                         bundle_id, existing, tmp_path,
@@ -2916,7 +3290,13 @@ def _run_auto_import_job(job, base_url, session_req, tokens):
                 new_name = job_obj.name or detected_name or bundle_id
                 new_developer = job_obj.developer_name or _repo_owner(job_obj.project) or "Unknown"
                 new_app = {"name": new_name, "bundleIdentifier": bundle_id,
-                           "developerName": new_developer, "version": version}
+                           "developerName": new_developer, "version": version,
+                           "buildVersion": inspection.build_version,
+                           "minOSVersion": inspection.minimum_os_version}
+                if inspection.privacy:
+                    new_app["appPermissions"] = {
+                        "entitlements": [], "privacy": inspection.privacy,
+                    }
                 description = _clean_description(getattr(candidate, "release_body", ""))
                 if description:
                     new_app["localizedDescription"] = description
@@ -2950,7 +3330,7 @@ def _run_auto_import_job(job, base_url, session_req, tokens):
             if ok:
                 notify("add_version",
                        f"Auto-imported {bundle_id} {version} from {job_obj.provider}:{job_obj.project}\n{base_url}/source.json")
-                result = {"status": "published", "version": version}
+                result = {"status": "published", "version": version, "preflight": preflight}
             else:
                 result = {"status": "error", "message": message}
     except Exception as e:
@@ -2962,15 +3342,30 @@ def _run_auto_import_job(job, base_url, session_req, tokens):
             except OSError:
                 pass
 
+    history = {
+        "trigger": "auto", "jobId": job.get('id'),
+        "status": result.get("status") if result and result.get("status") in ("published", "skipped") else "error",
+        "stage": stage,
+        "durationMs": int((time.monotonic() - started) * 1000),
+        "message": result.get("message") if result else None,
+        **_candidate_history_fields(candidate),
+        **_inspection_history_fields(inspection),
+    }
+    if digest:
+        history["sha256"] = digest
+    append_import_record(history)
+
     # Persist lastRunAt/lastResult onto the stored job.
     try:
-        data = load_auto_import()
-        for stored in data.get('jobs', []):
-            if stored.get('id') == job.get('id'):
-                stored['lastRunAt'] = datetime.now(timezone.utc).isoformat()
-                stored['lastResult'] = result
-                break
-        save_auto_import(data)
+        def stamp_job(data):
+            now = datetime.now(timezone.utc).isoformat()
+            for stored in data.get('jobs', []):
+                if stored.get('id') == job.get('id'):
+                    stored['lastRunAt'] = now
+                    stored['lastResult'] = result
+                    break
+
+        mutate_auto_import(stamp_job)
     except Exception:
         logging.exception("Failed to persist auto-import job result for %s", job.get('id'))
 
@@ -2993,10 +3388,50 @@ def _run_all_enabled_jobs(base_url):
             # loop itself too so one pathological job can never abort the batch.
             results[job.get('id')] = {"status": "error", "message": str(e)}
 
-    data = load_auto_import()
-    data['lastRunAt'] = datetime.now(timezone.utc).isoformat()
-    save_auto_import(data)
+    mutate_auto_import(
+        lambda data: data.__setitem__('lastRunAt', datetime.now(timezone.utc).isoformat())
+    )
     return results
+
+
+def _auto_import_due(data, now):
+    """Return whether an enabled schedule is due at aware UTC `now`."""
+    if not data.get('enabled'):
+        return False
+    interval_hours = data.get('intervalHours') or 6
+    last_run_at = data.get('lastRunAt')
+    if not last_run_at:
+        return True
+    try:
+        last_dt = datetime.fromisoformat(last_run_at)
+    except (TypeError, ValueError):
+        return True
+    if last_dt.tzinfo is None:
+        last_dt = last_dt.replace(tzinfo=timezone.utc)
+    return (now - last_dt).total_seconds() >= interval_hours * 3600
+
+
+def _auto_import_scheduler_cycle():
+    """Run one scheduler decision cycle and return its polling interval."""
+    data = load_auto_import()
+    interval_hours = data.get('intervalHours') or 6
+    if not _auto_import_due(data, datetime.now(timezone.utc)):
+        return interval_hours
+    if not _auto_import_run_lock.acquire(blocking=False):
+        return interval_hours
+    try:
+        base_url = _safe_base_url()
+        if base_url is None:
+            logging.warning(
+                "auto-import scheduler: PUBLIC_BASE_URL is not set and there is no "
+                "request context to derive a base URL from -- skipping this cycle. "
+                "Set PUBLIC_BASE_URL to enable scheduled imports."
+            )
+        else:
+            _run_all_enabled_jobs(base_url)
+    finally:
+        _auto_import_run_lock.release()
+    return interval_hours
 
 
 def _auto_import_scheduler_loop(stop_event):
@@ -3009,26 +3444,7 @@ def _auto_import_scheduler_loop(stop_event):
     while not stop_event.is_set():
         interval_hours = 6
         try:
-            data = load_auto_import()
-            interval_hours = data.get('intervalHours') or 6
-            if data.get('enabled'):
-                last_run_at = data.get('lastRunAt')
-                should_run = not last_run_at
-                if not should_run:
-                    try:
-                        last_dt = datetime.fromisoformat(last_run_at)
-                        if last_dt.tzinfo is None:
-                            last_dt = last_dt.replace(tzinfo=timezone.utc)
-                        elapsed = (datetime.now(timezone.utc) - last_dt).total_seconds()
-                        should_run = elapsed >= interval_hours * 3600
-                    except ValueError:
-                        should_run = True
-                if should_run:
-                    if _auto_import_run_lock.acquire(blocking=False):
-                        try:
-                            _run_all_enabled_jobs(resolve_base_url())
-                        finally:
-                            _auto_import_run_lock.release()
+            interval_hours = _auto_import_scheduler_cycle()
         except Exception:
             logging.exception("auto-import scheduler cycle failed")
 
@@ -3050,6 +3466,70 @@ def _start_auto_import_scheduler():
     return thread, stop_event
 
 
+def _release_job_from_payload(payload, job_id="ui-import"):
+    """Normalize the provider/selector fields shared by inspect and import."""
+    if not isinstance(payload, dict):
+        raise ValueError("Request body must be a JSON object")
+    provider = (payload.get('provider') or '').strip().lower()
+    project = _normalize_repo_project(payload.get('project') or '')
+    if provider not in ('github', 'gitlab'):
+        raise ValueError("Provider must be github or gitlab")
+    if not project:
+        raise ValueError("Repository is required")
+    if provider == 'github' and not release_ingest._GITHUB_PROJECT_RE.match(project):
+        raise ValueError("GitHub repository must be owner/repo, e.g. RyanYuuki/AnymeX")
+
+    asset_glob_raw = payload.get('assetGlob', '*.ipa')
+    if not isinstance(asset_glob_raw, str) or not asset_glob_raw.strip():
+        raise ValueError("Asset glob is required")
+    exclude_raw = payload.get('assetExcludeGlob')
+    if exclude_raw is not None and not isinstance(exclude_raw, str):
+        raise ValueError("Asset exclude glob must be a string")
+    hosts_in = payload.get('allowedDownloadHosts') or []
+    if not isinstance(hosts_in, list) or any(not isinstance(h, str) for h in hosts_in):
+        raise ValueError("Allowed download hosts must be a list of hostnames")
+    allowed = frozenset(h.strip().lower() for h in hosts_in if h.strip())
+    for host in allowed:
+        release_ingest._validate_download_host(job_id, host)
+    if provider == 'gitlab' and not allowed:
+        raise ValueError("GitLab imports require at least one allowed download host")
+
+    return release_ingest.Job(
+        id=job_id,
+        provider=provider,
+        project=project,
+        bundle_identifier=(payload.get('bundleIdentifier') or '').strip(),
+        asset_glob=asset_glob_raw.strip(),
+        asset_exclude_glob=(exclude_raw or '').strip() or None,
+        include_prereleases=bool(payload.get('includePrereleases')),
+        create_if_missing=bool(payload.get('createIfMissing')),
+        allowed_download_hosts=allowed,
+        name=(payload.get('name') or '').strip() or None,
+        developer_name=(payload.get('developerName') or '').strip() or None,
+    )
+
+
+@app.route('/api/import-release/inspect', methods=['POST'])
+@requires_auth
+def inspect_import_release():
+    payload = request.get_json(silent=True) or {}
+    try:
+        job = _release_job_from_payload(payload, job_id="ui-inspect")
+        tokens = {
+            "github": os.environ.get("GITHUB_TOKEN"),
+            "gitlab": os.environ.get("GITLAB_TOKEN"),
+        }
+        releases = release_ingest.inspect_release_assets(
+            job, requests.Session(), tokens, timeout=30, limit=5
+        )
+        return jsonify({"releases": releases})
+    except (ValueError, release_ingest.ConfigError, release_ingest.ProviderError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        logging.exception("import-release inspection failed")
+        return jsonify({"error": "Asset inspection failed"}), 500
+
+
 @app.route('/api/import-release', methods=['POST'])
 @requires_auth
 def import_release():
@@ -3058,6 +3538,7 @@ def import_release():
     project = _normalize_repo_project(payload.get('project') or '')
     bundle_id_in = (payload.get('bundleIdentifier') or '').strip()
     asset_glob = (payload.get('assetGlob') or '*.ipa').strip()
+    asset_exclude_glob = payload.get('assetExcludeGlob')
     include_pre = bool(payload.get('includePrereleases'))
     create_if_missing = bool(payload.get('createIfMissing'))
     name_in = (payload.get('name') or '').strip()
@@ -3071,30 +3552,20 @@ def import_release():
 
     def run():
         tmp_path = None
+        started = time.monotonic()
+        candidate = None
+        inspection = None
+        digest = None
+        history_stage = "selection"
+        history_status = "error"
+        history_message = None
         try:
-            if provider not in ('github', 'gitlab'):
-                yield event(stage="error", error="Provider must be github or gitlab")
-                return
-            if not project:
-                yield event(stage="error", error="Repository is required")
-                return
-            if provider == 'github' and not release_ingest._GITHUB_PROJECT_RE.match(project):
-                yield event(stage="error", error="GitHub repository must be owner/repo, e.g. RyanYuuki/AnymeX")
-                return
-            allowed = frozenset(h.strip().lower() for h in hosts_in if h.strip())
-            if provider == 'gitlab' and not allowed:
-                yield event(stage="error", error="GitLab imports require at least one allowed download host")
-                return
-            job = release_ingest.Job(
-                id="ui-import", provider=provider, project=project,
-                bundle_identifier=bundle_id_in or "", asset_glob=asset_glob,
-                include_prereleases=include_pre, create_if_missing=create_if_missing,
-                allowed_download_hosts=allowed, name=name_in or None, developer_name=developer_in or None,
-            )
+            job = _release_job_from_payload(payload)
             tokens = {"github": os.environ.get("GITHUB_TOKEN"), "gitlab": os.environ.get("GITLAB_TOKEN")}
             session_req = requests.Session()
             yield event(stage="resolving")
             candidate = release_ingest.select_candidate(job, session_req, tokens, timeout=30)
+            history_stage = "download"
             yield event(stage="resolved", asset=candidate.asset_name,
                         release=candidate.release_tag or candidate.release_id, size=candidate.declared_size)
             fd, tmp_path = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix=".ipa")
@@ -3109,12 +3580,12 @@ def import_release():
 
             def worker():
                 try:
-                    release_ingest.stream_download(
+                    downloaded_result = release_ingest.stream_download(
                         session_req, candidate, job, tmp_path, tokens,
                         release_ingest.DEFAULT_TIMEOUT, release_ingest.DEFAULT_MAX_BYTES,
                         progress_cb=cb,
                     )
-                    q.put(("ok", None, None))
+                    q.put(("ok", downloaded_result[0], downloaded_result[1]))
                 except Exception as e:
                     q.put(("err", str(e), None))
 
@@ -3126,23 +3597,46 @@ def import_release():
                     pct = int(a * 100 / b) if b else None
                     yield event(stage="downloading", downloaded=a, total=b, pct=pct)
                 elif kind == "ok":
+                    digest = b
                     break
                 else:
+                    history_message = a
                     yield event(stage="error", error=a)
                     return
             t.join()
 
             yield event(stage="validating")
-            bundle_id, version, detected_name = release_ingest.extract_ipa_metadata(
+            history_stage = "preflight"
+            inspection = release_ingest.inspect_ipa_metadata(
                 tmp_path, candidate.asset_name, job, candidate)
+            bundle_id = inspection.bundle_identifier
+            version = inspection.version
+            detected_name = inspection.name
             if bundle_id_in and bundle_id != bundle_id_in:
                 yield event(stage="error", error=f"IPA bundle id {bundle_id} does not match the id you entered ({bundle_id_in})")
+                history_message = "IPA bundle identifier did not match the configured value"
                 return
+            yield event(
+                stage="preflight",
+                platform=inspection.platform,
+                bundleIdentifier=bundle_id,
+                name=detected_name,
+                version=version,
+                buildVersion=inspection.build_version,
+                minOSVersion=inspection.minimum_os_version,
+                deviceFamilies=list(inspection.device_families),
+                privacyKeys=sorted(inspection.privacy),
+            )
             yield event(stage="publishing")
+            history_stage = "publish"
             existing = source_manager.get_app(bundle_id)
             fs = FileStorage(stream=open(tmp_path, "rb"), filename=f"{secure_filename(version)}.ipa")
             if existing:
-                ok, message = source_manager.add_version(bundle_id, {"version": version}, ipa_file=fs, base_url=base_url)
+                ok, message = source_manager.add_version(bundle_id, {
+                    "version": version,
+                    "buildVersion": inspection.build_version,
+                    "minOSVersion": inspection.minimum_os_version,
+                }, ipa_file=fs, base_url=base_url)
                 if ok:
                     _apply_icon_to_existing(
                         bundle_id, existing, tmp_path,
@@ -3153,7 +3647,13 @@ def import_release():
                 new_name = name_in or detected_name or bundle_id
                 new_developer = developer_in or _repo_owner(project) or "Unknown"
                 new_app = {"name": new_name, "bundleIdentifier": bundle_id,
-                           "developerName": new_developer, "version": version}
+                           "developerName": new_developer, "version": version,
+                           "buildVersion": inspection.build_version,
+                           "minOSVersion": inspection.minimum_os_version}
+                if inspection.privacy:
+                    new_app["appPermissions"] = {
+                        "entitlements": [], "privacy": inspection.privacy,
+                    }
                 description = _clean_description(getattr(candidate, "release_body", ""))
                 if description:
                     new_app["localizedDescription"] = description
@@ -3190,22 +3690,87 @@ def import_release():
                 return
             if ok:
                 notify("add_version", f"Imported {bundle_id} {version} from {provider}:{project}\n{base_url}/source.json")
+                history_status = "published"
                 yield event(stage="done", success=True, message=message, bundleIdentifier=bundle_id, version=version)
             else:
+                history_message = message
                 yield event(stage="error", error=message)
-        except (release_ingest.ProviderError, release_ingest.ValidationError, release_ingest.ConfigError) as e:
+        except (ValueError, release_ingest.ProviderError, release_ingest.ValidationError, release_ingest.ConfigError) as e:
+            history_message = str(e)
             yield event(stage="error", error=str(e))
         except Exception as e:
             logging.exception("import-release failed")
-            yield event(stage="error", error=str(e))
+            history_message = "Import failed"
+            yield event(stage="error", error="Import failed")
         finally:
             if tmp_path and os.path.exists(tmp_path):
                 try:
                     os.remove(tmp_path)
                 except OSError:
                     pass
+            history = {
+                "trigger": "one-off", "status": history_status,
+                "stage": history_stage,
+                "durationMs": int((time.monotonic() - started) * 1000),
+                "provider": provider, "project": project,
+                "message": history_message,
+                **_candidate_history_fields(candidate),
+                **_inspection_history_fields(inspection),
+            }
+            if digest:
+                history["sha256"] = digest
+            append_import_record(history)
 
     return app.response_class(run(), mimetype="application/x-ndjson")
+
+
+@app.route('/api/import-history/record', methods=['POST'])
+@requires_auth
+def record_import_history():
+    payload = request.get_json(silent=True)
+    try:
+        normalized = _normalize_import_record(payload, force_trigger="standalone")
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    if not append_import_record(normalized, force_trigger="standalone"):
+        return jsonify({"success": False, "error": "Could not record import history"}), 500
+    return jsonify({"success": True})
+
+
+@app.route('/api/import-history', methods=['GET'])
+@requires_auth
+def get_import_history():
+    try:
+        limit = int(request.args.get('limit', '20'))
+    except ValueError:
+        return jsonify({"error": "limit must be an integer"}), 400
+    if limit < 1 or limit > 50:
+        return jsonify({"error": "limit must be between 1 and 50"}), 400
+    filters = {
+        "bundleIdentifier": request.args.get('bundleIdentifier'),
+        "version": request.args.get('version'),
+        "jobId": request.args.get('jobId'),
+    }
+    for value in filters.values():
+        if value is not None and (not value or len(value) > 256 or any(ord(ch) < 32 for ch in value)):
+            return jsonify({"error": "Invalid history filter"}), 400
+    records = load_import_history().get('records', [])
+    records = [
+        record for record in reversed(records)
+        if all(value is None or record.get(key) == value for key, value in filters.items())
+    ][:limit]
+    return jsonify({"records": records})
+
+
+@app.route('/api/import-provenance/<bundle_id>/<version>', methods=['GET'])
+@requires_auth
+def get_import_provenance(bundle_id, version):
+    for record in reversed(load_import_history().get('records', [])):
+        if (record.get('status') == 'published'
+                and record.get('bundleIdentifier') == bundle_id
+                and record.get('version') == version):
+            return jsonify(record)
+    return jsonify({"error": "Import provenance not found"}), 404
 
 
 @app.route('/api/auto-import', methods=['GET'])
@@ -3218,7 +3783,7 @@ def get_auto_import():
 @requires_auth
 def auto_import_config():
     payload = request.get_json(silent=True) or {}
-    data = load_auto_import()
+    interval = None
     if 'intervalHours' in payload:
         try:
             interval = int(payload['intervalHours'])
@@ -3226,10 +3791,15 @@ def auto_import_config():
             return jsonify({"success": False, "error": "intervalHours must be an integer"}), 400
         if interval < 1 or interval > 168:
             return jsonify({"success": False, "error": "intervalHours must be between 1 and 168"}), 400
-        data['intervalHours'] = interval
-    if 'enabled' in payload:
-        data['enabled'] = bool(payload['enabled'])
-    save_auto_import(data)
+
+    def update_config(data):
+        if interval is not None:
+            data['intervalHours'] = interval
+        if 'enabled' in payload:
+            data['enabled'] = bool(payload['enabled'])
+        return copy.deepcopy(data)
+
+    data = mutate_auto_import(update_config)
     _auto_import_wake_event.set()
     return jsonify(data)
 
@@ -3243,19 +3813,22 @@ def auto_import_upsert_job():
     except ValueError as e:
         return jsonify({"success": False, "error": str(e)}), 400
 
-    data = load_auto_import()
-    jobs = data.setdefault('jobs', [])
-    existing_idx = next((i for i, j in enumerate(jobs) if j.get('id') == job['id']), None)
-    if existing_idx is not None:
-        job['lastRunAt'] = jobs[existing_idx].get('lastRunAt')
-        job['lastResult'] = jobs[existing_idx].get('lastResult')
-        jobs[existing_idx] = job
-    else:
-        job['lastRunAt'] = None
-        job['lastResult'] = None
-        jobs.append(job)
-    save_auto_import(data)
-    return jsonify({"success": True, "job": job})
+    def upsert(data):
+        jobs = data.setdefault('jobs', [])
+        existing_idx = next((i for i, stored in enumerate(jobs) if stored.get('id') == job['id']), None)
+        stored_job = dict(job)
+        if existing_idx is not None:
+            stored_job['lastRunAt'] = jobs[existing_idx].get('lastRunAt')
+            stored_job['lastResult'] = jobs[existing_idx].get('lastResult')
+            jobs[existing_idx] = stored_job
+        else:
+            stored_job['lastRunAt'] = None
+            stored_job['lastResult'] = None
+            jobs.append(stored_job)
+        return stored_job
+
+    stored_job = mutate_auto_import(upsert)
+    return jsonify({"success": True, "job": stored_job})
 
 
 @app.route('/api/auto-import/job/delete', methods=['POST'])
@@ -3263,13 +3836,16 @@ def auto_import_upsert_job():
 def auto_import_delete_job():
     payload = request.get_json(silent=True) or {}
     job_id = (payload.get('id') or '').strip()
-    data = load_auto_import()
-    jobs = data.get('jobs', [])
-    remaining = [j for j in jobs if j.get('id') != job_id]
-    if len(remaining) == len(jobs):
+    def delete(data):
+        jobs = data.get('jobs', [])
+        remaining = [job for job in jobs if job.get('id') != job_id]
+        if len(remaining) == len(jobs):
+            return False
+        data['jobs'] = remaining
+        return True
+
+    if not mutate_auto_import(delete):
         return jsonify({"success": False, "error": "Job not found"}), 404
-    data['jobs'] = remaining
-    save_auto_import(data)
     return jsonify({"success": True})
 
 
@@ -3386,7 +3962,235 @@ def update_source():
         return jsonify({"success": False, "error": str(e)}), 400
 
 
-def _scan_catalog_health():
+@app.route('/api/editorial', methods=['GET'])
+@requires_auth
+def get_editorial():
+    try:
+        source_data = source_manager.load_source()
+        if not isinstance(source_data, dict) or not isinstance(source_data.get('apps'), list):
+            raise ValueError("invalid catalog")
+        featured = source_data.get('featuredApps', [])
+        news = source_data.get('news', [])
+        if not isinstance(featured, list) or not isinstance(news, list):
+            raise ValueError("invalid editorial data")
+        apps = [
+            {"bundleIdentifier": entry.get('bundleIdentifier'), "name": entry.get('name')}
+            for entry in source_data['apps'] if isinstance(entry, dict)
+        ]
+        news = sorted(news, key=lambda entry: entry.get('date', '') if isinstance(entry, dict) else '', reverse=True)
+        return jsonify({"success": True, "apps": apps, "featuredApps": featured, "news": news})
+    except Exception:
+        logging.exception("Failed to load editorial data")
+        return jsonify({"success": False, "error": "Editorial data is unavailable"}), 500
+
+
+@app.route('/api/featured-apps', methods=['POST'])
+@requires_auth
+def update_featured_apps():
+    try:
+        success, message, values = source_manager.update_featured_apps(request.get_json(silent=True))
+        return jsonify({"success": success, "message" if success else "error": message,
+                        "featuredApps": values}), 200 if success else 400
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+
+@app.route('/api/news', methods=['POST'])
+@requires_auth
+def upsert_news():
+    try:
+        success, message, item = source_manager.upsert_news_item(request.get_json(silent=True))
+        return jsonify({"success": success, "message" if success else "error": message,
+                        "item": item}), 200 if success else 400
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+
+@app.route('/api/news/delete', methods=['POST'])
+@requires_auth
+def delete_news():
+    payload = request.get_json(silent=True) or {}
+    identifier = payload.get('identifier')
+    if not isinstance(identifier, str) or not identifier:
+        return jsonify({"success": False, "error": "identifier is required"}), 400
+    success, message = source_manager.delete_news_item(identifier)
+    status = 200 if success else (404 if message == "News item not found" else 400)
+    return jsonify({"success": success, "message" if success else "error": message}), status
+
+
+_HEALTH_MONITOR_LOCK = threading.Lock()
+_health_monitor_wake_event = threading.Event()
+_HEALTH_MONITOR_DEFAULT = {
+    "schemaVersion": 1, "enabled": False, "intervalHours": 6,
+    "lastRunAt": None, "lastState": None, "snapshots": [],
+}
+
+
+def _health_monitor_path():
+    return os.path.join(DATA_DIR, 'health-monitor.json')
+
+
+def load_health_monitor():
+    try:
+        with open(_health_monitor_path(), 'r') as handle:
+            data = json.load(handle)
+        if not isinstance(data, dict) or data.get('schemaVersion') != 1 or not isinstance(data.get('snapshots'), list):
+            raise ValueError("unsupported health monitor schema")
+        return data
+    except FileNotFoundError:
+        return copy.deepcopy(_HEALTH_MONITOR_DEFAULT)
+    except Exception as exc:
+        logging.warning("Could not load health monitor: %s", exc)
+        return copy.deepcopy(_HEALTH_MONITOR_DEFAULT)
+
+
+def _save_health_monitor_unlocked(data):
+    path = _health_monitor_path()
+    directory = os.path.dirname(path) or '.'
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix='.health-monitor-', suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w') as handle:
+            json.dump(data, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def _record_health_snapshot(issues, trigger):
+    counts = {"error": 0, "warning": 0, "info": 0}
+    identities = []
+    for issue in issues:
+        severity = issue.get('severity')
+        if severity in counts:
+            counts[severity] += 1
+        identities.append({
+            key: issue.get(key) for key in
+            ('kind', 'severity', 'bundleIdentifier', 'version')
+        })
+    state = 'degraded' if counts['error'] or counts['warning'] else 'healthy'
+    now = datetime.now(timezone.utc).isoformat()
+    snapshot = {
+        "timestamp": now, "trigger": trigger, "state": state,
+        "counts": counts, "issues": identities,
+    }
+    previous = None
+    try:
+        with _HEALTH_MONITOR_LOCK:
+            data = load_health_monitor()
+            previous = data.get('lastState')
+            data['lastRunAt'] = now
+            data['lastState'] = state
+            data['snapshots'] = (data.get('snapshots', []) + [snapshot])[-30:]
+            _save_health_monitor_unlocked(data)
+    except Exception:
+        logging.exception("Failed to persist health snapshot")
+        return snapshot
+    if previous and previous != state:
+        notify('health_transition', f"Catalog health changed from {previous} to {state}")
+    return snapshot
+
+
+_BACKUP_NAME_RE = re.compile(r'^source-\d{8}T\d{6}Z(?:\.\d{3})?\.json$')
+_SOURCE_DIFF_FIELDS = (
+    'name', 'subtitle', 'description', 'website', 'iconURL', 'headerURL',
+    'tintColor', 'featuredApps', 'news',
+)
+
+
+def _resolve_backup_path(filename):
+    if (not isinstance(filename, str) or not _BACKUP_NAME_RE.fullmatch(filename)
+            or secure_filename(filename) != filename):
+        raise ValueError("Invalid backup filename")
+    backup_root = os.path.realpath(BACKUP_FOLDER)
+    path = os.path.join(backup_root, filename)
+    if os.path.islink(path) or os.path.realpath(os.path.dirname(path)) != backup_root:
+        raise ValueError("Invalid backup filename")
+    if not os.path.isfile(path):
+        raise FileNotFoundError("Backup not found")
+    return path
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_catalog_snapshot(candidate):
+    if not isinstance(candidate, dict):
+        return "Catalog root must be an object"
+    if not isinstance(candidate.get('name'), str) or not candidate['name'].strip():
+        return "Catalog name is required"
+    if not isinstance(candidate.get('apps'), list) or not isinstance(candidate.get('news'), list):
+        return "Catalog apps and news must be lists"
+    bundles = set()
+    for app_entry in candidate['apps']:
+        if not isinstance(app_entry, dict):
+            return "Every app must be an object"
+        bundle = app_entry.get('bundleIdentifier')
+        if not isinstance(bundle, str) or not bundle or bundle in bundles:
+            return "App bundle identifiers must be non-empty and unique"
+        bundles.add(bundle)
+        versions = app_entry.get('versions')
+        if not isinstance(versions, list):
+            return "Every app must contain a versions list"
+        seen = set()
+        for version_entry in versions:
+            if not isinstance(version_entry, dict):
+                return "Every version must be an object"
+            version = version_entry.get('version')
+            if not isinstance(version, str) or not version or version in seen:
+                return "Versions must be non-empty and unique within each app"
+            seen.add(version)
+    return None
+
+
+def _load_catalog_snapshot(path):
+    try:
+        with open(path, 'r') as handle:
+            candidate = json.load(handle)
+    except Exception:
+        return None, "Snapshot is not valid JSON"
+    error = _validate_catalog_snapshot(candidate)
+    return (None, error) if error else (candidate, None)
+
+
+def _catalog_structural_diff(current, candidate):
+    current = current if isinstance(current, dict) else {}
+    def app_versions(catalog):
+        return {
+            app.get('bundleIdentifier'): {
+                version.get('version') for version in app.get('versions', [])
+                if isinstance(version, dict) and isinstance(version.get('version'), str)
+            }
+            for app in catalog.get('apps', []) if isinstance(app, dict)
+            and isinstance(app.get('bundleIdentifier'), str)
+        }
+    current_apps = app_versions(current if isinstance(current, dict) else {})
+    candidate_apps = app_versions(candidate)
+    common = sorted(set(current_apps) & set(candidate_apps))
+    return {
+        "changedSourceFields": [field for field in _SOURCE_DIFF_FIELDS if current.get(field) != candidate.get(field)],
+        "appsAdded": sorted(set(candidate_apps) - set(current_apps)),
+        "appsRemoved": sorted(set(current_apps) - set(candidate_apps)),
+        "versions": {
+            bundle: {
+                "added": sorted(candidate_apps[bundle] - current_apps[bundle]),
+                "removed": sorted(current_apps[bundle] - candidate_apps[bundle]),
+            }
+            for bundle in common
+            if candidate_apps[bundle] != current_apps[bundle]
+        },
+    }
+
+
+def _scan_catalog_health(source_data=None, base_url=None):
     """Read-only scan of the live catalog + storage for known problem
     classes (plan 038): duplicate versions, zero/missing sizes, empty or
     non-public downloadURLs, missing icons, missing IPAs, and (local
@@ -3404,7 +4208,8 @@ def _scan_catalog_health():
     the one Garage limitation note, "bundleIdentifier" is None too).
     """
     issues = []
-    source_data = source_manager.load_source()
+    if source_data is None:
+        source_data = source_manager.load_source()
     if not isinstance(source_data, dict):
         return issues
 
@@ -3413,7 +4218,8 @@ def _scan_catalog_health():
         return issues
 
     try:
-        this_host = urlparse(resolve_base_url()).netloc.lower()
+        resolved = base_url or resolve_base_url()
+        this_host = urlparse(resolved).netloc.lower() if resolved else None
     except Exception:
         this_host = None
 
@@ -3533,10 +4339,155 @@ def catalog_health():
     a broken response, since this exists to surface problems, not add one.
     """
     try:
-        return jsonify({"issues": _scan_catalog_health()})
+        issues = _scan_catalog_health()
+        _record_health_snapshot(issues, 'manual')
+        return jsonify({"issues": issues})
     except Exception as e:
         logging.error(f"Health scan error: {str(e)}")
         return jsonify({"issues": [], "error": "scan failed"}), 200
+
+
+@app.route('/api/health-monitor', methods=['GET'])
+@requires_auth
+def get_health_monitor():
+    data = load_health_monitor()
+    response = dict(data)
+    response['snapshots'] = list(reversed(data.get('snapshots', [])))
+    return jsonify(response)
+
+
+@app.route('/api/health-monitor/config', methods=['POST'])
+@requires_auth
+def configure_health_monitor():
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload.get('enabled'), bool):
+        return jsonify({"success": False, "error": "enabled must be a boolean"}), 400
+    interval = payload.get('intervalHours')
+    if isinstance(interval, bool) or not isinstance(interval, int) or not 1 <= interval <= 168:
+        return jsonify({"success": False, "error": "intervalHours must be between 1 and 168"}), 400
+    with _HEALTH_MONITOR_LOCK:
+        data = load_health_monitor()
+        data['enabled'] = payload['enabled']
+        data['intervalHours'] = interval
+        _save_health_monitor_unlocked(data)
+    _health_monitor_wake_event.set()
+    return jsonify({"success": True})
+
+
+def _health_monitor_cycle(now=None):
+    data = load_health_monitor()
+    if not data.get('enabled'):
+        return
+    now = now or datetime.now(timezone.utc)
+    last = data.get('lastRunAt')
+    if last:
+        try:
+            last_dt = datetime.fromisoformat(last)
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+            if (now - last_dt).total_seconds() < data.get('intervalHours', 6) * 3600:
+                return
+        except (TypeError, ValueError):
+            pass
+    issues = _scan_catalog_health(base_url=PUBLIC_BASE_URL)
+    _record_health_snapshot(issues, 'scheduled')
+
+
+def _health_monitor_loop(stop_event):
+    while not stop_event.is_set():
+        try:
+            _health_monitor_cycle()
+        except Exception:
+            logging.exception("health monitor cycle failed")
+        _health_monitor_wake_event.wait(timeout=300)
+        _health_monitor_wake_event.clear()
+
+
+def _start_health_monitor():
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_health_monitor_loop, args=(stop_event,), daemon=True,
+        name='health-monitor',
+    )
+    thread.start()
+    return thread, stop_event
+
+
+@app.route('/api/catalog-backups', methods=['GET'])
+@requires_auth
+def catalog_backups():
+    snapshots = []
+    try:
+        names = sorted(
+            (name for name in os.listdir(BACKUP_FOLDER) if _BACKUP_NAME_RE.fullmatch(name)),
+            reverse=True,
+        )[:20]
+    except FileNotFoundError:
+        names = []
+    for name in names:
+        try:
+            path = _resolve_backup_path(name)
+            candidate, error = _load_catalog_snapshot(path)
+            stat = os.stat(path)
+            snapshots.append({
+                "filename": name, "size": stat.st_size, "sha256": _sha256_file(path),
+                "valid": error is None, "error": error,
+                "sourceName": candidate.get('name') if candidate else None,
+                "appCount": len(candidate.get('apps', [])) if candidate else None,
+                "versionCount": sum(len(app.get('versions', [])) for app in candidate.get('apps', [])) if candidate else None,
+                "mtime": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            })
+        except Exception:
+            snapshots.append({"filename": name, "valid": False, "error": "Snapshot could not be read"})
+    return jsonify({"backups": snapshots})
+
+
+@app.route('/api/catalog-backups/<filename>/download', methods=['GET'])
+@requires_auth
+def download_catalog_backup(filename):
+    try:
+        path = _resolve_backup_path(filename)
+    except (ValueError, FileNotFoundError):
+        return jsonify({"error": "Backup not found"}), 404
+    return send_file(path, as_attachment=True, download_name=filename, mimetype='application/json')
+
+
+@app.route('/api/catalog-backups/preview', methods=['POST'])
+@requires_auth
+def preview_catalog_backup():
+    payload = request.get_json(silent=True) or {}
+    try:
+        path = _resolve_backup_path(payload.get('filename'))
+    except (ValueError, FileNotFoundError):
+        return jsonify({"error": "Backup not found"}), 404
+    candidate, error = _load_catalog_snapshot(path)
+    if error:
+        return jsonify({"error": error}), 400
+    return jsonify({
+        "filename": payload['filename'], "sha256": _sha256_file(path),
+        "diff": _catalog_structural_diff(source_manager.load_source() or {}, candidate),
+        "issues": _scan_catalog_health(candidate),
+    })
+
+
+@app.route('/api/catalog-backups/restore', methods=['POST'])
+@requires_auth
+def restore_catalog_backup():
+    payload = request.get_json(silent=True) or {}
+    filename = payload.get('filename')
+    if payload.get('confirm') != filename or not filename:
+        return jsonify({"success": False, "error": "Type the exact backup filename to confirm"}), 400
+    try:
+        success, message, summary = source_manager.restore_backup(
+            filename, payload.get('expectedSha256'),
+            allow_missing_artifacts=payload.get('allowMissingArtifacts') is True,
+        )
+    except (ValueError, FileNotFoundError):
+        return jsonify({"success": False, "error": "Backup not found"}), 404
+    if not success:
+        return jsonify({"success": False, "error": message}), 400
+    logging.info("Restored catalog snapshot %s (%s)", filename, str(payload.get('expectedSha256'))[:12])
+    return jsonify({"success": True, "message": message, **summary})
 
 
 def _reconcile_icons(apply=False):
@@ -3801,10 +4752,10 @@ def fdroid_qr():
 @requires_auth
 def android_status():
     try:
-        return jsonify(android_repo.status())
+        return jsonify(android_repo.status(sync_url=True))
     except Exception as e:
         logging.error(f"Error getting Android repo status: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Android repo status unavailable"}), 500
 
 
 @app.route('/api/android/apps')
@@ -3814,7 +4765,7 @@ def android_apps():
         return jsonify(android_repo.list_apps())
     except Exception as e:
         logging.error(f"Error listing Android apps: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Android apps unavailable"}), 500
 
 
 @app.route('/api/android/add-apk', methods=['POST'])
@@ -3843,18 +4794,26 @@ def android_add_apk():
         else:
             return jsonify({"success": False, "error": "Either an APK file or downloadFromUrl is required"}), 400
 
+        fields = _android_metadata_fields_from(request.form)
+        fields = android_repo.validate_metadata(fields)
         success, result = android_repo.add_apk(temp_path, expected_package=package_hint)
 
         if not success:
-            return jsonify({"success": True, "message": result})
+            return jsonify({
+                "success": True,
+                "added": False,
+                "message": f"Already present: {result['package']} versionCode {result['version_code']}",
+                "package": result["package"],
+                "versionCode": result["version_code"],
+            })
 
-        fields = _android_metadata_fields_from(request.form)
         if fields:
             android_repo.write_metadata(result["package"], fields)
 
         notify("android_add_apk", f"New Android APK published: {result['package']} {result['version_name']}")
         return jsonify({
             "success": True,
+            "added": True,
             "message": f"Added {result['package']} version {result['version_code']}",
             "package": result["package"],
             "versionCode": result["version_code"],
@@ -3864,7 +4823,7 @@ def android_add_apk():
         return jsonify({"success": False, "error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error adding APK: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 400
+        return jsonify({"success": False, "error": "Failed to add APK"}), 400
     finally:
         if temp_path and os.path.exists(temp_path):
             try:
@@ -3888,7 +4847,7 @@ def android_update_app():
         return jsonify({"success": False, "error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error updating Android app metadata: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 400
+        return jsonify({"success": False, "error": "Failed to update Android app"}), 400
 
 
 @app.route('/api/android/delete-version', methods=['POST'])
@@ -3908,7 +4867,7 @@ def android_delete_version():
         return jsonify({"success": False, "error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error deleting Android version: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 400
+        return jsonify({"success": False, "error": "Failed to delete Android version"}), 400
 
 
 @app.route('/api/android/delete-app', methods=['POST'])
@@ -3927,7 +4886,7 @@ def android_delete_app():
         return jsonify({"success": False, "error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error deleting Android app: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 400
+        return jsonify({"success": False, "error": "Failed to delete Android app"}), 400
 
 
 @app.route('/api/android/repo-config', methods=['POST'])
@@ -3941,7 +4900,7 @@ def android_repo_config():
         return jsonify({"success": True, "message": "Repository configuration updated"})
     except Exception as e:
         logging.error(f"Error updating Android repo config: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 400
+        return jsonify({"success": False, "error": "Failed to update Android repo configuration"}), 400
 
 
 @app.route('/api/android/request-update', methods=['POST'])
@@ -3952,7 +4911,7 @@ def android_request_update():
         return jsonify({"success": True, "message": "Index rebuild requested"})
     except Exception as e:
         logging.error(f"Error requesting Android index update: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 400
+        return jsonify({"success": False, "error": "Failed to request Android index update"}), 400
 
 
 @app.errorhandler(404)
@@ -3966,6 +4925,7 @@ def internal_error(error):
 if __name__ == '__main__':
     logging.info("Starting AltStore Source Manager (Waitress)...")
     _start_auto_import_scheduler()
+    _start_health_monitor()
     # Single process, many threads: SourceManager's in-process lock and the
     # auto-import scheduler thread both assume exactly one process. Do NOT
     # scale this out to multiple Waitress/gunicorn/uWSGI worker processes

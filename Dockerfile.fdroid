@@ -1,6 +1,9 @@
 # Plan 073: the fdroid-index sidecar. The official fdroidserver image plus
 # one loop script. Runs as root by necessity -- see scripts/fdroid_index_loop.sh.
-FROM registry.gitlab.com/fdroid/docker-executable-fdroidserver:master
+# Pinned by digest because the upstream `master` tag is mutable. Refresh by
+# rerunning the real-APK init/update spike, then recording the new digest and
+# fdroid version here. tag: master, fdroid 6af4c42, verified 2026-08-28.
+FROM registry.gitlab.com/fdroid/docker-executable-fdroidserver@sha256:e58538106529863d504f686e3a51189aec1d24e17d9fee87048f7ae5c9cee706
 COPY scripts/fdroid_index_loop.sh /usr/local/bin/fdroid-index-loop
 RUN chmod 755 /usr/local/bin/fdroid-index-loop
 WORKDIR /repo

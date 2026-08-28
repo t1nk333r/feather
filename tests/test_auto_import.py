@@ -24,7 +24,9 @@ import json
 import os
 import plistlib
 import threading
+import time
 import zipfile
+from datetime import datetime, timezone
 
 import pytest
 
@@ -415,3 +417,62 @@ def test_importing_app_module_starts_no_thread(client):
     # does); the scheduler must only ever start from `__main__`.
     names = [t.name for t in threading.enumerate()]
     assert not any("auto-import" in n.lower() for n in names), names
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        ({"enabled": False}, False),
+        ({"enabled": True}, True),
+        ({"enabled": True, "intervalHours": 6, "lastRunAt": "garbage"}, True),
+        ({"enabled": True, "intervalHours": 6, "lastRunAt": "2026-01-01T09:00:00+00:00"}, False),
+        ({"enabled": True, "intervalHours": 6, "lastRunAt": "2026-01-01T06:00:00+00:00"}, True),
+        ({"enabled": True, "intervalHours": 6, "lastRunAt": "2026-01-01T06:00:00"}, True),
+        ({"enabled": True, "lastRunAt": "2026-01-01T05:59:59+00:00"}, True),
+    ],
+)
+def test_auto_import_due_table(client, data, expected):
+    now = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
+    assert client.app_module._auto_import_due(data, now) is expected
+
+
+def test_scheduler_cycle_handles_missing_and_configured_base_url(client, monkeypatch, caplog):
+    app_module = client.app_module
+    app_module.save_auto_import({
+        "enabled": True, "intervalHours": 6, "lastRunAt": None, "jobs": []
+    })
+    calls = []
+    monkeypatch.setattr(app_module, "_run_all_enabled_jobs", calls.append)
+
+    monkeypatch.setattr(app_module, "_safe_base_url", lambda: None)
+    with caplog.at_level("WARNING"):
+        assert app_module._auto_import_scheduler_cycle() == 6
+    assert calls == []
+    assert "PUBLIC_BASE_URL" in caplog.text
+
+    monkeypatch.setattr(app_module, "_safe_base_url", lambda: "https://feather.example")
+    app_module._auto_import_scheduler_cycle()
+    assert calls == ["https://feather.example"]
+
+
+def test_admin_edit_survives_concurrent_store_mutation(authed_client):
+    app_module = authed_client.app_module
+    assert authed_client.post("/api/auto-import/job", json=VALID_GITHUB_JOB).status_code == 200
+    callback_started = threading.Event()
+
+    def slow_stamp(data):
+        callback_started.set()
+        time.sleep(0.1)
+        data["lastRunAt"] = datetime.now(timezone.utc).isoformat()
+
+    worker = threading.Thread(target=app_module.mutate_auto_import, args=(slow_stamp,))
+    worker.start()
+    assert callback_started.wait(timeout=1)
+    second = dict(VALID_GITHUB_JOB, id="second", bundleIdentifier="com.example.second")
+    response = authed_client.post("/api/auto-import/job", json=second)
+    worker.join(timeout=2)
+
+    assert response.status_code == 200
+    stored = authed_client.get("/api/auto-import").get_json()
+    assert {job["id"] for job in stored["jobs"]} == {"anymex", "second"}
+    assert stored["lastRunAt"] is not None

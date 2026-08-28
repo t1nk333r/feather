@@ -877,6 +877,30 @@ def test_update_source_persists_icon_url_and_preserves_header(authed_client):
     assert source["headerURL"] == before
 
 
+def test_public_route_errors_do_not_reflect_exception_text(client, monkeypatch):
+    """Unexpected storage errors return stable public messages, not paths."""
+    marker = "/secret/container/path"
+    app_module = client.app_module
+
+    def fail(*args, **kwargs):
+        raise RuntimeError(marker)
+
+    monkeypatch.setattr(app_module.source_manager, "load_source", fail)
+    response = client.get("/source.json")
+    assert response.status_code == 404
+    assert marker not in response.get_json()["error"]
+
+    monkeypatch.setattr(app_module.ipa_storage, "exists", fail)
+    response = client.get("/ipas/com.example.app/1.0.ipa")
+    assert response.status_code == 500
+    assert response.get_json()["error"] == "IPA unavailable"
+
+    monkeypatch.setattr(app_module.icon_storage, "exists", fail)
+    response = client.get("/icons/com.example.app/icon.png")
+    assert response.status_code == 500
+    assert response.get_json()["error"] == "Icon unavailable"
+
+
 def test_source_info_form_exposes_icon_url(client):
     html = client.get("/").get_data(as_text=True)
     assert 'type="url" name="iconURL" id="sourceIconURL"' in html
@@ -1820,6 +1844,34 @@ def test_add_app_icon_upload_sets_hosted_icon_url(authed_client):
     assert app_entry["iconURL"].endswith("/icons/com.example.iconic/icon.png")
 
 
+def test_add_app_existing_version_is_idempotent_before_storage(authed_client, monkeypatch):
+    """A retry must not save a replacement IPA or add a duplicate version."""
+    import io
+
+    def fail(*args, **kwargs):
+        raise AssertionError("existing version must return before storage")
+
+    monkeypatch.setattr(authed_client.app_module.source_manager, "save_ipa_file", fail)
+    response = authed_client.post(
+        "/api/add-app",
+        data={
+            "name": "Different retry",
+            "bundleIdentifier": "com.example.app",
+            "developerName": "Different Dev",
+            "version": "1.0.0",
+            "ipaFile": (io.BytesIO(b"replacement"), "replacement.ipa"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 200
+    assert response.get_json()["success"] is True
+    assert "already exists" in response.get_json()["message"]
+
+    source = authed_client.get("/source.json").get_json()
+    versions = source["apps"][0]["versions"]
+    assert [version["version"] for version in versions].count("1.0.0") == 1
+
+
 def test_add_app_icon_download_from_url_sets_hosted_icon_url(authed_client, gzip_ipa_server):
     """Plan 032: the downloadIconFromUrl flag must also be honored on add-app.
     Reuses gzip_ipa_server (an in-process loopback HTTP stub) as a stand-in
@@ -2189,3 +2241,138 @@ def test_sw_and_manifest_need_no_auth(client):
     manifest_resp = client.get("/static/manifest.webmanifest")
     assert sw_resp.status_code == 200
     assert manifest_resp.status_code == 200
+
+
+def test_import_history_routes_require_auth(client):
+    assert client.get('/api/import-history').status_code == 401
+    assert client.get('/api/import-provenance/com.example.app/1.0').status_code == 401
+    assert client.post('/api/import-history/record', json={}).status_code == 401
+
+
+def test_import_history_normalizes_filters_and_provenance(authed_client):
+    app_module = authed_client.app_module
+    assert app_module.append_import_record({
+        "trigger": "auto", "jobId": "job-1", "status": "published",
+        "stage": "publish", "bundleIdentifier": "com.example.app",
+        "version": "2.0", "message": "ok\x00", "downloadURL": "https://secret",
+    })
+    response = authed_client.get('/api/import-history?jobId=job-1&limit=10')
+    assert response.status_code == 200
+    record = response.get_json()['records'][0]
+    assert record['bundleIdentifier'] == 'com.example.app'
+    assert record['message'] == 'ok'
+    assert 'downloadURL' not in record
+    provenance = authed_client.get('/api/import-provenance/com.example.app/2.0')
+    assert provenance.status_code == 200
+    assert provenance.get_json()['trigger'] == 'auto'
+    assert authed_client.get('/api/import-history?limit=51').status_code == 400
+
+
+def test_standalone_import_history_forces_trigger(authed_client):
+    response = authed_client.post('/api/import-history/record', json={
+        "trigger": "one-off", "status": "skipped", "stage": "publish",
+        "bundleIdentifier": "com.example.app", "version": "1.0.0",
+    })
+    assert response.status_code == 200
+    records = authed_client.get('/api/import-history').get_json()['records']
+    assert records[0]['trigger'] == 'standalone'
+
+
+def test_import_history_is_bounded_and_mode_0600(client):
+    app_module = client.app_module
+    for index in range(205):
+        assert app_module.append_import_record({
+            "trigger": "auto", "status": "error", "stage": "selection",
+            "jobId": str(index),
+        })
+    path = app_module._import_history_path()
+    with open(path) as handle:
+        data = json.load(handle)
+    assert len(data['records']) == 200
+    assert oct(os.stat(path).st_mode & 0o777) == '0o600'
+
+
+def test_health_monitor_requires_auth(client):
+    assert client.get('/api/health-monitor').status_code == 401
+    assert client.post('/api/health-monitor/config', json={}).status_code == 401
+
+
+def test_health_monitor_config_and_snapshot_minimization(authed_client):
+    response = authed_client.post('/api/health-monitor/config', json={
+        "enabled": True, "intervalHours": 12,
+    })
+    assert response.status_code == 200
+    authed_client.app_module._record_health_snapshot([{
+        "kind": "missing-ipa", "severity": "error",
+        "bundleIdentifier": "com.example.app", "version": "1.0",
+        "detail": "/private/path should not persist",
+    }], 'manual')
+    data = authed_client.get('/api/health-monitor').get_json()
+    assert data['enabled'] is True
+    assert data['snapshots'][0]['state'] == 'degraded'
+    assert 'detail' not in data['snapshots'][0]['issues'][0]
+    assert authed_client.post('/api/health-monitor/config', json={
+        "enabled": True, "intervalHours": 0,
+    }).status_code == 400
+
+
+def test_catalog_backup_preview_download_and_guarded_restore(authed_client):
+    app_module = authed_client.app_module
+    os.makedirs(app_module.BACKUP_FOLDER, exist_ok=True)
+    candidate = seed_source()
+    candidate['name'] = 'Recovered Source'
+    filename = 'source-20260828T120000Z.json'
+    path = os.path.join(app_module.BACKUP_FOLDER, filename)
+    with open(path, 'w') as handle:
+        json.dump(candidate, handle)
+
+    listing = authed_client.get('/api/catalog-backups').get_json()['backups']
+    assert listing[0]['filename'] == filename
+    assert listing[0]['valid'] is True
+    assert authed_client.get(f'/api/catalog-backups/{filename}/download').status_code == 200
+    assert authed_client.get('/api/catalog-backups/../source.json/download').status_code in (404, 405)
+    preview = authed_client.post('/api/catalog-backups/preview', json={"filename": filename})
+    assert preview.status_code == 200
+    preview_data = preview.get_json()
+    assert 'name' in preview_data['diff']['changedSourceFields']
+
+    wrong = authed_client.post('/api/catalog-backups/restore', json={
+        "filename": filename, "confirm": filename,
+        "expectedSha256": "0" * 64, "allowMissingArtifacts": True,
+    })
+    assert wrong.status_code == 400
+    restored = authed_client.post('/api/catalog-backups/restore', json={
+        "filename": filename, "confirm": filename,
+        "expectedSha256": preview_data['sha256'], "allowMissingArtifacts": True,
+    })
+    assert restored.status_code == 200
+    assert app_module.source_manager.load_source()['name'] == 'Recovered Source'
+
+
+def test_editorial_routes_validate_and_round_trip(authed_client):
+    assert authed_client.get('/api/editorial').status_code == 200
+    featured = authed_client.post('/api/featured-apps', json={
+        "bundleIdentifiers": ["com.example.app"],
+    })
+    assert featured.status_code == 200
+    assert authed_client.post('/api/featured-apps', json={
+        "bundleIdentifiers": ["missing.app"],
+    }).status_code == 400
+    item = {
+        "identifier": "release-2", "title": "Version 2", "caption": "Now available",
+        "date": "2026-08-28T12:00:00+03:00", "tintColor": "4185a9",
+        "url": "https://example.test/news", "notify": True,
+        "appID": "com.example.app",
+    }
+    response = authed_client.post('/api/news', json=item)
+    assert response.status_code == 200
+    saved = authed_client.get('/source.json').get_json()
+    assert saved['featuredApps'] == ['com.example.app']
+    assert saved['news'][0]['date'] == '2026-08-28T09:00:00Z'
+    assert saved['news'][0]['tintColor'] == '#4185A9'
+    assert saved['news'][0]['notify'] is True
+    invalid = dict(item, identifier='release-3', url='file:///etc/passwd')
+    assert authed_client.post('/api/news', json=invalid).status_code == 400
+    assert authed_client.post('/api/news/delete', json={
+        "identifier": "release-2",
+    }).status_code == 200

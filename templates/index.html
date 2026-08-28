@@ -704,6 +704,7 @@
 
                 <button type="submit" class="btn">Add App</button>
             </form>
+
         </div>
 
         <div id="manage-apps" class="tab-content">
@@ -777,6 +778,27 @@
                 </div>
                 <button type="submit" class="btn">Update Source Info</button>
             </form>
+            <h2 style="margin-top:40px;">Featured Apps</h2>
+            <p>Select up to five existing apps; order follows the selection list.</p>
+            <select id="featuredAppsSelect" multiple size="6"></select>
+            <button type="button" class="btn" onclick="saveFeaturedApps()">Save Featured Apps</button>
+
+            <h2 style="margin-top:40px;">News</h2>
+            <div id="newsItems"></div>
+            <form id="newsForm">
+                <input name="identifier" placeholder="Identifier" required maxlength="128">
+                <input name="title" placeholder="Title" required maxlength="200">
+                <textarea name="caption" placeholder="Caption" required maxlength="1000"></textarea>
+                <input name="date" type="datetime-local" required>
+                <input name="tintColor" type="color" value="#4185a9">
+                <input name="imageURL" type="url" placeholder="Image URL (optional)">
+                <input name="url" type="url" placeholder="Article URL (optional)">
+                <select name="appID"><option value="">No linked app</option></select>
+                <label><input name="notify" type="checkbox" style="width:auto;"> Client notify metadata (does not send a server notification)</label>
+                <button type="submit" class="btn">Save News Item</button>
+                <button type="button" class="btn btn-secondary" onclick="resetNewsForm()">New item</button>
+            </form>
+
         </div>
 
         <div id="import-repo" class="tab-content">
@@ -800,6 +822,10 @@
                 <div class="form-group">
                     <label>Asset Glob:</label>
                     <input type="text" name="assetGlob" value="*.ipa">
+                </div>
+                <div class="form-group">
+                    <label>Exclude Glob (optional):</label>
+                    <input type="text" name="assetExcludeGlob" placeholder="*-tvOS.ipa">
                 </div>
                 <div class="form-group">
                     <div style="display: flex; align-items: center; gap: 8px;">
@@ -843,7 +869,9 @@
                 </div>
 
                 <button type="submit" class="btn">Import now</button>
+                <button type="button" class="btn btn-secondary" id="discoverAssetsBtn" onclick="discoverImportAssets()">Discover assets</button>
                 <button type="button" class="btn btn-secondary" id="saveJobBtn" onclick="saveRepoAsJob()">Save &amp; auto-import</button>
+                <div id="importAssetPreview" style="display:none; margin-top:16px;"></div>
                 <div id="importProgress" style="display:none; margin-top: 16px;">
                     <progress id="importBar" max="100" value="0" style="width: 100%;"></progress>
                     <span id="importStatus"></span>
@@ -881,6 +909,25 @@
             </p>
             <button type="button" class="btn" id="healthScanBtn" onclick="runHealthScan()">Scan</button>
             <div id="healthResults" style="margin-top: 20px;"></div>
+
+            <h2 style="margin-top:40px; margin-bottom:20px;">Health Monitor</h2>
+            <div class="parser-options">
+                <label><input type="checkbox" id="healthMonitorEnabled" style="width:auto;"> Enable scheduled scans</label>
+                <input type="number" id="healthMonitorInterval" min="1" max="168" value="6" style="max-width:160px;">
+                <button type="button" class="btn" onclick="saveHealthMonitorConfig()">Save Monitor</button>
+                <div id="healthMonitorHistory" style="margin-top:12px;"></div>
+            </div>
+
+            <h2 style="margin-top:40px; margin-bottom:20px;">Catalog Recovery</h2>
+            <p style="color:var(--danger);">Catalog only: snapshots do not contain IPA or icon files and cannot recreate deleted artifacts.</p>
+            <button type="button" class="btn btn-secondary" onclick="loadCatalogBackups()">Refresh snapshots</button>
+            <div id="catalogBackups" style="margin-top:12px;"></div>
+            <div id="catalogRestorePanel" style="display:none; margin-top:16px;">
+                <div id="catalogRestorePreview"></div>
+                <label>Type exact filename: <input id="catalogRestoreConfirm" type="text"></label>
+                <label><input id="catalogRestoreAllowMissing" type="checkbox" style="width:auto;"> Allow missing/corrupt IPA artifacts</label>
+                <button type="button" class="btn btn-danger" onclick="restoreCatalogBackup()">Restore catalog</button>
+            </div>
 
             <h2 style="margin-top: 40px; margin-bottom: 20px;">Reconcile Icons</h2>
             <p style="color: var(--label-secondary); margin-bottom: 20px;">
@@ -1214,6 +1261,9 @@
                 loadSourceInfo();
             } else if (tabName === 'import-repo') {
                 loadAutoImport();
+            } else if (tabName === 'health') {
+                loadHealthMonitor();
+                loadCatalogBackups();
             } else if (tabName === 'android') {
                 loadAndroid();
             }
@@ -1402,6 +1452,10 @@
 
                 const result = await response.json();
                 if (result.success) {
+                    if (result.added === false) {
+                        showToast(result.message, 'info');
+                        return;
+                    }
                     showToast(result.message || 'APK added successfully!', 'success');
                     e.target.reset();
                     toggleApkDownloadMethod(); // Reset UI
@@ -1416,14 +1470,15 @@
             }
         });
 
-        document.getElementById('importRepoForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const f = e.target;
-            const body = {
+        let importAssetPreview = null;
+
+        function releaseSelectorPayload(f) {
+            return {
                 provider: f.provider.value,
                 project: f.project.value.trim(),
                 bundleIdentifier: f.bundleIdentifier.value.trim(),
                 assetGlob: f.assetGlob.value.trim() || '*.ipa',
+                assetExcludeGlob: f.assetExcludeGlob.value.trim(),
                 includePrereleases: f.includePrereleases.checked,
                 createIfMissing: f.createIfMissing.checked,
                 name: f.name.value.trim(),
@@ -1431,6 +1486,68 @@
                 iconURL: f.iconURL.value.trim(),
                 allowedDownloadHosts: f.allowedDownloadHosts.value.split(',').map(s => s.trim()).filter(Boolean),
             };
+        }
+
+        function selectorSignature(body) {
+            return JSON.stringify([
+                body.provider, body.project, body.assetGlob, body.assetExcludeGlob,
+                body.includePrereleases, body.allowedDownloadHosts,
+            ]);
+        }
+
+        function copyImportAssetName(button) {
+            const f = document.getElementById('importRepoForm');
+            f.assetGlob.value = button.dataset.asset || '';
+            importAssetPreview = null;
+            showToast('Asset name copied to Asset Glob', 'success');
+        }
+
+        async function discoverImportAssets() {
+            const f = document.getElementById('importRepoForm');
+            const btn = document.getElementById('discoverAssetsBtn');
+            const preview = document.getElementById('importAssetPreview');
+            const body = releaseSelectorPayload(f);
+            setButtonLoading(btn, true);
+            try {
+                const response = await fetch('/api/import-release/inspect', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(body),
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || 'Asset discovery failed');
+                const releases = Array.isArray(data.releases) ? data.releases : [];
+                const latestUnsafe = releases.length === 0 || releases[0].matchCount !== 1;
+                importAssetPreview = {signature: selectorSignature(body), unsafe: latestUnsafe};
+                preview.style.display = '';
+                preview.innerHTML = releases.length ? releases.map(release => {
+                    const count = Number(release.matchCount) || 0;
+                    const status = count === 1 ? '1 match' : `${count} matches — adjust selectors before importing`;
+                    const assets = (release.assets || []).map(asset => {
+                        const size = asset.size == null ? '' : ` (${(asset.size / 1048576).toFixed(1)} MB)`;
+                        const flags = asset.matched ? 'matched' : (asset.excluded ? 'excluded' : 'not matched');
+                        const host = asset.hostAllowed === false ? ', host not allowed' : '';
+                        return `<li><code>${escapeHtml(String(asset.name || ''))}</code>${escapeHtml(size)} — ${escapeHtml(flags + host)} ` +
+                            `<button type="button" class="btn btn-secondary" data-asset="${escapeHtml(String(asset.name || ''))}" onclick="copyImportAssetName(this)">Use exact name</button></li>`;
+                    }).join('');
+                    return `<div style="margin-bottom:12px"><strong>${escapeHtml(String(release.release || ''))}</strong> — ${escapeHtml(status)}<ul>${assets}</ul></div>`;
+                }).join('') : '<p>No eligible releases found.</p>';
+            } catch (error) {
+                showToast(error.message || 'Asset discovery failed', 'error');
+            } finally {
+                setButtonLoading(btn, false);
+            }
+        }
+
+        document.getElementById('importRepoForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const f = e.target;
+            const body = releaseSelectorPayload(f);
+            if (importAssetPreview && importAssetPreview.signature === selectorSignature(body)
+                    && importAssetPreview.unsafe
+                    && !window.confirm('The newest inspected release does not have exactly one match. Import anyway?')) {
+                return;
+            }
             const prog = document.getElementById('importProgress');
             const bar = document.getElementById('importBar');
             const status = document.getElementById('importStatus');
@@ -1466,6 +1583,12 @@
                                 bar.removeAttribute('value');
                                 status.textContent = `Downloading ${(ev.downloaded / 1048576).toFixed(1)} MB`;
                             }
+                        } else if (ev.stage === 'preflight') {
+                            const minimum = ev.minOSVersion || 'unknown';
+                            const permissions = (ev.privacyKeys || []).join(', ') || 'none';
+                            status.textContent = `Preflight: ${ev.bundleIdentifier} ${ev.version} ` +
+                                `(build ${ev.buildVersion}, ${ev.platform}, minimum OS ${minimum}; ` +
+                                `privacy keys: ${permissions})`;
                         } else if (ev.stage === 'error') {
                             showToast(ev.error || 'Import failed', 'error');
                             status.textContent = 'Failed';
@@ -1511,6 +1634,7 @@
                     project: project,
                     bundleIdentifier: f.bundleIdentifier.value.trim(),
                     assetGlob: f.assetGlob.value.trim() || '*.ipa',
+                    assetExcludeGlob: f.assetExcludeGlob.value.trim(),
                     includePrereleases: f.includePrereleases.checked,
                     createIfMissing: f.createIfMissing.checked,
                     name: f.name.value.trim(),
@@ -1572,7 +1696,10 @@
                         const bundle = issue.bundleIdentifier ? escapeHtml(issue.bundleIdentifier) : '(source-level)';
                         const version = issue.version ? ` v${escapeHtml(issue.version)}` : '';
                         const detail = escapeHtml(issue.detail || '');
-                        html += `<li style="margin-bottom: 6px;"><strong>${bundle}${version}</strong> - ${detail}</li>`;
+                        const action = issue.bundleIdentifier
+                            ? `<button type="button" class="btn btn-secondary health-issue-action" data-bundle="${escapeHtml(issue.bundleIdentifier)}" data-version="${escapeHtml(issue.version || '')}" onclick="openHealthIssue(this)">Open app</button>`
+                            : '<span style="color:var(--label-secondary);">Review source configuration manually.</span>';
+                        html += `<li style="margin-bottom: 6px;"><strong>${bundle}${version}</strong> - ${detail} ${action}</li>`;
                     });
                     html += '</ul>';
                 });
@@ -1583,6 +1710,75 @@
             } finally {
                 setButtonLoading(btn, false);
             }
+        }
+
+        function openHealthIssue(button) {
+            editApp(button.dataset.bundle, button.dataset.version || null);
+        }
+
+        async function loadHealthMonitor() {
+            try {
+                const response = await fetch('/api/health-monitor');
+                const data = await response.json();
+                document.getElementById('healthMonitorEnabled').checked = !!data.enabled;
+                document.getElementById('healthMonitorInterval').value = data.intervalHours || 6;
+                document.getElementById('healthMonitorHistory').textContent =
+                    `Last state: ${data.lastState || 'never'}; ${data.snapshots?.length || 0} retained snapshots.`;
+            } catch (_) {}
+        }
+
+        async function saveHealthMonitorConfig() {
+            const response = await fetch('/api/health-monitor/config', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    enabled: document.getElementById('healthMonitorEnabled').checked,
+                    intervalHours: Number(document.getElementById('healthMonitorInterval').value),
+                }),
+            });
+            const data = await response.json();
+            showToast(response.ok ? 'Health monitor saved' : (data.error || 'Save failed'), response.ok ? 'success' : 'error');
+            if (response.ok) loadHealthMonitor();
+        }
+
+        let selectedCatalogBackup = null;
+        async function loadCatalogBackups() {
+            const response = await fetch('/api/catalog-backups');
+            const data = await response.json();
+            const target = document.getElementById('catalogBackups');
+            target.innerHTML = (data.backups || []).map(item =>
+                `<div class="app-card"><strong>${escapeHtml(item.filename)}</strong> — ${item.valid ? `${item.appCount} apps` : escapeHtml(item.error || 'invalid')}` +
+                ` <a class="btn btn-secondary" href="/api/catalog-backups/${encodeURIComponent(item.filename)}/download">Download</a>` +
+                (item.valid ? ` <button type="button" class="btn btn-secondary" data-file="${escapeHtml(item.filename)}" onclick="previewCatalogBackup(this.dataset.file)">Preview</button>` : '') + '</div>'
+            ).join('') || '<p>No snapshots found.</p>';
+        }
+
+        async function previewCatalogBackup(filename) {
+            const response = await fetch('/api/catalog-backups/preview', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({filename}),
+            });
+            const data = await response.json();
+            if (!response.ok) return showToast(data.error || 'Preview failed', 'error');
+            selectedCatalogBackup = {filename, expectedSha256: data.sha256};
+            document.getElementById('catalogRestorePanel').style.display = '';
+            document.getElementById('catalogRestorePreview').textContent =
+                `Added apps: ${data.diff.appsAdded.length}; removed: ${data.diff.appsRemoved.length}; ` +
+                `changed source fields: ${data.diff.changedSourceFields.length}; storage findings: ${data.issues.length}.`;
+        }
+
+        async function restoreCatalogBackup() {
+            if (!selectedCatalogBackup) return;
+            const response = await fetch('/api/catalog-backups/restore', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    ...selectedCatalogBackup,
+                    confirm: document.getElementById('catalogRestoreConfirm').value,
+                    allowMissingArtifacts: document.getElementById('catalogRestoreAllowMissing').checked,
+                }),
+            });
+            const data = await response.json();
+            showToast(response.ok ? 'Catalog restored' : (data.error || 'Restore failed'), response.ok ? 'success' : 'error');
+            if (response.ok) { loadSourceInfo(); loadApps(); runHealthScan(); loadCatalogBackups(); }
         }
 
         function renderReconcileSummary(data) {
@@ -1878,7 +2074,7 @@
                 .replace(/'/g, "&#039;");
         }
 
-        async function editApp(bundleId) {
+        async function editApp(bundleId, focusVersion = null) {
             try {
                 const response = await fetch(`/api/app/${encodeURIComponent(bundleId)}`);
                 const app = await response.json();
@@ -1935,6 +2131,17 @@
                 
                 // Show modal
                 document.getElementById('editAppModal').style.display = 'block';
+                if (focusVersion) {
+                    setTimeout(() => {
+                        const input = Array.from(document.querySelectorAll('.version-minos'))
+                            .find(item => item.dataset.version === focusVersion);
+                        const item = input && input.closest('.version-item');
+                        if (item) {
+                            item.style.outline = '2px solid var(--accent)';
+                            item.scrollIntoView({behavior: 'smooth', block: 'center'});
+                        }
+                    }, 0);
+                }
             } catch (error) {
                 showToast('Error loading app: ' + error.message, 'error');
             }
@@ -2536,9 +2743,93 @@
                 document.getElementById('sourceWebsite').value = source.website || '';
                 document.getElementById('sourceIconURL').value = source.iconURL || '';
                 document.getElementById('sourceTintColor').value = source.tintColor || '';
+                loadEditorial();
             } catch (error) {
                 console.error('Error loading source info:', error);
             }
+        }
+
+        let editorialCache = {apps: [], featuredApps: [], news: []};
+
+        async function loadEditorial() {
+            const response = await fetch('/api/editorial');
+            const data = await response.json();
+            if (!response.ok) return showToast(data.error || 'Editorial data unavailable', 'error');
+            editorialCache = data;
+            const featured = document.getElementById('featuredAppsSelect');
+            featured.innerHTML = data.apps.map(app =>
+                `<option value="${escapeHtml(app.bundleIdentifier || '')}" ${(data.featuredApps || []).includes(app.bundleIdentifier) ? 'selected' : ''}>${escapeHtml(app.name || app.bundleIdentifier || '')}</option>`
+            ).join('');
+            const appSelect = document.querySelector('#newsForm [name="appID"]');
+            appSelect.innerHTML = '<option value="">No linked app</option>' + data.apps.map(app =>
+                `<option value="${escapeHtml(app.bundleIdentifier || '')}">${escapeHtml(app.name || app.bundleIdentifier || '')}</option>`
+            ).join('');
+            document.getElementById('newsItems').innerHTML = (data.news || []).map(item =>
+                `<div class="app-card"><strong>${escapeHtml(item.title || '')}</strong> — ${escapeHtml(item.date || '')}<p>${escapeHtml(item.caption || '')}</p>` +
+                `<button type="button" class="btn btn-secondary" data-id="${escapeHtml(item.identifier || '')}" onclick="editNewsItem(this.dataset.id)">Edit</button> ` +
+                `<button type="button" class="btn btn-danger" data-id="${escapeHtml(item.identifier || '')}" onclick="deleteNewsItem(this.dataset.id)">Delete</button></div>`
+            ).join('') || '<p>No news items.</p>';
+        }
+
+        async function saveFeaturedApps() {
+            const values = Array.from(document.getElementById('featuredAppsSelect').selectedOptions).map(option => option.value);
+            const response = await fetch('/api/featured-apps', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({bundleIdentifiers: values}),
+            });
+            const data = await response.json();
+            showToast(response.ok ? 'Featured apps saved' : (data.error || 'Save failed'), response.ok ? 'success' : 'error');
+            if (response.ok) loadEditorial();
+        }
+
+        function resetNewsForm() {
+            const form = document.getElementById('newsForm');
+            form.reset();
+            form.tintColor.value = '#4185a9';
+        }
+
+        function editNewsItem(identifier) {
+            const item = editorialCache.news.find(entry => entry.identifier === identifier);
+            if (!item) return;
+            const form = document.getElementById('newsForm');
+            for (const field of ['identifier', 'title', 'caption', 'tintColor', 'imageURL', 'url', 'appID']) {
+                form.elements[field].value = item[field] || (field === 'tintColor' ? '#4185a9' : '');
+            }
+            form.date.value = (item.date || '').slice(0, 16);
+            form.notify.checked = item.notify === true;
+            form.identifier.readOnly = true;
+            form.scrollIntoView({behavior: 'smooth'});
+        }
+
+        document.getElementById('newsForm').addEventListener('reset', event => {
+            event.target.identifier.readOnly = false;
+        });
+
+        document.getElementById('newsForm').addEventListener('submit', async event => {
+            event.preventDefault();
+            const form = event.target;
+            const body = {
+                identifier: form.identifier.value, title: form.title.value,
+                caption: form.caption.value, date: new Date(form.date.value).toISOString(),
+                tintColor: form.tintColor.value, imageURL: form.imageURL.value,
+                url: form.url.value, appID: form.appID.value, notify: form.notify.checked,
+            };
+            const response = await fetch('/api/news', {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+            });
+            const data = await response.json();
+            showToast(response.ok ? 'News item saved' : (data.error || 'Save failed'), response.ok ? 'success' : 'error');
+            if (response.ok) { resetNewsForm(); loadEditorial(); }
+        });
+
+        async function deleteNewsItem(identifier) {
+            if (!confirm(`Delete news item ${identifier}?`)) return;
+            const response = await fetch('/api/news/delete', {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({identifier}),
+            });
+            const data = await response.json();
+            showToast(response.ok ? 'News item deleted' : (data.error || 'Delete failed'), response.ok ? 'success' : 'error');
+            if (response.ok) loadEditorial();
         }
 
         document.getElementById('sourceInfoForm').addEventListener('submit', async (e) => {
@@ -2608,13 +2899,44 @@
                             </div>
                             <div class="btn-group">
                                 <button class="btn btn-secondary" onclick="runAutoImport('${escapeHtml(job.id)}', this)">Run Now</button>
+                                <button class="btn btn-secondary" onclick="showJobImportHistory('${escapeHtml(job.id)}', this)">Import history</button>
                                 <button class="btn btn-secondary" onclick="editAutoImportJob('${escapeHtml(job.id)}')">Edit</button>
                                 <button class="btn btn-danger" onclick="deleteAutoImportJob('${escapeHtml(job.id)}')">Delete</button>
                             </div>
                         </div>
+                        <div class="import-history" style="display:none; margin-top:12px;"></div>
                     </div>
                 `;
             }).join('');
+        }
+
+        async function showJobImportHistory(jobId, button) {
+            const panel = button.closest('.app-card').querySelector('.import-history');
+            try {
+                const response = await fetch(`/api/import-history?jobId=${encodeURIComponent(jobId)}&limit=20`);
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || 'History unavailable');
+                const records = data.records || [];
+                panel.style.display = '';
+                panel.innerHTML = '<h4>Import history</h4>' + (records.length ? records.map(record =>
+                    `<p>${escapeHtml(record.timestamp || '')} — ${escapeHtml(record.status || '')} ` +
+                    `${escapeHtml(record.stage || '')}; ${escapeHtml(record.releaseTag || record.releaseId || '')} ` +
+                    `${escapeHtml(record.assetName || '')} ${escapeHtml(record.version || '')} ` +
+                    `(${escapeHtml(String(record.durationMs == null ? '' : record.durationMs))} ms)</p>`
+                ).join('') : '<p>No import history.</p>') +
+                    '<button type="button" class="btn btn-secondary copy-import-diagnostic">Copy diagnostic summary</button>';
+                panel.querySelector('.copy-import-diagnostic').onclick = () => {
+                    const summary = records.map(record => ({
+                        timestamp: record.timestamp, status: record.status, stage: record.stage,
+                        release: record.releaseTag || record.releaseId, asset: record.assetName,
+                        version: record.version, durationMs: record.durationMs,
+                    }));
+                    navigator.clipboard.writeText(JSON.stringify(summary, null, 2));
+                    showToast('Diagnostic summary copied', 'success');
+                };
+            } catch (error) {
+                showToast(error.message || 'History unavailable', 'error');
+            }
         }
 
         async function loadAutoImport() {
@@ -2673,6 +2995,7 @@
             f.project.value = job.project;
             f.bundleIdentifier.value = job.bundleIdentifier;
             f.assetGlob.value = job.assetGlob || '*.ipa';
+            f.assetExcludeGlob.value = job.assetExcludeGlob || '';
             f.includePrereleases.checked = !!job.includePrereleases;
             f.createIfMissing.checked = !!job.createIfMissing;
             f.name.value = job.name || '';

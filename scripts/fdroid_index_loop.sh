@@ -5,8 +5,14 @@
 # default 999) owns repo/ and metadata/ and only ever reads the index.
 set -eu
 : "${FDROID_KEYSTORE_PASSWORD:?FDROID_KEYSTORE_PASSWORD is required (the repo signing key password)}"
+export FDROID_KEYSTORE_PASSWORD
 INTERVAL="${FDROID_UPDATE_INTERVAL:-15}"
 FEATHER_UID="${FEATHER_UID:-999}"
+[ "${FDROID_REPO_URL:-}" = "/fdroid/repo" ] && unset FDROID_REPO_URL
+case "$INTERVAL" in
+  ''|*[!0-9]*) echo "FDROID_UPDATE_INTERVAL must be a positive integer (got '$INTERVAL')" >&2; exit 1 ;;
+esac
+[ "$INTERVAL" -gt 0 ] || { echo "FDROID_UPDATE_INTERVAL must be a positive integer (got '$INTERVAL')" >&2; exit 1; }
 cd /repo
 . /etc/profile.d/bsenv.sh
 FDROID="$fdroidserver/fdroid"
@@ -14,12 +20,28 @@ FDROID="$fdroidserver/fdroid"
 mkdir -p repo metadata
 if [ ! -f keystore.p12 ]; then
   keytool -genkeypair -keystore keystore.p12 -storetype PKCS12 -alias feather \
-    -keyalg RSA -keysize 4096 -validity 10000 -storepass "$FDROID_KEYSTORE_PASSWORD" \
+    -keyalg RSA -keysize 4096 -validity 10000 -storepass:env FDROID_KEYSTORE_PASSWORD \
     -dname "CN=feather" >/dev/null
   chmod 600 keystore.p12
 fi
-keytool -exportcert -keystore keystore.p12 -alias feather -storepass "$FDROID_KEYSTORE_PASSWORD" 2>/dev/null \
-  | sha256sum | cut -d' ' -f1 > fingerprint.txt.tmp && mv fingerprint.txt.tmp fingerprint.txt
+compute_fingerprint() {
+  rm -f cert.der.tmp fingerprint.txt.tmp
+  if ! keytool -exportcert -keystore keystore.p12 -alias feather \
+      -storepass:env FDROID_KEYSTORE_PASSWORD -file cert.der.tmp; then
+    echo "fdroid-index: keytool -exportcert failed (wrong FDROID_KEYSTORE_PASSWORD or damaged keystore.p12)" >&2
+    rm -f cert.der.tmp
+    return 1
+  fi
+  if [ ! -s cert.der.tmp ]; then
+    echo "fdroid-index: exported certificate is empty" >&2
+    rm -f cert.der.tmp
+    return 1
+  fi
+  sha256sum cert.der.tmp | cut -d' ' -f1 > fingerprint.txt.tmp
+  rm -f cert.der.tmp
+  mv fingerprint.txt.tmp fingerprint.txt
+}
+compute_fingerprint || exit 1
 
 render_config() {
   # repo-config.json is written by feather: {"name","description","repo_url"}
@@ -30,6 +52,8 @@ try:
     cfg = json.load(open('repo-config.json'))
 except Exception:
     pass
+if not isinstance(cfg, dict):
+    cfg = {}
 def q(s):  # single-quoted YAML scalar
     return "'" + str(s).replace("'", "''") + "'"
 lines = [
@@ -51,13 +75,20 @@ PY
 }
 
 run_update() {
+  set +e
   rm -f .update-requested            # consume BEFORE running so a request during the run is not lost
-  render_config
   START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  if "$FDROID" update --create-metadata --pretty > /tmp/fdroid-update.log 2>&1; then OK=true; else OK=false; fi
+  OK=true
+  if ! render_config; then
+    echo "render_config failed" > /tmp/fdroid-update.log
+    OK=false
+  fi
+  if [ "$OK" = true ]; then
+    if "$FDROID" update --create-metadata --pretty > /tmp/fdroid-update.log 2>&1; then OK=true; else OK=false; fi
+  fi
   # hand the outputs back to feather's uid; keystore/config stay root-only
-  chown -R "$FEATHER_UID:$FEATHER_UID" repo metadata fingerprint.txt
-  python3 - "$OK" "$START" <<'PY'
+  chown -R "$FEATHER_UID:$FEATHER_UID" repo metadata fingerprint.txt || true
+  if ! python3 - "$OK" "$START" <<'PY'
 import json, sys, os, collections
 ok = sys.argv[1] == 'true'
 tail = collections.deque(open('/tmp/fdroid-update.log', errors='replace'), maxlen=40)
@@ -65,8 +96,13 @@ json.dump({'ok': ok, 'started_at': sys.argv[2], 'finished_at': __import__('datet
            'log_tail': ''.join(tail)}, open('last-update.json.tmp', 'w'))
 os.replace('last-update.json.tmp', 'last-update.json')
 PY
-  chown "$FEATHER_UID:$FEATHER_UID" last-update.json
-  tail -n 3 /tmp/fdroid-update.log
+  then
+    echo "fdroid-index: failed to write last-update.json" >&2
+  fi
+  chown "$FEATHER_UID:$FEATHER_UID" last-update.json 2>/dev/null || true
+  tail -n 3 /tmp/fdroid-update.log 2>/dev/null || true
+  set -e
+  return 0
 }
 
 run_update                            # always rebuild once at start-up

@@ -45,6 +45,11 @@ from urllib.parse import quote, urljoin, urlparse
 import requests
 
 try:
+    from .ipa_inspection import InspectionError, inspect_ipa
+except ImportError:  # direct execution from scripts/
+    from ipa_inspection import InspectionError, inspect_ipa
+
+try:
     import fcntl
 except ImportError:  # pragma: no cover - this script only ever runs on Linux
     fcntl = None
@@ -108,6 +113,7 @@ class Job:
     project: str
     bundle_identifier: str
     asset_glob: str
+    asset_exclude_glob: str = None
     include_prereleases: bool = False
     create_if_missing: bool = False
     allowed_download_hosts: frozenset = field(default_factory=frozenset)
@@ -258,6 +264,12 @@ def parse_manifest_dict(data):
 
         bundle_identifier = _require_nonempty_str(raw, "bundleIdentifier", job_id)
         asset_glob = _require_nonempty_str(raw, "assetGlob", job_id)
+        asset_exclude_glob = raw.get("assetExcludeGlob")
+        if asset_exclude_glob is not None and not isinstance(asset_exclude_glob, str):
+            raise ConfigError(
+                f"job {job_id}: 'assetExcludeGlob' must be a string"
+            )
+        asset_exclude_glob = (asset_exclude_glob or "").strip() or None
 
         include_prereleases = bool(raw.get("includePrereleases", False))
         create_if_missing = bool(raw.get("createIfMissing", False))
@@ -295,6 +307,7 @@ def parse_manifest_dict(data):
                 project=project,
                 bundle_identifier=bundle_identifier,
                 asset_glob=asset_glob,
+                asset_exclude_glob=asset_exclude_glob,
                 include_prereleases=include_prereleases,
                 create_if_missing=create_if_missing,
                 allowed_download_hosts=allowed_hosts,
@@ -375,21 +388,30 @@ def github_list_releases(session, project, token, timeout=30, job_id=None):
         raise ProviderError(f"job {job_id}: github returned a non-JSON releases response")
 
 
-def github_select_candidate(job, releases):
+def _asset_match_state(job, name):
+    """Return provider-neutral include/exclude selector state for one asset."""
+    normalized = (name or "").lower()
+    included = fnmatch.fnmatch(normalized, job.asset_glob.lower())
+    excluded = bool(
+        job.asset_exclude_glob
+        and fnmatch.fnmatch(normalized, job.asset_exclude_glob.lower())
+    )
+    return {"included": included, "excluded": excluded, "matched": included and not excluded}
+
+
+def _github_eligible_releases(job, releases):
     eligible = [
-        r
-        for r in releases
+        r for r in releases
         if not r.get("draft") and (job.include_prereleases or not r.get("prerelease"))
     ]
     eligible.sort(key=lambda r: r.get("published_at") or "", reverse=True)
+    return eligible
 
-    for release in eligible:
+
+def github_select_candidate(job, releases):
+    for release in _github_eligible_releases(job, releases):
         assets = release.get("assets") or []
-        matches = [
-            a
-            for a in assets
-            if fnmatch.fnmatch((a.get("name") or "").lower(), job.asset_glob.lower())
-        ]
+        matches = [a for a in assets if _asset_match_state(job, a.get("name"))["matched"]]
         if not matches:
             continue
         if len(matches) > 1:
@@ -447,24 +469,22 @@ def gitlab_list_releases(session, project, token, timeout=30, job_id=None):
         raise ProviderError(f"job {job_id}: gitlab returned a non-JSON releases response")
 
 
-def gitlab_select_candidate(job, releases, now=None):
+def _gitlab_eligible_releases(releases, now=None):
     now = now or datetime.now(timezone.utc)
-
     parsed = []
     for release in releases:
         dt = _parse_iso8601(release.get("released_at"))
         if dt is None or dt > now:
-            continue  # no timestamp, or a future release -- excluded
+            continue
         parsed.append((dt, release))
     parsed.sort(key=lambda pair: pair[0], reverse=True)
+    return [release for _dt, release in parsed]
 
-    for _dt, release in parsed:
+
+def gitlab_select_candidate(job, releases, now=None):
+    for release in _gitlab_eligible_releases(releases, now=now):
         links = (release.get("assets") or {}).get("links") or []
-        matches = [
-            link
-            for link in links
-            if fnmatch.fnmatch((link.get("name") or "").lower(), job.asset_glob.lower())
-        ]
+        matches = [link for link in links if _asset_match_state(job, link.get("name"))["matched"]]
         if not matches:
             continue
         if len(matches) > 1:
@@ -494,6 +514,59 @@ def gitlab_select_candidate(job, releases, now=None):
             release_body=release.get("description") or "",
         )
     return None
+
+
+def inspect_release_assets(job, session, tokens, timeout=30, limit=5):
+    """Return sanitized selector previews without downloading an asset."""
+    limit = max(0, min(int(limit), 5))
+    if job.provider == "github":
+        raw = github_list_releases(
+            session, job.project, tokens.get("github"), timeout=timeout, job_id=job.id
+        )
+        releases = _github_eligible_releases(job, raw)[:limit]
+        result = []
+        for release in releases:
+            assets = []
+            for asset in (release.get("assets") or [])[:100]:
+                state = _asset_match_state(job, asset.get("name"))
+                assets.append({
+                    "name": asset.get("name") or "",
+                    "size": asset.get("size") if isinstance(asset.get("size"), int) else None,
+                    **state,
+                })
+            result.append({
+                "release": release.get("tag_name") or str(release.get("id") or ""),
+                "releasedAt": release.get("published_at") or "",
+                "assets": assets,
+                "matchCount": sum(1 for asset in assets if asset["matched"]),
+            })
+        return result
+    if job.provider == "gitlab":
+        raw = gitlab_list_releases(
+            session, job.project, tokens.get("gitlab"), timeout=timeout, job_id=job.id
+        )
+        releases = _gitlab_eligible_releases(raw)[:limit]
+        result = []
+        for release in releases:
+            assets = []
+            links = (release.get("assets") or {}).get("links") or []
+            for link in links[:100]:
+                state = _asset_match_state(job, link.get("name"))
+                host = (urlparse(link.get("url") or "").hostname or "").lower()
+                assets.append({
+                    "name": link.get("name") or "",
+                    "size": None,
+                    "hostAllowed": bool(host and host in job.allowed_download_hosts),
+                    **state,
+                })
+            result.append({
+                "release": release.get("tag_name") or str(release.get("id") or ""),
+                "releasedAt": release.get("released_at") or "",
+                "assets": assets,
+                "matchCount": sum(1 for asset in assets if asset["matched"]),
+            })
+        return result
+    raise ConfigError(f"job {job.id}: unknown provider {job.provider!r}")
 
 
 def select_candidate(job, session, tokens, timeout=30):
@@ -644,6 +717,27 @@ def stream_download(
     return total, digest.hexdigest()
 
 
+def inspect_ipa_metadata(path, filename, job, candidate=None):
+    """Run shared IPA preflight and reject binaries explicitly marked tvOS."""
+    release_ref = ""
+    if candidate is not None:
+        release_ref = f" (release {candidate.release_tag or candidate.release_id})"
+    if not filename.lower().endswith(".ipa"):
+        raise ValidationError(
+            f"job {job.id}{release_ref}: asset filename {filename!r} does not end in .ipa"
+        )
+    label = f"job {job.id}{release_ref}"
+    try:
+        inspection = inspect_ipa(path, label)
+    except InspectionError as exc:
+        raise ValidationError(str(exc))
+    if inspection.platform == "tvos":
+        raise ValidationError(f"{label}: tvOS binaries are not supported")
+    if inspection.platform == "unknown":
+        logger.warning("%s: IPA platform could not be determined", label)
+    return inspection
+
+
 def extract_ipa_metadata(path, filename, job, candidate=None):
     """The six hard checks (contract Step 3), then (bundle_id, version, name).
 
@@ -656,54 +750,8 @@ def extract_ipa_metadata(path, filename, job, candidate=None):
     `validate_and_extract_metadata` so callers that want to auto-detect the
     bundle id (e.g. the UI import route) can call this directly.
     """
-    release_ref = ""
-    if candidate is not None:
-        release_ref = f" (release {candidate.release_tag or candidate.release_id})"
-
-    if not filename.lower().endswith(".ipa"):
-        raise ValidationError(
-            f"job {job.id}{release_ref}: asset filename {filename!r} does not end "
-            "in .ipa"
-        )
-    if not zipfile.is_zipfile(path):
-        raise ValidationError(
-            f"job {job.id}{release_ref}: downloaded file is not a valid zip archive"
-        )
-
-    with zipfile.ZipFile(path) as zf:
-        names = zf.namelist()
-        if not any(name.startswith("Payload/") for name in names):
-            raise ValidationError(
-                f"job {job.id}{release_ref}: archive has no Payload/ entry"
-            )
-        plist_names = [name for name in names if _APP_INFO_PLIST.match(name)]
-        if len(plist_names) != 1:
-            raise ValidationError(
-                f"job {job.id}{release_ref}: expected exactly one top-level app "
-                f"Info.plist, found {len(plist_names)}"
-            )
-        try:
-            plist = plistlib.loads(zf.read(plist_names[0]))
-        except Exception as e:
-            raise ValidationError(
-                f"job {job.id}{release_ref}: could not parse Info.plist: {e}"
-            )
-
-    bundle_id = plist.get("CFBundleIdentifier")
-    version = plist.get("CFBundleShortVersionString") or plist.get("CFBundleVersion")
-    name = plist.get("CFBundleDisplayName") or plist.get("CFBundleName")
-
-    bundle_id = str(bundle_id).strip() if bundle_id else None
-    version = str(version).strip() if version else None
-    name = (str(name).strip() or None) if name else None
-
-    if not bundle_id or not version:
-        raise ValidationError(
-            f"job {job.id}{release_ref}: IPA plist is missing a bundle identifier "
-            "or version"
-        )
-
-    return bundle_id, version, name
+    inspection = inspect_ipa_metadata(path, filename, job, candidate)
+    return inspection.bundle_identifier, inspection.version, inspection.name
 
 
 def validate_and_extract_metadata(path, filename, job, candidate=None):
@@ -737,6 +785,10 @@ class FeatherClient:
         self.password = password
         self.timeout = timeout
         self._logged_in = False
+        self._inspection = None
+
+    def set_preflight(self, inspection):
+        self._inspection = inspection
 
     def get_app(self, bundle_id):
         """Public read. Returns None only for 404; any other failure raises."""
@@ -764,6 +816,10 @@ class FeatherClient:
         with open(path, "rb") as fh:
             files = {"ipaFile": (os.path.basename(path), fh)}
             data = {"bundleIdentifier": bundle_id, "version": version}
+            if self._inspection is not None:
+                data["buildVersion"] = self._inspection.build_version
+                if self._inspection.minimum_os_version:
+                    data["minOSVersion"] = self._inspection.minimum_os_version
             resp = self.session.post(
                 f"{self.base_url}/api/add-version",
                 data=data,
@@ -790,6 +846,12 @@ class FeatherClient:
                 "name": name,
                 "developerName": developer,
             }
+            if self._inspection is not None:
+                data["buildVersion"] = self._inspection.build_version
+                if self._inspection.minimum_os_version:
+                    data["minOSVersion"] = self._inspection.minimum_os_version
+                if self._inspection.privacy:
+                    data["privacy"] = json.dumps(self._inspection.privacy)
             resp = self.session.post(
                 f"{self.base_url}/api/add-app",
                 data=data,
@@ -805,6 +867,27 @@ class FeatherClient:
         return bool(payload.get("success")), payload.get("error") or payload.get(
             "message"
         )
+
+    def record_import_event(self, record):
+        self._ensure_login()
+        resp = self.session.post(
+            f"{self.base_url}/api/import-history/record",
+            json=record,
+            timeout=30,
+        )
+        if resp.status_code == 401:
+            raise FeatherAuthError("feather import-history endpoint returned 401")
+        resp.raise_for_status()
+        return bool(resp.json().get("success"))
+
+
+def _report_provenance(feather, record):
+    if not hasattr(feather, "record_import_event"):
+        return
+    try:
+        feather.record_import_event(record)
+    except Exception as exc:
+        logger.warning("provenance reporting failed: %s", _redact(str(exc)))
 
 
 def _catalog_has_version(catalog_app, version):
@@ -970,9 +1053,14 @@ def process_job(job, session, tokens, feather, state, apply, timeout, max_bytes,
             return False
 
         try:
-            bundle_id, version, _name = validate_and_extract_metadata(
-                tmp_path, candidate.asset_name, job, candidate
-            )
+            inspection = inspect_ipa_metadata(tmp_path, candidate.asset_name, job, candidate)
+            bundle_id = inspection.bundle_identifier
+            version = inspection.version
+            if bundle_id != job.bundle_identifier:
+                raise ValidationError(
+                    f"job {job.id}: extracted bundle identifier {bundle_id!r} does not "
+                    f"match configured bundleIdentifier {job.bundle_identifier!r}"
+                )
         except ValidationError as e:
             _log_job_error(str(e))
             summary.failed += 1
@@ -987,10 +1075,21 @@ def process_job(job, session, tokens, feather, state, apply, timeout, max_bytes,
                 job.id,
                 version,
             )
+            _report_provenance(feather, {
+                "trigger": "standalone", "jobId": job.id, "status": "skipped",
+                "stage": "publish", "provider": candidate.provider,
+                "project": candidate.project, "releaseId": candidate.release_id,
+                "releaseTag": candidate.release_tag, "assetId": candidate.asset_id,
+                "assetName": candidate.asset_name, "bundleIdentifier": bundle_id,
+                "version": version, "buildVersion": inspection.build_version,
+                "platform": inspection.platform, "sha256": sha256_hex,
+            })
             return True
 
         try:
             created = False
+            if hasattr(feather, "set_preflight"):
+                feather.set_preflight(inspection)
             if catalog_app is not None:
                 ok, message = feather.add_version(bundle_id, version, tmp_path)
                 if not ok and message == "App not found" and job.create_if_missing:
@@ -1018,6 +1117,15 @@ def process_job(job, session, tokens, feather, state, apply, timeout, max_bytes,
             summary.created += 1
         else:
             summary.published += 1
+        _report_provenance(feather, {
+            "trigger": "standalone", "jobId": job.id, "status": "published",
+            "stage": "publish", "provider": candidate.provider,
+            "project": candidate.project, "releaseId": candidate.release_id,
+            "releaseTag": candidate.release_tag, "assetId": candidate.asset_id,
+            "assetName": candidate.asset_name, "bundleIdentifier": bundle_id,
+            "version": version, "buildVersion": inspection.build_version,
+            "platform": inspection.platform, "sha256": sha256_hex,
+        })
         return True
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)

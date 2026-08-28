@@ -291,6 +291,93 @@ def test_load_manifest_accepts_github_and_gitlab_jobs(tmp_path):
     assert len(example["jobs"]) == 2
 
 
+def test_asset_exclude_glob_round_trips_and_rejects_non_string():
+    job = ingest.parse_manifest_dict({
+        "schemaVersion": 1,
+        "jobs": [_valid_github_job(assetExcludeGlob=" *-tvOS.ipa ")],
+    })[0]
+    assert job.asset_exclude_glob == "*-tvOS.ipa"
+    with pytest.raises(ingest.ConfigError, match="assetExcludeGlob"):
+        ingest.parse_manifest_dict({
+            "schemaVersion": 1,
+            "jobs": [_valid_github_job(assetExcludeGlob=["*-tvOS.ipa"])],
+        })
+
+
+def test_github_selector_excludes_ambiguous_tvos_asset():
+    job = ingest.Job(
+        id="gh", provider="github", project="owner/repo",
+        bundle_identifier="com.example.app", asset_glob="SceneBox-*.ipa",
+        asset_exclude_glob="*-tvOS.ipa",
+    )
+    releases = [{
+        "id": 1, "tag_name": "v1", "draft": False, "prerelease": False,
+        "published_at": "2026-01-01T00:00:00Z",
+        "assets": [
+            {"id": 1, "name": "SceneBox-1.0.ipa", "size": 10, "url": "https://api.github.com/a"},
+            {"id": 2, "name": "SceneBox-1.0-tvOS.ipa", "size": 11, "url": "https://api.github.com/b"},
+        ],
+    }]
+    assert ingest.github_select_candidate(job, releases).asset_name == "SceneBox-1.0.ipa"
+
+
+def test_inspect_release_assets_is_sanitized_ordered_and_capped():
+    releases = []
+    for number in range(7):
+        releases.append({
+            "id": number,
+            "tag_name": f"v{number}",
+            "draft": False,
+            "prerelease": False,
+            "published_at": f"2026-01-{number + 1:02d}T00:00:00Z",
+            "assets": [{
+                "id": number,
+                "name": f"App-{number}.ipa",
+                "size": number,
+                "url": f"https://api.github.com/secret/{number}",
+            }],
+        })
+    session = FakeSession()
+    session.add_response(
+        "https://api.github.com/repos/owner/repo/releases",
+        FakeResponse(200, json_data=releases),
+    )
+    job = ingest.Job(
+        id="gh", provider="github", project="owner/repo",
+        bundle_identifier="com.example.app", asset_glob="*.ipa",
+    )
+    preview = ingest.inspect_release_assets(job, session, {"github": "secret"})
+    assert len(preview) == 5
+    assert preview[0]["release"] == "v6"
+    assert preview[0]["matchCount"] == 1
+    encoded = json.dumps(preview)
+    assert "url" not in encoded.lower()
+    assert "secret" not in encoded
+
+
+def test_gitlab_inspection_reports_host_allowlist_without_url():
+    session = FakeSession()
+    session.add_response(
+        "https://gitlab.com/api/v4/projects/group%2Frepo/releases",
+        FakeResponse(200, json_data=[{
+            "tag_name": "v1", "released_at": "2026-01-01T00:00:00Z",
+            "assets": {"links": [
+                {"name": "App.ipa", "url": "https://gitlab.com/download/App.ipa"},
+                {"name": "Mirror.ipa", "url": "https://evil.example/App.ipa"},
+            ]},
+        }]),
+    )
+    job = ingest.Job(
+        id="gl", provider="gitlab", project="group/repo",
+        bundle_identifier="com.example.app", asset_glob="App.ipa",
+        allowed_download_hosts=frozenset({"gitlab.com"}),
+    )
+    preview = ingest.inspect_release_assets(job, session, {"gitlab": None})
+    assert preview[0]["assets"][0]["hostAllowed"] is True
+    assert preview[0]["assets"][1]["hostAllowed"] is False
+    assert "https://" not in json.dumps(preview)
+
+
 # ---------------------------------------------------------------------------
 # 2. test_load_manifest_rejects_unknown_duplicate_or_unsafe_jobs
 # ---------------------------------------------------------------------------

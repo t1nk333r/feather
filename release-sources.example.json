@@ -7,6 +7,7 @@
       "project": "owner/repository",
       "bundleIdentifier": "com.example.app",
       "assetGlob": "*.ipa",
+      "assetExcludeGlob": "*-tvOS.ipa",
       "includePrereleases": false,
       "createIfMissing": false
     },
@@ -16,6 +17,7 @@
       "project": "group/project",
       "bundleIdentifier": "com.example.other",
       "assetGlob": "*.ipa",
+      "assetExcludeGlob": "*-tvOS.ipa",
       "allowedDownloadHosts": ["gitlab.com"],
       "createIfMissing": true,
       "name": "Example Other",

@@ -115,6 +115,8 @@ services:
   # /fdroid/repo/. Runs as root INSIDE the container by necessity (the
   # upstream image is not usable by any other uid); it has no ports and
   # its only mount is this one directory.
+  # FDROID_KEYSTORE_PASSWORD is required only when the android profile is
+  # active; Compose fails early with a clear message when it is missing.
   fdroid-index:
     profiles: ["android"]
     image: ghcr.io/t1nk333r/feather-fdroid:latest
@@ -124,9 +126,10 @@ services:
     container_name: feather-fdroid-index
     depends_on:
       - altstore-manager
-    env_file:
-      - .env
     environment:
+      - FDROID_KEYSTORE_PASSWORD=${FDROID_KEYSTORE_PASSWORD:?FDROID_KEYSTORE_PASSWORD must be set in .env}
+      - FDROID_UPDATE_INTERVAL=${FDROID_UPDATE_INTERVAL:-15}
+      - FDROID_REPO_URL=${PUBLIC_BASE_URL:-}/fdroid/repo
       - FEATHER_UID=999
     volumes:
       - ./data/fdroid:/repo

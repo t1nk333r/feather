@@ -10,6 +10,7 @@ only when a developer has set FEATHER_TEST_APK; it is skipped in CI.
 """
 
 import http.server
+import errno
 import io
 import json
 import os
@@ -203,8 +204,91 @@ def test_add_apk_idempotent_on_existing_version(authed_client, tmp_path, monkeyp
     )
     assert resp2.status_code == 200
     body2 = json.loads(resp2.data)
-    assert "already present" in body2["message"]
+    assert body2["added"] is False
+    assert body2["package"] == "org.example.demo"
+    assert body2["versionCode"] == 42
+    assert "Already present" in body2["message"]
     assert apk_path.read_bytes() == content1
+
+
+def test_add_apk_rejects_bad_metadata_before_publishing(authed_client, tmp_path, monkeypatch):
+    monkeypatch.setattr(authed_client.app_module, "_inspect_apk", fake_inspect)
+    response = authed_client.post(
+        "/api/android/add-apk",
+        data={
+            "apkFile": (io.BytesIO(b"fake-apk-bytes"), "demo.apk"),
+            "summary": "x" * 81,
+        },
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 400
+    assert not list((tmp_path / "fdroid" / "repo").glob("*.apk"))
+    assert not list((tmp_path / "fdroid" / "metadata").glob("*.yml"))
+    assert not (tmp_path / "fdroid" / ".update-requested").exists()
+
+
+def test_add_apk_exdev_fallback_is_atomic(authed_client, tmp_path, monkeypatch):
+    app_module = authed_client.app_module
+    monkeypatch.setattr(app_module, "_inspect_apk", fake_inspect)
+    real_replace = app_module.os.replace
+
+    def cross_device_once(src, dst):
+        if str(dst).endswith("org.example.demo_42.apk") and not str(src).endswith(".part"):
+            raise OSError(errno.EXDEV, "cross-device")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(app_module.os, "replace", cross_device_once)
+    response = authed_client.post(
+        "/api/android/add-apk",
+        data={"apkFile": (io.BytesIO(b"fake-apk-bytes"), "demo.apk")},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 200
+    repo = tmp_path / "fdroid" / "repo"
+    assert (repo / "org.example.demo_42.apk").read_bytes() == b"fake-apk-bytes"
+    assert not list(repo.glob("*.part"))
+
+
+def test_add_apk_exdev_copy_failure_leaves_no_partial(authed_client, tmp_path, monkeypatch):
+    app_module = authed_client.app_module
+    monkeypatch.setattr(app_module, "_inspect_apk", fake_inspect)
+    real_replace = app_module.os.replace
+
+    def cross_device(src, dst):
+        if str(dst).endswith("org.example.demo_42.apk") and not str(src).endswith(".part"):
+            raise OSError(errno.EXDEV, "cross-device")
+        return real_replace(src, dst)
+
+    def partial_copy(src, dst):
+        with open(dst, "wb") as output:
+            output.write(b"partial")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(app_module.os, "replace", cross_device)
+    monkeypatch.setattr(app_module.shutil, "copy2", partial_copy)
+    response = authed_client.post(
+        "/api/android/add-apk",
+        data={"apkFile": (io.BytesIO(b"fake-apk-bytes"), "demo.apk")},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 400
+    repo = tmp_path / "fdroid" / "repo"
+    assert not (repo / "org.example.demo_42.apk").exists()
+    assert not list(repo.glob("*.part"))
+
+
+def test_add_apk_fires_notify_event(authed_client, monkeypatch):
+    app_module = authed_client.app_module
+    monkeypatch.setattr(app_module, "_inspect_apk", fake_inspect)
+    events = []
+    monkeypatch.setattr(app_module, "notify", lambda event, message: events.append(event))
+    response = authed_client.post(
+        "/api/android/add-apk",
+        data={"apkFile": (io.BytesIO(b"fake-apk-bytes"), "demo.apk")},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 200
+    assert events == ["android_add_apk"]
 
 
 def test_add_apk_download_from_url_never_fetched_without_flag(authed_client, monkeypatch):
@@ -249,6 +333,27 @@ def test_metadata_length_limits(authed_client, monkeypatch):
         json={"package": "org.example.demo", "name": "x" * 51},
     )
     assert resp2.status_code == 400
+
+
+def test_update_app_rejects_non_string_values(authed_client, tmp_path):
+    meta_path = tmp_path / "fdroid" / "metadata" / "org.example.demo.yml"
+    meta_path.write_text("Name: Demo\nCategories:\n- Feather\n")
+    before = meta_path.read_text()
+
+    response = authed_client.post(
+        "/api/android/update-app",
+        json={"package": "org.example.demo", "name": ["x"]},
+    )
+    assert response.status_code == 400
+    assert "Name must be a string" in response.get_json()["error"]
+
+    response = authed_client.post(
+        "/api/android/update-app",
+        json={"package": "org.example.demo", "summary": 5},
+    )
+    assert response.status_code == 400
+    assert "Summary must be a string" in response.get_json()["error"]
+    assert meta_path.read_text() == before
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +463,28 @@ def test_delete_version_and_app(authed_client, tmp_path, monkeypatch):
     assert resp.status_code == 404
 
 
+def test_delete_app_does_not_touch_prefix_sibling(authed_client, tmp_path):
+    repo = tmp_path / "fdroid" / "repo"
+    metadata = tmp_path / "fdroid" / "metadata"
+    repo.mkdir(parents=True, exist_ok=True)
+    metadata.mkdir(parents=True, exist_ok=True)
+    target_apk = repo / "com.example.app_1.apk"
+    sibling_apk = repo / "com.example.app_beta_5.apk"
+    target_meta = metadata / "com.example.app.yml"
+    sibling_meta = metadata / "com.example.app_beta.yml"
+    for path in (target_apk, sibling_apk, target_meta, sibling_meta):
+        path.write_text("x")
+
+    response = authed_client.post(
+        "/api/android/delete-app", json={"package": "com.example.app"}
+    )
+    assert response.status_code == 200
+    assert not target_apk.exists()
+    assert not target_meta.exists()
+    assert sibling_apk.exists()
+    assert sibling_meta.exists()
+
+
 # ---------------------------------------------------------------------------
 # status / qr / repo-config
 # ---------------------------------------------------------------------------
@@ -389,6 +516,25 @@ def test_status_unconfigured_then_configured(authed_client, tmp_path):
     assert qr_resp2.content_type == "image/png"
 
 
+def test_android_unexpected_errors_do_not_reflect_exception_text(authed_client, monkeypatch):
+    marker = "/secret/android/path"
+
+    def fail(*args, **kwargs):
+        raise RuntimeError(marker)
+
+    monkeypatch.setattr(authed_client.app_module.android_repo, "status", fail)
+    response = authed_client.get("/api/android/status")
+    assert response.status_code == 500
+    assert response.get_json()["error"] == "Android repo status unavailable"
+    assert marker not in response.get_data(as_text=True)
+
+    monkeypatch.setattr(authed_client.app_module.android_repo, "list_apps", fail)
+    response = authed_client.get("/api/android/apps")
+    assert response.status_code == 500
+    assert response.get_json()["error"] == "Android apps unavailable"
+    assert marker not in response.get_data(as_text=True)
+
+
 def test_repo_config_roundtrip(authed_client, tmp_path):
     resp = authed_client.post(
         "/api/android/repo-config",
@@ -403,6 +549,23 @@ def test_repo_config_roundtrip(authed_client, tmp_path):
     assert cfg["name"] == "My Repo"
     assert cfg["description"] == "d"
     assert cfg["repo_url"].endswith("/fdroid/repo")
+
+
+def test_status_refreshes_repo_url_and_requests_update(authed_client, tmp_path, monkeypatch):
+    app_module = authed_client.app_module
+    cfg_path = tmp_path / "fdroid" / "repo-config.json"
+    cfg_path.write_text(json.dumps({
+        "name": "Existing", "description": "d",
+        "repo_url": "http://old.example/fdroid/repo",
+    }))
+    monkeypatch.setattr(app_module, "PUBLIC_BASE_URL", "https://feather.example")
+
+    response = authed_client.get("/api/android/status")
+    assert response.status_code == 200
+    cfg = json.loads(cfg_path.read_text())
+    assert cfg["repo_url"] == "https://feather.example/fdroid/repo"
+    assert cfg["name"] == "Existing"
+    assert (tmp_path / "fdroid" / ".update-requested").exists()
 
 
 # ---------------------------------------------------------------------------

@@ -91,6 +91,16 @@ def authed_client(client):
     return client
 
 
+@pytest.fixture(autouse=True)
+def no_external_avatar_download(client, monkeypatch):
+    """Provider/import route tests never depend on live GitHub avatar access."""
+    monkeypatch.setattr(
+        client.app_module.source_manager,
+        "download_icon_from_url",
+        lambda url, bundle_id: "png",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fixture helpers
 # ---------------------------------------------------------------------------
@@ -243,6 +253,47 @@ def post_and_collect(client, payload, patches):
 
     events = [json.loads(line) for line in text.strip().split("\n") if line.strip()]
     return status, events
+
+
+def test_inspect_release_requires_auth(client):
+    assert client.post("/api/import-release/inspect", json={}).status_code == 401
+
+
+def test_inspect_release_returns_sanitized_preview(authed_client, monkeypatch):
+    captured = {}
+
+    def fake_inspect(job, session, tokens, timeout=30, limit=5):
+        captured["job"] = job
+        return [{
+            "release": "v1", "releasedAt": "2026-01-01T00:00:00Z",
+            "assets": [{"name": "App.ipa", "size": 1, "included": True,
+                        "excluded": False, "matched": True}],
+            "matchCount": 1,
+        }]
+
+    monkeypatch.setattr(
+        authed_client.app_module.release_ingest,
+        "inspect_release_assets",
+        fake_inspect,
+    )
+    response = authed_client.post("/api/import-release/inspect", json={
+        "provider": "github",
+        "project": "owner/repo",
+        "assetGlob": "*.ipa",
+        "assetExcludeGlob": "*-tvOS.ipa",
+    })
+    assert response.status_code == 200
+    assert response.get_json()["releases"][0]["matchCount"] == 1
+    assert captured["job"].asset_exclude_glob == "*-tvOS.ipa"
+
+
+def test_inspect_release_validates_gitlab_hosts(authed_client):
+    response = authed_client.post("/api/import-release/inspect", json={
+        "provider": "gitlab", "project": "group/repo", "assetGlob": "*.ipa",
+        "allowedDownloadHosts": [],
+    })
+    assert response.status_code == 400
+    assert "allowed" in response.get_json()["error"].lower()
 
 
 # ---------------------------------------------------------------------------

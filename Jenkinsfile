@@ -43,7 +43,7 @@ pipeline {
     stage('requests pin drift check') {
       steps {
         sh '''
-          set -euo pipefail
+          set -eu
           REQ="$(grep -oP '^requests==\\K[0-9.]+' requirements.txt)"
           BOT="$(grep -oP 'requests==\\K[0-9.]+' Dockerfile.bot)"
           echo "requirements.txt: $REQ   Dockerfile.bot: $BOT"
@@ -52,20 +52,13 @@ pipeline {
       }
     }
 
-    stage('Build & push image') {
+    stage('Build image') {
       when { branch 'main' }
       steps {
-        withCredentials([usernamePassword(credentialsId: 'ghcr-pat',
-            usernameVariable: 'REG_USER', passwordVariable: 'REG_TOKEN')]) {
-          sh 'echo "$REG_TOKEN" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin'
-        }
         sh '''
           set -eu
           SHORT=$(git rev-parse --short HEAD)
           docker build -t "$IMAGE:main" -t "$IMAGE:latest" -t "$IMAGE:sha-$SHORT" .
-          docker push "$IMAGE:main"
-          docker push "$IMAGE:latest"
-          docker push "$IMAGE:sha-$SHORT"
         '''
       }
     }
@@ -83,10 +76,18 @@ pipeline {
           echo "$OUT" | grep -q -- "--apply" \
             || { echo "FAIL: release importer --help did not mention --apply"; exit 1; }
           echo "ok: release importer --help works and mentions --apply"
-          if docker run --rm -e DATA_DIR=/tmp/feather-data "$IMAGE:main" python -c "import app" 2>/dev/null; then
+          OUT="$(docker run --rm -e DATA_DIR=/tmp/feather-data "$IMAGE:main" python -c "import app" 2>&1 || true)"
+          echo "$OUT" | grep -q "ADMIN_PASSWORD" \
+            || { echo "FAIL: import without ADMIN_PASSWORD did not name ADMIN_PASSWORD (got: $OUT)"; exit 1; }
+          if docker run --rm -e DATA_DIR=/tmp/feather-data "$IMAGE:main" python -c "import app" >/dev/null 2>&1; then
             echo "FAIL: image booted without ADMIN_PASSWORD"; exit 1
           fi
-          echo "ok: refuses to boot without ADMIN_PASSWORD"
+          echo "ok: refuses to boot without ADMIN_PASSWORD, and names it"
+          docker run --rm -e ADMIN_PASSWORD=ci-smoke-test-not-a-real-password \
+            -e DATA_DIR=/tmp/feather-data "$IMAGE:main" \
+            python -c "import app, pyaxmlparser, yaml, boto3, waitress; print('imports ok')" \
+            | grep -q "imports ok"
+          echo "ok: runtime dependencies import"
           docker rm -f feather-smoke 2>/dev/null || true
           docker run -d --rm --name feather-smoke \
             -e DATA_DIR=/tmp/feather-data \
@@ -107,16 +108,13 @@ pipeline {
       }
     }
 
-    stage('Build & push bot image') {
+    stage('Build bot image') {
       when { branch 'main' }
       steps {
         sh '''
           set -eu
           SHORT=$(git rev-parse --short HEAD)
           docker build -f Dockerfile.bot -t "$BOT_IMAGE:main" -t "$BOT_IMAGE:latest" -t "$BOT_IMAGE:sha-$SHORT" .
-          docker push "$BOT_IMAGE:main"
-          docker push "$BOT_IMAGE:latest"
-          docker push "$BOT_IMAGE:sha-$SHORT"
         '''
       }
     }
@@ -139,16 +137,13 @@ pipeline {
       }
     }
 
-    stage('Build & push fdroid image') {
+    stage('Build fdroid image') {
       when { branch 'main' }
       steps {
         sh '''
           set -eu
           SHORT=$(git rev-parse --short HEAD)
           docker build -f Dockerfile.fdroid -t "$FDROID_IMAGE:main" -t "$FDROID_IMAGE:latest" -t "$FDROID_IMAGE:sha-$SHORT" .
-          docker push "$FDROID_IMAGE:main"
-          docker push "$FDROID_IMAGE:latest"
-          docker push "$FDROID_IMAGE:sha-$SHORT"
         '''
       }
     }
@@ -163,6 +158,34 @@ pipeline {
           echo "$OUT" | grep -q "FDROID_KEYSTORE_PASSWORD" \
             || { echo "FAIL: did not name FDROID_KEYSTORE_PASSWORD"; exit 1; }
           echo "ok: refuses to run unconfigured"
+          OUT="$(docker run --rm -e FDROID_KEYSTORE_PASSWORD=ci-not-real \
+            -e FDROID_UPDATE_INTERVAL=abc "$FDROID_IMAGE:main" 2>&1 || true)"
+          echo "$OUT" | grep -q "FDROID_UPDATE_INTERVAL" \
+            || { echo "FAIL: did not reject a non-numeric update interval"; exit 1; }
+          echo "ok: rejects a non-numeric update interval"
+        '''
+      }
+    }
+
+    stage('Push images') {
+      when { branch 'main' }
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'ghcr-pat',
+            usernameVariable: 'REG_USER', passwordVariable: 'REG_TOKEN')]) {
+          sh 'echo "$REG_TOKEN" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin'
+        }
+        sh '''
+          set -eu
+          SHORT=$(git rev-parse --short HEAD)
+          docker push "$IMAGE:main"
+          docker push "$IMAGE:latest"
+          docker push "$IMAGE:sha-$SHORT"
+          docker push "$BOT_IMAGE:main"
+          docker push "$BOT_IMAGE:latest"
+          docker push "$BOT_IMAGE:sha-$SHORT"
+          docker push "$FDROID_IMAGE:main"
+          docker push "$FDROID_IMAGE:latest"
+          docker push "$FDROID_IMAGE:sha-$SHORT"
         '''
       }
     }

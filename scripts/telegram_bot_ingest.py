@@ -30,6 +30,7 @@ without a network connection. See plans/013-telegram-bot-ingest.md.
 """
 
 import hashlib
+import json
 import logging
 import os
 import plistlib
@@ -40,6 +41,11 @@ import traceback
 import zipfile
 
 import requests
+
+try:
+    from .ipa_inspection import InspectionError, inspect_ipa
+except ImportError:  # direct execution from scripts/
+    from ipa_inspection import InspectionError, inspect_ipa
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -285,7 +291,20 @@ def validate_ipa_file(path, filename, declared_size):
         )
 
 
-_APP_INFO_PLIST = re.compile(r"^Payload/[^/]+\.app/Info\.plist$")
+def inspect_ipa_metadata(path, config=None):
+    """Return the shared inspection model, or None for operator-overridable failures."""
+    try:
+        return inspect_ipa(path, os.path.basename(path) or "IPA")
+    except InspectionError as exc:
+        secrets = []
+        if config:
+            secrets = [
+                config.get("bot_token"),
+                config.get("feather_admin_password"),
+                config.get("telegram_api_hash"),
+            ]
+        logger.warning(_redact(f"Failed to inspect IPA: {exc}", *secrets))
+        return None
 
 
 def extract_ipa_metadata(path, config=None):
@@ -312,34 +331,10 @@ def extract_ipa_metadata(path, config=None):
     is why the standalone verification command in plans/021 can call this
     with just a path.
     """
-    try:
-        with zipfile.ZipFile(path) as zf:
-            names = [name for name in zf.namelist() if _APP_INFO_PLIST.match(name)]
-            if len(names) != 1:
-                return None, None, None
-            plist = plistlib.loads(zf.read(names[0]))
-
-        bundle_id = plist.get("CFBundleIdentifier")
-        version = plist.get("CFBundleShortVersionString") or plist.get("CFBundleVersion")
-        name = plist.get("CFBundleDisplayName") or plist.get("CFBundleName")
-
-        bundle_id = str(bundle_id).strip() if bundle_id else None
-        version = str(version).strip() if version else None
-        name = (str(name).strip() or None) if name else None
-        if not bundle_id or not version:
-            return None, None, None
-
-        return bundle_id, version, name
-    except Exception as e:
-        secrets = []
-        if config:
-            secrets = [
-                config.get("bot_token"),
-                config.get("feather_admin_password"),
-                config.get("telegram_api_hash"),
-            ]
-        logger.warning(_redact(f"Failed to extract metadata from IPA {path}: {e}", *secrets))
+    inspection = inspect_ipa_metadata(path, config)
+    if inspection is None:
         return None, None, None
+    return inspection.bundle_identifier, inspection.version, inspection.name
 
 
 class BotAPIClient:
@@ -402,6 +397,10 @@ class FeatherClient:
         self.session = session
         self.base_url = base_url
         self.password = password
+        self._inspection = None
+
+    def set_preflight(self, inspection):
+        self._inspection = inspection
 
     def login(self):
         resp = self.session.post(
@@ -419,6 +418,10 @@ class FeatherClient:
         with open(path, "rb") as fh:
             files = {"ipaFile": (os.path.basename(path), fh)}
             data = {"bundleIdentifier": bundle_id, "version": version}
+            if self._inspection is not None:
+                data["buildVersion"] = self._inspection.build_version
+                if self._inspection.minimum_os_version:
+                    data["minOSVersion"] = self._inspection.minimum_os_version
             resp = self.session.post(
                 f"{self.base_url}/api/add-version", data=data, files=files
             )
@@ -445,6 +448,12 @@ class FeatherClient:
                 "name": name,
                 "developerName": developer,
             }
+            if self._inspection is not None:
+                data["buildVersion"] = self._inspection.build_version
+                if self._inspection.minimum_os_version:
+                    data["minOSVersion"] = self._inspection.minimum_os_version
+                if self._inspection.privacy:
+                    data["privacy"] = json.dumps(self._inspection.privacy)
             resp = self.session.post(
                 f"{self.base_url}/api/add-app", data=data, files=files
             )
@@ -506,7 +515,14 @@ def handle_document(user_id, chat_id, document, config, bot, pending):
         return
 
     digest = sha256_of_file(local_path)
-    bundle_id, version, name = extract_ipa_metadata(local_path, config)
+    inspection = inspect_ipa_metadata(local_path, config)
+    if inspection is not None and inspection.platform == "tvos":
+        pending.pop(user_id, None)
+        bot.send_message(chat_id, "Rejected: tvOS binaries are not supported")
+        return
+    bundle_id = inspection.bundle_identifier if inspection else None
+    version = inspection.version if inspection else None
+    name = inspection.name if inspection else None
 
     # Plan 023: the icon source is Telegram's own thumbnail on the
     # forwarded document, fetched the same way as the main file --
@@ -528,15 +544,19 @@ def handle_document(user_id, chat_id, document, config, bot, pending):
         "bundle_id": bundle_id,
         "version": version,
         "name": name,
+        "inspection": inspection,
         "thumb_path": thumb_path,
     }
 
     header = f"Got {filename} — {declared_size:,} bytes, sha256 {digest}."
     if bundle_id and version:
+        platform = inspection.platform
+        minimum = inspection.minimum_os_version or "unknown"
         bot.send_message(
             chat_id,
             f"{header}\n"
-            f"Detected: {bundle_id}  {version}\n\n"
+            f"Detected: {bundle_id}  {version} (build {inspection.build_version}, "
+            f"platform {platform}, minimum OS {minimum})\n\n"
             "Send /add to publish that, or /add <bundleIdentifier> <version> "
             "to override.",
         )
@@ -588,6 +608,8 @@ def handle_add_command(user_id, chat_id, text, config, bot, feather, pending):
 
     try:
         feather.login()
+        if hasattr(feather, "set_preflight"):
+            feather.set_preflight(doc.get("inspection"))
         ok, message = feather.add_version(bundle_id, version, doc["path"])
 
         # Plan 023: create the app only on the exact message "App not

@@ -1,45 +1,44 @@
 # Handoff
 
-Written 2026-08-12 against `1b75e2c`. Read this before touching anything; the "Traps" section is the part that saves real time.
+Written 2026-08-12 against `1b75e2c`; refreshed 2026-08-28 against `5e8f447` plus the current working implementation. Read the Traps section first.
 
 ## What this is
 
-A self-hosted AltStore/Feather iOS app-source manager. It serves a `source.json` catalog plus `.ipa` binaries to iOS devices, and now also ingests new builds forwarded to a Telegram bot.
+A self-hosted iOS AltStore source and third-party Android F-Droid repository. It serves iOS and Android artifacts, provides an authenticated admin UI, and supports Telegram and repository-release ingestion.
 
-- `app.py` — the whole Flask app (~1,500 lines; it was 2,986 before the template was extracted)
+- `app.py` — the Flask app (about 4,930 lines)
 - `templates/index.html` — the frontend, extracted in Plan 009
 - `scripts/telegram_bot_ingest.py` — the Telegram ingest worker
+- `scripts/release_source_ingest.py` — GitHub/GitLab release importer
+- `scripts/fdroid_index_loop.sh` — F-Droid signing/index loop
+- `Dockerfile.bot`, `Dockerfile.fdroid` — optional service images
+- `Jenkinsfile` — test, build, smoke, then publish pipeline
 - `scripts/migrate_ipas_to_garage.py` — one-shot local-disk → Garage S3 migration
-- `tests/` — 134 tests, ~4 s, no external network, no Docker (six tests bind loopback-only HTTP stubs)
-- `plans/` — 28 numbered plans, each self-contained; `README.md` is the index and the record of findings
+- `tests/` — 280 test functions (301 cases currently collected), no real provider calls
+- `plans/` — 80 numbered plans; `README.md` is the status index
 
 **Test command** (the `ADMIN_PASSWORD` prefix is mandatory — the app refuses to import without it):
 
 ```bash
-ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q     # 134 passed
+ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q -p no:cacheprovider
 ```
 
 ## State
 
-22 of 24 plans done. Two open:
+All currently selected plans through 081 are implemented or explicitly rejected; see `plans/README.md` for historical statuses and deferred findings.
 
-| Plan | Status |
-|---|---|
-| **014** Telegram notifications on catalog changes | TODO — designed, disabled-by-default, adds no dependency |
-| **022** Narrow the redaction to actual secrets | TODO — `BOT_API_FILE_ROOT` is scrubbed but isn't a secret, which makes `MountMismatchError` unreadable |
-| **012** Telethon ingest | **shelved permanently** — 013 won on credential blast radius; do not implement |
-
-CI publishes two images on every push to `main`: `ghcr.io/d7eeem/feather` and `ghcr.io/d7eeem/feather-bot`. Both public. Four jobs: tests on Python 3.11 and 3.14, plus both image builds.
+Jenkins tests Python 3.11 and 3.14, checks the `requests` pin, builds and smokes all three images, then publishes `ghcr.io/t1nk333r/feather`, `feather-bot`, and `feather-fdroid` only after every smoke stage passes.
 
 ## Deployment
 
-TrueNAS, managed by **Dockge**, stack at `/path/to/feather`. Three containers:
+TrueNAS, managed by **Dockge**, stack at `/path/to/feather`. Optional profiles add services:
 
 | Container | Image | Notes |
 |---|---|---|
-| `altstore-manager` | `ghcr.io/d7eeem/feather:latest` | the product; port 7000 → 5000 |
+| `altstore-manager` | `ghcr.io/t1nk333r/feather:latest` | the product; port 7000 → 5000 |
 | `telegram-bot-api` | `aiogram/telegram-bot-api:latest` | self-hosted Bot API, `--local`; **no host port** |
-| `ipa-ingest-bot` | `ghcr.io/d7eeem/feather-bot:latest` | forward-to-bot worker |
+| `ipa-ingest-bot` | `ghcr.io/t1nk333r/feather-bot:latest` | forward-to-bot worker |
+| `feather-fdroid-index` | `ghcr.io/t1nk333r/feather-fdroid:latest` | profile `android`; root by necessity; mounts only `./data/fdroid` |
 
 Public at `https://feather.example.com` (openresty on `<proxy-ip>`). Garage S3 at `https://s3.example.com`, bucket `feather-repo` served at `https://feather-repo.web.example.com`.
 
@@ -59,7 +58,8 @@ Ordered by urgency. None of these are code.
 4. **Three catalog bundle IDs disagree with their binaries** — `com.instagram.theta` and `com.instagram.ifgram` both ship `com.burbn.instagram`; `com.michael-128.qBitControl` ships `MikeMichael225.qBitControl`. May be deliberate (a renamed patched build installs beside the real app), but AltStore keys update-tracking on the bundle identifier, so it should be a decision rather than an accident.
 5. **Garage is configured but not in use.** `STORAGE_BACKEND` defaults to `local`. To switch: fill the Garage keys, run the migration **dry-run first** (expect 8 uploadable / 3 corrupt-skipped / 2 orphans), then `--apply`, *then* set `STORAGE_BACKEND=garage`. Doing it in the other order makes every existing app un-installable on restart.
 6. **`developerName` is `"Unknown"`** on anything the bot created (Plan 023's default), and `localizedDescription` is empty. Cosmetic; fix in the web UI.
-7. **The published source icon still needs its one-time update after Plan 028 lands.** Set only the source-level `iconURL` to `https://f002.backblazeb2.com/file/S30000PUBLIC/MEDIA-PUBLIC/feather-tinker-1024.png` through Source Information. Leave `headerURL` and every app's own `iconURL` alone.
+7. **Enable and protect Android signing state.** Set `COMPOSE_PROFILES=android`, run `chown -R 999:999 data/fdroid`, and back up both `data/fdroid/keystore.p12` and `FDROID_KEYSTORE_PASSWORD`. Losing either changes the repository fingerprint for every subscriber.
+8. **After the first Jenkins publish, make all three `t1nk333r` GHCR packages public** if deployment pulls without registry credentials.
 
 ## Traps
 
@@ -83,13 +83,13 @@ Each of these cost real debugging time. They are the reason this file exists.
 
 **Do not extract app icons from the IPA.** The declared icon is often only inside the compiled `Assets.car`, and what is loose is usually CgBI (byte-swapped BGRA, premultiplied alpha, raw-deflate IDAT) which neither browsers nor Pillow decode. Coverage would be ~1 in 3 for ~70 lines of PNG un-filtering. The Telegram thumbnail is used instead.
 
-**`/api/add-app` silently ignores icons.** Its multipart branch never passes `icon_file` to `add_app_manual` despite that method accepting one. `/api/update-app` does wire it through — hence create-then-set-icon as two requests. Wiring `add-app` properly is an unwritten follow-up.
-
 **`.dockerignore` is deny-by-default.** A new file a Dockerfile needs must be re-admitted with a `!` line, and you will find out via a failed build — the right failure mode. It exists so a careless `COPY . .` cannot leak `.env` or the 1.3 GB `data/`.
 
-**CI pushes the image *before* the smoke test runs.** A broken `latest` can reach ghcr even when the run ends red. Reordering push-after-smoke is an unwritten follow-up and matters more now the deployment actually pulls `latest`.
-
 **A fresh `data/` bind mount is created as root**, and the container's non-root user cannot write to it — the app fails with `PermissionError` and serves nothing. `chown -R 999:999 data/` before the first start on a new host.
+
+**The F-Droid sidecar must run as root.** Adding `user:` to that service breaks `fdroidserver` because its upstream image requires root-owned paths and setup.
+
+**`./data/fdroid` is a separate bind mount.** Moving an uploaded APK into it may raise `EXDEV`; `AndroidRepoManager.add_apk` handles that with a hidden staged copy plus atomic replace.
 
 ## Verifying a deployment
 
@@ -107,6 +107,12 @@ curl -sI https://feather.example.com/ipas/<bundle>/<ver>.ipa | grep -i '^HTTP\|^
 
 # the worker
 docker logs --tail 30 ipa-ingest-bot                               # names missing vars if misconfigured
+
+# the Android repo
+curl -sI https://feather.example.com/fdroid/repo/index-v1.jar | head -1
+curl -s https://feather.example.com/fdroid/repo/index-v1.json | python3 -c 'import json,sys; print(list(json.load(sys.stdin)["packages"]))'
+docker logs --tail 5 feather-fdroid-index                           # "INFO: Finished"
+cat data/fdroid/last-update.json                                    # "ok": true
 ```
 
 ## Conventions worth preserving

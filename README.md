@@ -8,9 +8,8 @@ optional Telegram ingest worker for publishing new builds without touching the U
 
 Read this before deploying:
 
-- It runs the Werkzeug **development server** (`app.run()` in `app.py`), not a production
-  WSGI server. Put a real reverse proxy in front of it for anything beyond a private
-  network.
+- It is served by **Waitress** (single process, `WAITRESS_THREADS` threads, default 8)
+  from `app.py`'s `__main__`. Keep TLS termination and rate limiting at a reverse proxy.
 - **There is no rate limiting.** `Flask-Limiter` is pinned in `requirements.txt` but is not
   imported or wired up anywhere in `app.py`.
 - The catalog write path uses an in-process lock and assumes a single worker process.
@@ -84,18 +83,28 @@ Summary:
 | `GET /ipas/<bundle_id>/<filename>` | public | IPA download (redirects to S3 when Garage storage is enabled) |
 | `GET /icons/<bundle_id>/icon.<ext>` | public | app icons |
 | `GET /qr` | public | QR code for the `feather://` source URL |
-| `GET /fdroid/repo/<path>` | public | the F-Droid repo (index, jars, APKs) built by the `fdroid-index` sidecar |
+| `GET /fdroid/repo/<path:filename>` | public | F-Droid indexes, signatures, and APKs |
 | `GET /fdroid/qr` | public | QR code for the Android repo's subscribe URL (`?fingerprint=...`) |
 | `GET /` | public | admin UI |
-| `POST /api/login`, `/api/logout`, `GET /api/session` | public | session auth |
-| `GET /api/apps`, `GET /api/app/<id>` | public | read-only JSON |
-| `POST /api/add-app`, `/api/delete-app`, `/api/update-app`, `/api/add-version`, `/api/update-version`, `/api/update-source` | session required | the six mutating routes |
-| `GET /api/android/status`, `GET /api/android/apps`, `POST /api/android/add-apk`, `/update-app`, `/delete-version`, `/delete-app`, `/repo-config`, `/request-update` | session required | Android/F-Droid admin API (plan 073) |
+| `GET /sw.js` | public | service worker |
+| `POST /api/login`; `POST /api/logout`; `GET /api/session` | public | session lifecycle |
+| `GET /api/apps`; `GET /api/app/<bundle_identifier>` | public | read-only app JSON |
+| `POST /api/add-app`; `/api/delete-app`; `/api/update-app`; `/api/add-version`; `/api/update-version`; `/api/delete-version`; `/api/update-source` | session | seven iOS catalog mutations |
+| `POST /api/import-release/inspect`; `POST /api/import-release` | session | release discovery and one-off import |
+| `GET /api/import-history`; `POST /api/import-history/record`; `GET /api/import-provenance/<bundle_id>/<version>` | session | private import provenance |
+| `GET /api/auto-import`; `POST /api/auto-import/config`; `/api/auto-import/job`; `/api/auto-import/job/delete`; `/api/auto-import/run` | session | scheduled import jobs |
+| `GET /api/editorial`; `POST /api/featured-apps`; `/api/news`; `/api/news/delete` | session | featured apps and news authoring |
+| `GET /api/health`; `GET /api/health-monitor`; `POST /api/health-monitor/config` | session | health scan, history, and scheduling |
+| `GET /api/catalog-backups`; `GET /api/catalog-backups/<filename>/download`; `POST /api/catalog-backups/preview`; `/api/catalog-backups/restore` | session | catalog-only recovery |
+| `POST /api/reconcile-icons`; `/api/storage-selftest`; `GET /api/diagnostics` | session | storage operations and diagnostics |
+| `GET /api/android/status`; `GET /api/android/apps` | session | Android status and app inventory |
+| `POST /api/android/add-apk`; `/api/android/update-app`; `/api/android/delete-version`; `/api/android/delete-app`; `/api/android/repo-config`; `/api/android/request-update` | session | Android/F-Droid mutations |
 
-**The first four routes must never require authentication.** iOS clients fetch them with
-no credentials; gating any of them breaks every subscribed device. The same rule applies to
-`GET /fdroid/repo/<path>` and `GET /fdroid/qr` — the F-Droid client sends no credentials
-either.
+<!-- regenerate: command grep -n "@app.route" app.py -->
+
+The six public catalog delivery routes—`/source.json`, `/ipas/...`, `/icons/...`,
+`/qr`, `/fdroid/repo/...`, and `/fdroid/qr`—must never require authentication.
+iOS and F-Droid clients fetch them without credentials.
 
 ## Updating a deployment
 
@@ -118,6 +127,9 @@ Before switching an existing deployment, run the dry-run-first
 published automatically, and the catalog can post a Telegram message on add/update/delete.
 Both are off unless the relevant `TELEGRAM_*` variables are set. See
 `plans/013-telegram-bot-ingest.md` and `plans/014-telegram-notifications.md`.
+Notification events are `add_app`, `add_version`, `delete_app`, `delete_version`,
+`android_add_apk`, and `health_transition`; the default enables all except
+`delete_version` and `health_transition`.
 
 **Cron release importer.** A one-shot importer (`scripts/release_source_ingest.py`,
 the `release-import` Compose service) can poll a configured GitHub or GitLab
@@ -188,6 +200,29 @@ Android tab, upload an APK, and scan the QR code (or open its URL,
 `https://<host>/fdroid/repo?fingerprint=<64-hex>`) on an Android device with the
 F-Droid client installed to subscribe.
 
+The fdroidserver base image is pinned by digest. Refresh it deliberately: resolve the
+current upstream `master` digest, rerun an init plus real-APK index build, then update
+the digest and fdroid version note in `Dockerfile.fdroid`.
+
+To rotate only the keystore password, run the sidecar with both the current
+`FDROID_KEYSTORE_PASSWORD` and a temporary `NEW_PASSWORD`, then execute
+`keytool -storepasswd -keystore /repo/keystore.p12 -storepass:env FDROID_KEYSTORE_PASSWORD -new:env NEW_PASSWORD`.
+Update `.env` immediately afterward and restart `fdroid-index`. Password rotation keeps
+the key and fingerprint, so subscribed devices are unaffected; replacing
+`keystore.p12` changes the fingerprint and forces every device to re-add the repo.
+
+**Catalog health, recovery, and editorial metadata.** The Health tab can retain up
+to 30 sanitized scan snapshots, run an optional default-off monitor, and alert on
+healthy/degraded transitions. Catalog Recovery lists and previews the 20 local
+`source.json` snapshots before a typed-confirmation restore. These snapshots are in
+the same `DATA_DIR`; they are not off-site backups and contain no IPA/icon bytes.
+Restoring metadata cannot recreate deleted artifacts. Back up local artifacts,
+Garage data, automation configuration, signing keys, and secrets separately.
+
+Source Information can order up to five existing bundle identifiers in
+`featuredApps` and author schema-validated AltStore news. News `notify` is client
+metadata only and never sends a server-side Telegram message.
+
 ## Repository layout
 
 ```
@@ -206,8 +241,7 @@ plans/                          numbered implementation plans; plans/README.md i
 
 ## Contributing / conventions
 
-- The four public routes (`/source.json`, `/ipas/...`, `/icons/...`, `/qr`) must stay
-  public. Do not add auth to them.
+- The six public catalog routes listed in [Routes](#routes) must stay public.
 - `data/` is gitignored and holds the live catalog, IPAs, and icons. Never `git add` it.
 - `.dockerignore` is deny-by-default. A new file a Dockerfile needs to see must be
   re-admitted there with a `!` line, or the build silently won't see it.
