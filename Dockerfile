@@ -22,6 +22,7 @@ COPY static/ ./static/
 # .dockerignore re-admission above. It is never invoked by CMD below --
 # only by the release-import Compose service / host crontab.
 COPY scripts/release_source_ingest.py ./scripts/release_source_ingest.py
+COPY scripts/ipa_inspection.py ./scripts/ipa_inspection.py
 
 # Create non-root user for security
 RUN groupadd -r altstore && useradd -r -g altstore altstore \

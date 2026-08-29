@@ -1,8 +1,9 @@
 # Feather
 
-A self-hosted AltStore/Feather iOS app-source manager. It serves a `source.json` catalog
-and `.ipa` binaries to iOS devices, with an admin UI for adding and updating apps, and an
-optional Telegram ingest worker for publishing new builds without touching the UI.
+A self-hosted app-source manager for iOS and Android. It serves an AltStore/Feather
+`source.json` catalog and `.ipa` binaries to iOS devices, and an optional signed F-Droid
+repository to Android devices. The admin UI manages both catalogs; an optional Telegram
+ingest worker can publish new iOS builds without touching the UI.
 
 ## Status and caveats
 
@@ -114,6 +115,17 @@ docker compose pull && docker compose up -d
 
 Use `pull`, **not `--build`**. Building locally produces a different image than the one CI
 already built and smoke-tested — `docker compose build` silently bypasses that check.
+
+CI publishes three GHCR images from the same tested commit:
+
+| Component | Image | Compose activation |
+|---|---|---|
+| Core iOS/Android web app and release importer | `ghcr.io/t1nk333r/feather:latest` | always; importer uses profile `release-import` |
+| Telegram IPA ingest worker | `ghcr.io/t1nk333r/feather-bot:latest` | profile `telegram` |
+| Android/F-Droid index signer | `ghcr.io/t1nk333r/feather-fdroid:latest` | profile `android` |
+
+The core image serves both the iOS catalog and Android repository routes. The F-Droid
+image is the optional signing/index sidecar; it does not replace the core web app.
 
 ## Optional features
 

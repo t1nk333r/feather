@@ -8,6 +8,7 @@ WORKDIR /app
 RUN pip install --no-cache-dir requests==2.31.0
 
 COPY scripts/telegram_bot_ingest.py .
+COPY scripts/ipa_inspection.py .
 
 # Non-root user, matching the main Dockerfile's convention.
 RUN groupadd -r ipabot && useradd -r -g ipabot ipabot \

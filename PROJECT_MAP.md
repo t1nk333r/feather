@@ -21,6 +21,7 @@
 - `app.py`: Flask routes, iOS source/storage managers, Android repository manager, scheduler, diagnostics, and health/recovery APIs.
 - `scripts/release_source_ingest.py`: standalone release discovery/download/publish engine reused by in-app imports.
 - `scripts/telegram_bot_ingest.py`: Telegram-to-Feather ingest worker.
+- `scripts/ipa_inspection.py`: shared dependency-free IPA validator packaged with both standalone importer images.
 - `scripts/fdroid_index_loop.sh`: F-Droid index/signing sidecar loop.
 - `templates/index.html`: single-page admin UI.
 - `tests/`: isolated-data pytest suite; no external network required.

@@ -1,6 +1,7 @@
 import io
 import plistlib
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -95,3 +96,10 @@ def test_rejects_invalid_archives(tmp_path, kind):
             archive.writestr("Payload/App.app/Info.plist", b"bad plist")
     with pytest.raises(InspectionError):
         inspect_ipa(path, "bad.ipa")
+
+
+def test_published_images_include_shared_inspector():
+    root = Path(__file__).resolve().parents[1]
+    assert "COPY scripts/ipa_inspection.py ./scripts/ipa_inspection.py" in (root / "Dockerfile").read_text()
+    assert "COPY scripts/ipa_inspection.py ." in (root / "Dockerfile.bot").read_text()
+    assert "!scripts/ipa_inspection.py" in (root / ".dockerignore").read_text()

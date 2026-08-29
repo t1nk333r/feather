@@ -17,6 +17,10 @@
 # importer (Plan 029) -- same rule, do NOT blanket-exclude scripts/
 !scripts/release_source_ingest.py
 
+# Shared by the Telegram and release importers; both published images must
+# receive it alongside their executable script.
+!scripts/ipa_inspection.py
+
 # Dockerfile.fdroid needs this one script for the opt-in Android/F-Droid
 # sidecar (Plan 073) -- same rule, do NOT blanket-exclude scripts/
 !scripts/fdroid_index_loop.sh
