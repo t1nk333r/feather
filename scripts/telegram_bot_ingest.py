@@ -1,12 +1,13 @@
-"""Telegram forward-to-bot IPA ingest worker (Plan 013).
+"""Telegram forward-to-bot IPA and APK ingest worker.
 
 Long-polls a self-hosted Telegram Bot API server (`telegram-bot-api --local`)
-for updates. An allowlisted operator forwards an IPA to the bot as an
-ordinary document, then sends `/add <bundleIdentifier> <version>` in a
-second message (forwards cannot carry a caption). The worker validates the
-file, computes its sha256, and publishes it to feather through the existing
-HTTP API (`/api/login`, `/api/add-version`) -- it never writes to
-`data/ipas/` or S3 directly.
+for updates. An allowlisted operator forwards an IPA or APK as an ordinary
+document, then sends `/add` to confirm publication. IPA metadata can be
+overridden with `/add <bundleIdentifier> <version> [name]`; APK identity and
+version are inspected by Feather's Android API. The worker validates the file,
+computes its sha256, and publishes through `/api/add-version`, `/api/add-app`,
+or `/api/android/add-apk`. It never writes catalog or artifact storage
+directly.
 
 Two things this module deliberately does NOT do:
 
@@ -65,7 +66,7 @@ REQUIRED_VARS = [
 
 USAGE_HINT = "Send:  /add <bundleIdentifier> <version> [name]"
 NOT_A_FILE_REPLY = (
-    "That isn't a file. Forward an IPA, then send /add <bundleIdentifier> <version>."
+    "That isn't a file. Forward an IPA or APK, then send /add."
 )
 
 # getFile blocks for the entire download in --local mode (not documented by
@@ -83,7 +84,7 @@ class ConfigError(RuntimeError):
 
 
 class ValidationError(RuntimeError):
-    """One of the five hard validation checks failed. Never a warning."""
+    """A forwarded IPA or APK failed a hard validation check."""
 
 
 class MountMismatchError(RuntimeError):
@@ -291,6 +292,27 @@ def validate_ipa_file(path, filename, declared_size):
         )
 
 
+def validate_apk_file(path, filename, declared_size):
+    """Reject obvious non-APK content before sending bytes to Feather."""
+    if not filename.lower().endswith(".apk"):
+        raise ValidationError(f"filename {filename!r} does not end in .apk")
+
+    if not zipfile.is_zipfile(path):
+        raise ValidationError("file is not a valid zip archive (not an APK)")
+
+    with zipfile.ZipFile(path) as archive:
+        names = archive.namelist()
+    if "AndroidManifest.xml" not in names:
+        raise ValidationError("archive has no AndroidManifest.xml entry (not an APK)")
+
+    actual_size = os.path.getsize(path)
+    if actual_size != declared_size:
+        raise ValidationError(
+            f"size mismatch: on-disk {actual_size} bytes, Telegram reported "
+            f"{declared_size} bytes"
+        )
+
+
 def inspect_ipa_metadata(path, config=None):
     """Return the shared inspection model, or None for operator-overridable failures."""
     try:
@@ -464,6 +486,22 @@ class FeatherClient:
             "message"
         )
 
+    def add_apk(self, path):
+        """Stream an APK to Feather; the server owns manifest inspection."""
+        with open(path, "rb") as fh:
+            files = {"apkFile": (os.path.basename(path), fh)}
+            resp = self.session.post(
+                f"{self.base_url}/api/android/add-apk", files=files
+            )
+        if resp.status_code == 401:
+            raise FeatherAuthError("feather /api/android/add-apk returned 401")
+        payload = resp.json()
+        return (
+            bool(payload.get("success")),
+            payload.get("error") or payload.get("message"),
+            payload,
+        )
+
     def set_icon(self, bundle_id, path):
         # Plan 023: only ever called right after add_app, on the creation
         # path -- never when merely appending a version, so an operator's
@@ -507,14 +545,39 @@ def handle_document(user_id, chat_id, document, config, bot, pending):
         file_info.get("file_path"), config["bot_api_file_root"]
     )
 
+    artifact_type = None
     try:
-        validate_ipa_file(local_path, filename, declared_size)
+        if filename.lower().endswith(".ipa"):
+            artifact_type = "ipa"
+            validate_ipa_file(local_path, filename, declared_size)
+        elif filename.lower().endswith(".apk"):
+            artifact_type = "apk"
+            validate_apk_file(local_path, filename, declared_size)
+        else:
+            raise ValidationError(
+                f"filename {filename!r} must end in .ipa or .apk"
+            )
     except ValidationError as e:
         pending.pop(user_id, None)
         bot.send_message(chat_id, f"Rejected: {e}")
         return
 
     digest = sha256_of_file(local_path)
+
+    if artifact_type == "apk":
+        pending[user_id] = {
+            "artifact_type": "apk",
+            "path": local_path,
+            "filename": filename,
+            "size": declared_size,
+            "sha256": digest,
+        }
+        bot.send_message(
+            chat_id,
+            f"Got Android APK {filename} — {declared_size:,} bytes, "
+            f"sha256 {digest}.\n\nSend /add to inspect and publish it.",
+        )
+        return
     inspection = inspect_ipa_metadata(local_path, config)
     if inspection is not None and inspection.platform == "tvos":
         pending.pop(user_id, None)
@@ -537,6 +600,7 @@ def handle_document(user_id, chat_id, document, config, bot, pending):
         )
 
     pending[user_id] = {
+        "artifact_type": "ipa",
         "path": local_path,
         "filename": filename,
         "size": declared_size,
@@ -569,6 +633,38 @@ def handle_document(user_id, chat_id, document, config, bot, pending):
         )
 
 
+def handle_add_apk_command(user_id, chat_id, text, config, bot, feather, pending):
+    if text.strip() != "/add":
+        bot.send_message(chat_id, "Usage: /add")
+        return
+
+    doc = pending[user_id]
+    try:
+        feather.login()
+        ok, message, payload = feather.add_apk(doc["path"])
+    except FeatherAuthError:
+        bot.send_message(
+            chat_id, "Login to feather failed (401) -- check FEATHER_ADMIN_PASSWORD."
+        )
+        return
+    except Exception as e:  # noqa: BLE001 -- surfaced to the operator
+        bot.send_message(chat_id, f"Publish failed: {e}")
+        return
+
+    if not ok:
+        bot.send_message(chat_id, f"Publish failed: {message}")
+        return
+
+    if payload.get("added") is False:
+        reply = message or "APK is already present."
+    else:
+        package = payload.get("package") or "unknown package"
+        version_code = payload.get("versionCode")
+        reply = f"Published Android APK {package} versionCode {version_code}."
+    bot.send_message(chat_id, reply)
+    pending.pop(user_id, None)
+
+
 def handle_add_command(user_id, chat_id, text, config, bot, feather, pending):
     parts = text.split(maxsplit=3)
     if len(parts) not in (1, 3, 4):
@@ -582,7 +678,13 @@ def handle_add_command(user_id, chat_id, text, config, bot, feather, pending):
     if doc is None:
         bot.send_message(
             chat_id,
-            "No pending file. Forward an IPA first, then " + USAGE_HINT.strip(),
+            "No pending file. Forward an IPA or APK first, then send /add.",
+        )
+        return
+
+    if doc.get("artifact_type") == "apk":
+        handle_add_apk_command(
+            user_id, chat_id, text, config, bot, feather, pending
         )
         return
 
@@ -745,7 +847,7 @@ def run(config):
     pending = {}
 
     logger.info(
-        "ipa-ingest-bot starting; allowlist has %d user id(s)",
+        "telegram ingest bot starting; allowlist has %d user id(s)",
         len(config["allowed_user_ids"]),
     )
 

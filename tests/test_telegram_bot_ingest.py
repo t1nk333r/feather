@@ -80,6 +80,7 @@ class _FakeResponse:
     """Records only what BotAPIClient touches -- status/json, nothing real."""
 
     def __init__(self, payload):
+        self.status_code = 200
         self._payload = payload
 
     def raise_for_status(self):
@@ -1137,3 +1138,113 @@ def test_mount_mismatch_reply_keeps_root_and_path_readable():
     assert "documents/file_0.ipa" in error_text
     assert token not in error_text
     assert "<REDACTED>" in error_text
+
+
+class FakeAndroidFeatherClient(FakeFeatherClient):
+    def __init__(self, result=None):
+        super().__init__()
+        self.add_apk_calls = []
+        self.add_apk_result = result or (
+            True,
+            "Added com.x8bit.bitwarden version 42",
+            {
+                "success": True,
+                "added": True,
+                "package": "com.x8bit.bitwarden",
+                "versionCode": 42,
+            },
+        )
+
+    def add_apk(self, path):
+        self.add_apk_calls.append(path)
+        return self.add_apk_result
+
+
+def write_minimal_apk(path):
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("AndroidManifest.xml", b"binary manifest placeholder")
+    return path
+
+
+def test_apk_document_is_staged_for_confirmation(tmp_path):
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    apk_path = write_minimal_apk(tmp_path / "com.x8bit.bitwarden.apk")
+    bot = FakeBotAPI(get_file_result={"file_path": str(apk_path)})
+    feather = FakeAndroidFeatherClient()
+    pending = {}
+    update = document_update(ALLOWED_USER_ID)
+    update["message"]["document"]["file_name"] = apk_path.name
+    update["message"]["document"]["file_size"] = apk_path.stat().st_size
+
+    ingest.handle_update(update, config, bot, feather, pending)
+
+    assert pending[ALLOWED_USER_ID]["artifact_type"] == "apk"
+    assert feather.login_calls == 0
+    assert any("Send /add" in text for _, text in bot.sent_messages)
+
+
+def test_add_command_publishes_pending_apk(tmp_path):
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    apk_path = write_minimal_apk(tmp_path / "com.x8bit.bitwarden.apk")
+    bot = FakeBotAPI(get_file_result={"file_path": str(apk_path)})
+    feather = FakeAndroidFeatherClient()
+    pending = {}
+    update = document_update(ALLOWED_USER_ID)
+    update["message"]["document"]["file_name"] = apk_path.name
+    update["message"]["document"]["file_size"] = apk_path.stat().st_size
+    ingest.handle_update(update, config, bot, feather, pending)
+
+    ingest.handle_update(
+        text_update(ALLOWED_USER_ID, "/add"), config, bot, feather, pending
+    )
+
+    assert feather.login_calls == 1
+    assert feather.add_apk_calls == [str(apk_path)]
+    assert ALLOWED_USER_ID not in pending
+    assert any(
+        "com.x8bit.bitwarden" in text and "42" in text
+        for _, text in bot.sent_messages
+    )
+
+
+def test_apk_document_without_manifest_is_rejected(tmp_path):
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    apk_path = tmp_path / "broken.apk"
+    with zipfile.ZipFile(apk_path, "w") as archive:
+        archive.writestr("readme.txt", "not an APK")
+    bot = FakeBotAPI(get_file_result={"file_path": str(apk_path)})
+    pending = {}
+    update = document_update(ALLOWED_USER_ID)
+    update["message"]["document"]["file_name"] = apk_path.name
+    update["message"]["document"]["file_size"] = apk_path.stat().st_size
+
+    ingest.handle_update(
+        update, config, bot, FakeAndroidFeatherClient(), pending
+    )
+
+    assert pending == {}
+    assert any("AndroidManifest.xml" in text for _, text in bot.sent_messages)
+
+
+def test_feather_client_posts_apk_to_android_endpoint(tmp_path):
+    apk_path = write_minimal_apk(tmp_path / "bitwarden.apk")
+    session = _FakeSession(
+        {
+            "success": True,
+            "added": True,
+            "message": "Added com.x8bit.bitwarden version 42",
+            "package": "com.x8bit.bitwarden",
+            "versionCode": 42,
+        }
+    )
+    feather = ingest.FeatherClient(session, "http://feather", "password")
+
+    ok, message, payload = feather.add_apk(str(apk_path))
+
+    assert ok is True
+    assert "com.x8bit.bitwarden" in message
+    assert payload["versionCode"] == 42
+    method, url, kwargs = session.calls[0]
+    assert method == "POST"
+    assert url == "http://feather/api/android/add-apk"
+    assert kwargs["files"]["apkFile"][0] == "bitwarden.apk"

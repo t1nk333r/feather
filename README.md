@@ -121,7 +121,7 @@ CI publishes three GHCR images from the same tested commit:
 | Component | Image | Compose activation |
 |---|---|---|
 | Core iOS/Android web app and release importer | `ghcr.io/t1nk333r/feather:latest` | always; importer uses profile `release-import` |
-| Telegram IPA ingest worker | `ghcr.io/t1nk333r/feather-bot:latest` | profile `telegram` |
+| Telegram IPA/APK ingest worker | `ghcr.io/t1nk333r/feather-bot:latest` | profile `telegram` |
 | Android/F-Droid index signer | `ghcr.io/t1nk333r/feather-fdroid:latest` | profile `android` |
 
 The core image serves both the iOS catalog and Android repository routes. The F-Droid
@@ -135,9 +135,12 @@ image is the optional signing/index sidecar; it does not replace the core web ap
 Before switching an existing deployment, run the dry-run-first
 `scripts/migrate_icons_to_garage.py` migration (then `--apply`).
 
-**Telegram ingest and notifications.** IPAs can be forwarded to a Telegram bot and
-published automatically, and the catalog can post a Telegram message on add/update/delete.
-Both are off unless the relevant `TELEGRAM_*` variables are set. See
+**Telegram ingest and notifications.** IPAs and APKs can be forwarded to the
+Telegram bot and confirmed with `/add`. IPA metadata is detected locally and can be
+overridden; APK identity and version are validated by Feather's Android API and queued
+for an F-Droid index rebuild. Keep the `android` profile running for APKs to appear in
+the signed repository. The catalog can also post Telegram notifications for mutations.
+Both features are off unless the relevant `TELEGRAM_*` variables are set. See
 `plans/013-telegram-bot-ingest.md` and `plans/014-telegram-notifications.md`.
 Notification events are `add_app`, `add_version`, `delete_app`, `delete_version`,
 `android_add_apk`, and `health_transition`; the default enables all except
@@ -241,7 +244,7 @@ metadata only and never sends a server-side Telegram message.
 app.py                          the entire Flask app
 templates/index.html            the admin UI
 static/                         source icon and favicons
-scripts/telegram_bot_ingest.py  optional: forward-an-IPA-to-a-bot ingest worker
+scripts/telegram_bot_ingest.py  optional: Telegram IPA/APK ingest worker
 scripts/release_source_ingest.py  optional: cron-driven GitHub/GitLab release importer
 scripts/migrate_ipas_to_garage.py  one-shot local-disk -> Garage S3 migration
 scripts/migrate_icons_to_garage.py  one-shot local app-icon -> Garage migration

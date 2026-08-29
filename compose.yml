@@ -54,9 +54,10 @@ services:
     # over the compose network. Exposing it would put an unauthenticated
     # file-serving endpoint on the LAN.
 
-  # Plan 013: the forward-to-bot ingest worker. Reads files the Bot API
-  # server wrote off the shared volume directly (no HTTP download), and
-  # publishes to feather through the existing /api/add-version HTTP API.
+  # Forward-to-bot IPA/APK ingest worker. Reads files the Bot API server
+  # wrote off the shared volume directly (no HTTP download), then publishes
+  # through feather's iOS catalog or Android APK API after /add confirmation.
+  # The service name stays stable for existing deployments.
   ipa-ingest-bot:
     profiles: ["telegram"]
     # image + build kept together -- `docker compose pull` fetches the
