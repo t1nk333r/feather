@@ -4733,8 +4733,15 @@ def fdroid_qr():
         if not subscribe_url:
             return jsonify({"error": "F-Droid repo not initialised — start the fdroid-index service"}), 503
 
+        if subscribe_url.startswith('https://'):
+            qr_url = 'fdroidrepos://' + subscribe_url[len('https://'):]
+        elif subscribe_url.startswith('http://'):
+            qr_url = 'fdroidrepo://' + subscribe_url[len('http://'):]
+        else:
+            qr_url = subscribe_url
+
         qr = qrcode.QRCode(version=1, box_size=10, border=5)
-        qr.add_data(subscribe_url)
+        qr.add_data(qr_url)
         qr.make(fit=True)
 
         img = qr.make_image(fill_color="black", back_color="white")

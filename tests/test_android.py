@@ -516,6 +516,34 @@ def test_status_unconfigured_then_configured(authed_client, tmp_path):
     assert qr_resp2.content_type == "image/png"
 
 
+def test_fdroid_qr_uses_client_deep_link(authed_client, monkeypatch):
+    app_module = authed_client.app_module
+    subscribe_url = (
+        "https://feather.example/fdroid/repo?fingerprint=" + "a" * 64
+    )
+    captured = {}
+    original_add_data = app_module.qrcode.QRCode.add_data
+
+    monkeypatch.setattr(
+        app_module.android_repo,
+        "status",
+        lambda: {"subscribe_url": subscribe_url},
+    )
+
+    def spy_add_data(self, data, *args, **kwargs):
+        captured["data"] = data
+        return original_add_data(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(app_module.qrcode.QRCode, "add_data", spy_add_data)
+
+    response = authed_client.get("/fdroid/qr")
+
+    assert response.status_code == 200
+    assert captured["data"] == subscribe_url.replace(
+        "https://", "fdroidrepos://", 1
+    )
+
+
 def test_android_unexpected_errors_do_not_reflect_exception_text(authed_client, monkeypatch):
     marker = "/secret/android/path"
 

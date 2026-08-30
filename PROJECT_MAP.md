@@ -10,7 +10,7 @@
 
 [SYSTEM_FLOW]
 
-1. Public clients fetch iOS `source.json`/IPA/icon/QR or F-Droid index/APK/QR routes without authentication.
+1. Public clients fetch iOS `source.json`/IPA/icon/QR or F-Droid index/APK/QR routes without authentication; the Android QR encodes a standard `fdroidrepos://` client deep link.
 2. An operator logs into the admin UI, mutates iOS/Android catalog state, and receives stable JSON outcomes.
 3. Manual, Telegram, one-off repository, and scheduled repository imports validate artifacts before catalog mutation.
 4. Catalog mutations are serialized and atomically persisted; the F-Droid sidecar consumes rebuild markers and signs generated indexes.

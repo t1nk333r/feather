@@ -211,9 +211,10 @@ The first start generates a signing keystore at `data/fdroid/keystore.p12`.
 **Back this file up along with `FDROID_KEYSTORE_PASSWORD`** — losing either means a new
 signing key, a new repository fingerprint, and every device that already subscribed
 must re-add the repo. Once the sidecar has produced an index, open the admin UI's
-Android tab, upload an APK, and scan the QR code (or open its URL,
-`https://<host>/fdroid/repo?fingerprint=<64-hex>`) on an Android device with the
-F-Droid client installed to subscribe.
+Android tab, upload an APK, and scan the QR code. The QR encodes the standard
+`fdroidrepos://<host>/fdroid/repo?fingerprint=<64-hex>` deep link so compatible
+clients such as Droid-ify can claim it directly. For manual entry, use
+`https://<host>/fdroid/repo` as the address and enter the fingerprint separately.
 
 The fdroidserver base image is pinned by digest. Refresh it deliberately: resolve the
 current upstream `master` digest, rerun an init plus real-APK index build, then update
