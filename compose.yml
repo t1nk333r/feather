@@ -69,6 +69,12 @@ services:
       context: .
       dockerfile: Dockerfile.bot
     container_name: ipa-ingest-bot
+    # Must match the uid telegram-bot-api chowns its work dir to (101).
+    # Dockerfile.bot's own user has a different uid, and it cannot traverse
+    # into the token directory -- which surfaces misleadingly as
+    # MountMismatchError, because os.path.exists() returns False on
+    # permission-denied rather than raising.
+    user: "101:101"
     depends_on:
       - telegram-bot-api
       - altstore-manager
