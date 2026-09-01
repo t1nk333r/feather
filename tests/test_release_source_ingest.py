@@ -1100,6 +1100,78 @@ def test_validate_rejects_non_ipa_and_missing_payload(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 12b. inspect_apk_metadata (plan 083)
+# ---------------------------------------------------------------------------
+
+
+def _patch_pyaxmlparser_apk(monkeypatch, **fields):
+    """Stand in for pyaxmlparser.APK, mirroring tests/test_apk_inspection.py's
+    _FakeApk -- a real binary AndroidManifest cannot be authored by hand."""
+    import pyaxmlparser
+
+    class _FakeApk:
+        def __init__(self, path):
+            self.package = fields.get("package", "org.example.app")
+            self.version_code = fields.get("version_code", "1")
+            self.version_name = fields.get("version_name", "1.0")
+
+        def is_valid_APK(self):
+            return True
+
+        def get_min_sdk_version(self):
+            return 21
+
+        def get_target_sdk_version(self):
+            return 34
+
+        def get_app_name(self):
+            return "Example"
+
+    monkeypatch.setattr(pyaxmlparser, "APK", _FakeApk)
+
+
+def test_inspect_apk_metadata_rejects_non_apk_filename(tmp_path):
+    job = make_job(bundle_identifier=None, package="org.example.app")
+    path = tmp_path / "notes.txt"
+    path.write_bytes(b"hello")
+    with pytest.raises(ingest.ValidationError, match="does not end in .apk"):
+        ingest.inspect_apk_metadata(str(path), "notes.txt", job)
+
+
+def test_inspect_apk_metadata_rejects_package_mismatch(tmp_path, monkeypatch):
+    job = make_job(bundle_identifier=None, package="org.example.app")
+    path = tmp_path / "App.apk"
+    path.write_bytes(b"fake-apk-bytes")
+    _patch_pyaxmlparser_apk(monkeypatch, package="org.other.app")
+    with pytest.raises(ingest.ValidationError, match="does not match configured package"):
+        ingest.inspect_apk_metadata(str(path), "App.apk", job)
+
+
+def test_inspect_apk_metadata_accepts_happy_path(tmp_path, monkeypatch):
+    job = make_job(bundle_identifier=None, package="org.example.app")
+    path = tmp_path / "App.apk"
+    path.write_bytes(b"fake-apk-bytes")
+    _patch_pyaxmlparser_apk(
+        monkeypatch, package="org.example.app", version_code="7", version_name="1.7"
+    )
+    inspection = ingest.inspect_apk_metadata(str(path), "App.apk", job)
+    assert inspection.package == "org.example.app"
+    assert inspection.version_code == 7
+    assert inspection.version_name == "1.7"
+
+
+def test_inspect_apk_metadata_accepts_when_job_has_no_package_configured(tmp_path, monkeypatch):
+    """A job may leave `package` unset (auto-detect); the extracted package
+    is trusted without a match check in that case."""
+    job = make_job(package=None)
+    path = tmp_path / "App.apk"
+    path.write_bytes(b"fake-apk-bytes")
+    _patch_pyaxmlparser_apk(monkeypatch, package="org.example.app")
+    inspection = ingest.inspect_apk_metadata(str(path), "App.apk", job)
+    assert inspection.package == "org.example.app"
+
+
+# ---------------------------------------------------------------------------
 # 13. test_extract_metadata_uses_only_top_level_app_plist
 # ---------------------------------------------------------------------------
 

@@ -843,6 +843,34 @@ def inspect_ipa_metadata(path, filename, job, candidate=None):
     return inspection
 
 
+def inspect_apk_metadata(path, filename, job, candidate=None):
+    """Run shared APK preflight and enforce the configured package match.
+
+    Symmetrical with `inspect_ipa_metadata`, but Android has no separate
+    extract/validate split -- there is only one identity field (`package`)
+    to check, so this single function does both jobs `extract_ipa_metadata`
+    and `validate_and_extract_metadata` do together for iOS.
+    """
+    release_ref = ""
+    if candidate is not None:
+        release_ref = f" (release {candidate.release_tag or candidate.release_id})"
+    if not filename.lower().endswith(".apk"):
+        raise ValidationError(
+            f"job {job.id}{release_ref}: asset filename {filename!r} does not end in .apk"
+        )
+    label = f"job {job.id}{release_ref}"
+    try:
+        inspection = inspect_apk(path, label)
+    except ApkInspectionError as exc:
+        raise ValidationError(str(exc))
+    if job.package is not None and inspection.package != job.package:
+        raise ValidationError(
+            f"{label}: extracted package {inspection.package!r} does not match "
+            f"configured package {job.package!r}"
+        )
+    return inspection
+
+
 def extract_ipa_metadata(path, filename, job, candidate=None):
     """The six hard checks (contract Step 3), then (bundle_id, version, name).
 
