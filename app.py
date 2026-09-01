@@ -3201,36 +3201,18 @@ def _validate_auto_import_job(raw):
     }
 
 
-def _run_auto_import_job(job, base_url, session_req, tokens):
-    """Run one auto-import job end to end (select -> download -> extract ->
-    publish), reusing the exact release_ingest + source_manager calls the
-    /api/import-release route above uses. Never raises -- always returns a
-    result dict, and persists it onto the stored job's lastRunAt/lastResult."""
+def _run_auto_import_ios_candidate(job_obj, job, base_url, session_req, tokens, candidate, run_started):
+    """Download, validate, and publish one selected iOS candidate. Never
+    raises -- always returns a per-platform result dict and appends its own
+    import-history record. Unchanged in behaviour from the pre-084
+    single-candidate code path (selection now happens once, in the caller,
+    for every platform the job has an identity for)."""
     tmp_path = None
-    result = None
-    started = time.monotonic()
-    candidate = None
     inspection = None
     digest = None
-    stage = "selection"
+    stage = "download"
+    result = None
     try:
-        job_obj = release_ingest.Job(
-            id=job.get('id') or '',
-            provider=job.get('provider') or '',
-            project=job.get('project') or '',
-            bundle_identifier=job.get('bundleIdentifier') or "",
-            asset_glob=job.get('assetGlob') or "*.ipa",
-            asset_exclude_glob=job.get('assetExcludeGlob') or None,
-            include_prereleases=bool(job.get('includePrereleases')),
-            create_if_missing=bool(job.get('createIfMissing')),
-            allowed_download_hosts=frozenset(
-                h.strip().lower() for h in (job.get('allowedDownloadHosts') or []) if h.strip()
-            ),
-            name=job.get('name') or None,
-            developer_name=job.get('developerName') or None,
-        )
-        candidate = release_ingest.select_candidate_single(job_obj, session_req, tokens, timeout=30)
-        stage = "download"
         fd, tmp_path = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix=".ipa")
         os.close(fd)
         _downloaded, digest = release_ingest.stream_download(
@@ -3338,7 +3320,7 @@ def _run_auto_import_job(job, base_url, session_req, tokens):
         "trigger": "auto", "jobId": job.get('id'),
         "status": result.get("status") if result and result.get("status") in ("published", "skipped") else "error",
         "stage": stage,
-        "durationMs": int((time.monotonic() - started) * 1000),
+        "durationMs": int((time.monotonic() - run_started) * 1000),
         "message": result.get("message") if result else None,
         **_candidate_history_fields(candidate),
         **_inspection_history_fields(inspection),
@@ -3346,8 +3328,196 @@ def _run_auto_import_job(job, base_url, session_req, tokens):
     if digest:
         history["sha256"] = digest
     append_import_record(history)
+    return result
 
-    # Persist lastRunAt/lastResult onto the stored job.
+
+def _run_auto_import_android_candidate(job_obj, job, session_req, tokens, candidate, run_started):
+    """Download, validate, and publish one selected Android candidate, via
+    the same in-process android_repo.add_apk pair /api/android/add-apk uses
+    -- never a second HTTP hop through that route. Never raises -- always
+    returns a per-platform result dict and appends its own import-history
+    record. Treats add_apk reporting this versionCode as already present as
+    an idempotent skip, not a failure, and never notifies twice (add_apk's
+    own metadata seeding runs, but this function -- not the route -- is the
+    only place that calls `notify`, matching one artifact = one
+    notification)."""
+    tmp_path = None
+    inspection = None
+    digest = None
+    stage = "download"
+    result = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix=".apk")
+        os.close(fd)
+        _downloaded, digest = release_ingest.stream_download(
+            session_req, candidate, job_obj, tmp_path, tokens,
+            release_ingest.DEFAULT_TIMEOUT, release_ingest.DEFAULT_MAX_BYTES,
+        )
+        stage = "preflight"
+        inspection = release_ingest.inspect_apk_metadata(
+            tmp_path, candidate.asset_name, job_obj, candidate)
+        preflight = {
+            "platform": "android",
+            "package": inspection.package,
+            "versionCode": inspection.version_code,
+            "versionName": inspection.version_name,
+            "minSdk": inspection.min_sdk,
+            "targetSdk": inspection.target_sdk,
+            "appName": inspection.app_name,
+        }
+        stage = "publish"
+        # android_repo.add_apk re-derives identity from the file itself (it
+        # cannot accept a pre-computed ApkInspection); the extra pyaxmlparser
+        # pass is the cost of reusing the exact route helper rather than
+        # re-implementing the move-into-place + idempotency logic here.
+        added, info = android_repo.add_apk(tmp_path, expected_package=job_obj.package)
+        if not added:
+            result = {
+                "status": "skipped", "package": info["package"],
+                "versionCode": info["version_code"], "versionName": info["version_name"],
+                "preflight": preflight,
+            }
+        else:
+            # Metadata (Name/Summary/...) is not part of a watcher job today
+            # -- android_repo.add_apk already seeds a default Name for a
+            # brand-new package, matching /api/android/add-apk's own
+            # `if fields: write_metadata(...)` (empty fields here -> no call).
+            notify("android_add_apk",
+                   f"Auto-imported Android APK {info['package']} {info['version_name']} "
+                   f"from {job_obj.provider}:{job_obj.project}")
+            result = {
+                "status": "published", "package": info["package"],
+                "versionCode": info["version_code"], "versionName": info["version_name"],
+                "preflight": preflight,
+            }
+    except Exception as e:
+        result = {"status": "error", "message": str(e)}
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+    history = {
+        "trigger": "auto", "jobId": job.get('id'),
+        "status": result.get("status") if result and result.get("status") in ("published", "skipped") else "error",
+        "stage": stage,
+        "platform": "android",
+        "durationMs": int((time.monotonic() - run_started) * 1000),
+        "message": result.get("message") if result else None,
+        **_candidate_history_fields(candidate),
+    }
+    if result and result.get("package"):
+        history["bundleIdentifier"] = result["package"]
+    if result and result.get("versionName"):
+        history["version"] = result["versionName"]
+    if digest:
+        history["sha256"] = digest
+    append_import_record(history)
+    return result
+
+
+def _summarize_auto_import_platforms(platforms):
+    """`platforms`: {"ios": result, "android": result} for whichever
+    platforms select_candidate found a match for -- each already run and
+    already appended its own import-history record. Returns the dict stored
+    as the job's lastResult.
+
+    Always carries the full per-platform breakdown under "platforms" so a
+    publish on one platform can never be masked by a skip/error on the
+    other. When the job only has one platform's identity configured --
+    every job stored before this plan, plus any new job that stays
+    single-platform -- the legacy top-level status/version/message/
+    preflight keys are also set, mirroring the pre-084 shape exactly (extra
+    keys, never removed ones, so existing callers reading result["status"]
+    / result["version"] are unaffected)."""
+    if not platforms:
+        return {"status": "error", "message": "No matching release asset found", "platforms": {}}
+    if len(platforms) == 1:
+        ((_, only),) = platforms.items()
+        legacy = dict(only)
+        legacy["platforms"] = platforms
+        return legacy
+
+    statuses = {r.get("status") for r in platforms.values()}
+    if "published" in statuses:
+        overall = "published"
+    elif "error" in statuses:
+        overall = "error"
+    else:
+        overall = "skipped"
+    messages = [
+        f"{platform}: {r.get('message')}" for platform, r in platforms.items()
+        if r.get("status") == "error" and r.get("message")
+    ]
+    return {
+        "status": overall,
+        "message": "; ".join(messages) or None,
+        "platforms": platforms,
+    }
+
+
+def _run_auto_import_job(job, base_url, session_req, tokens):
+    """Run one auto-import job end to end for every platform it has an
+    identity for (select -> download -> extract -> publish), reusing the
+    exact release_ingest + source_manager/android_repo calls the
+    /api/import-release route above uses. Never raises -- always returns a
+    result dict (see `_summarize_auto_import_platforms`), and persists it
+    onto the stored job's lastRunAt/lastResult.
+
+    plan 083's `select_candidate` returns at most one candidate per
+    platform; each is downloaded, validated, and published independently
+    (`_run_auto_import_ios_candidate` / `_run_auto_import_android_candidate`)
+    so one platform's failure or skip never blocks or hides the other."""
+    run_started = time.monotonic()
+    job_obj = release_ingest.Job(
+        id=job.get('id') or '',
+        provider=job.get('provider') or '',
+        project=job.get('project') or '',
+        bundle_identifier=job.get('bundleIdentifier') or None,
+        package=job.get('package') or None,
+        asset_glob=job.get('assetGlob') or "*.ipa",
+        asset_exclude_glob=job.get('assetExcludeGlob') or None,
+        include_prereleases=bool(job.get('includePrereleases')),
+        create_if_missing=bool(job.get('createIfMissing')),
+        allowed_download_hosts=frozenset(
+            h.strip().lower() for h in (job.get('allowedDownloadHosts') or []) if h.strip()
+        ),
+        name=job.get('name') or None,
+        developer_name=job.get('developerName') or None,
+    )
+
+    try:
+        candidates = release_ingest.select_candidate(job_obj, session_req, tokens, timeout=30)
+    except Exception as e:
+        result = {"status": "error", "message": str(e), "platforms": {}}
+        append_import_record({
+            "trigger": "auto", "jobId": job.get('id'),
+            "status": "error", "stage": "selection",
+            "durationMs": int((time.monotonic() - run_started) * 1000),
+            "message": str(e),
+        })
+        _persist_auto_import_job_result(job, result)
+        return result
+
+    platforms = {}
+    for candidate in candidates or []:
+        if candidate.platform == "ios":
+            platforms["ios"] = _run_auto_import_ios_candidate(
+                job_obj, job, base_url, session_req, tokens, candidate, run_started)
+        elif candidate.platform == "android":
+            platforms["android"] = _run_auto_import_android_candidate(
+                job_obj, job, session_req, tokens, candidate, run_started)
+
+    result = _summarize_auto_import_platforms(platforms)
+    _persist_auto_import_job_result(job, result)
+    return result
+
+
+def _persist_auto_import_job_result(job, result):
+    """Persist lastRunAt/lastResult onto the stored job. Best-effort --
+    never raises, matching `_run_auto_import_job`'s own contract."""
     try:
         def stamp_job(data):
             now = datetime.now(timezone.utc).isoformat()
@@ -3360,8 +3530,6 @@ def _run_auto_import_job(job, base_url, session_req, tokens):
         mutate_auto_import(stamp_job)
     except Exception:
         logging.exception("Failed to persist auto-import job result for %s", job.get('id'))
-
-    return result
 
 
 def _run_all_enabled_jobs(base_url):
@@ -3458,6 +3626,44 @@ def _start_auto_import_scheduler():
     return thread, stop_event
 
 
+def _stream_download_with_progress(session_req, candidate, job, tmp_path, tokens):
+    """Run release_ingest.stream_download in a worker thread while yielding
+    live progress, so a generator-based SSE route can `for kind, a, b in
+    ...: yield event(...)` without duplicating the queue/thread plumbing per
+    platform. Yields ("downloading", downloaded, total) while in flight,
+    then exactly one of ("ok", downloaded, sha256_hex) or ("err", message,
+    None) and stops."""
+    import queue
+    q = queue.Queue()
+
+    def cb(total, declared):
+        q.put(("downloading", total, declared))
+
+    def worker():
+        try:
+            downloaded_result = release_ingest.stream_download(
+                session_req, candidate, job, tmp_path, tokens,
+                release_ingest.DEFAULT_TIMEOUT, release_ingest.DEFAULT_MAX_BYTES,
+                progress_cb=cb,
+            )
+            q.put(("ok", downloaded_result[0], downloaded_result[1]))
+        except Exception as e:
+            q.put(("err", str(e), None))
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    try:
+        while True:
+            kind, a, b = q.get()
+            if kind == "downloading":
+                yield ("downloading", a, b)
+            else:
+                yield (kind, a, b)
+                return
+    finally:
+        t.join()
+
+
 def _release_job_from_payload(payload, job_id="ui-import"):
     """Normalize the provider/selector fields shared by inspect and import."""
     if not isinstance(payload, dict):
@@ -3520,6 +3726,12 @@ def inspect_import_release():
         releases = release_ingest.inspect_release_assets(
             job, requests.Session(), tokens, timeout=30, limit=5
         )
+        # Label each asset's inferred platform for the UI -- inspect_release_assets
+        # itself doesn't (plan 083 scope), so tag it here with the engine's own
+        # extension-inference helper rather than re-implementing it.
+        for release in releases:
+            for asset in release.get("assets") or []:
+                asset["platform"] = release_ingest._platform_for_asset(asset.get("name"))
         return jsonify({"releases": releases})
     except (ValueError, release_ingest.ConfigError, release_ingest.ProviderError) as exc:
         return jsonify({"error": str(exc)}), 400
@@ -3544,66 +3756,40 @@ def import_release():
     icon_url_in = (payload.get('iconURL') or '').strip()
     hosts_in = payload.get('allowedDownloadHosts') or []
     base_url = resolve_base_url()
+    started = time.monotonic()
 
     def event(**kw):
         return json.dumps(kw) + "\n"
 
-    def run():
+    def handle_ios(job, candidate, session_req, tokens):
+        """Download, validate, and publish one selected iOS candidate as SSE
+        events. Unchanged in behaviour from the pre-084 single-candidate
+        code path; every event carries a new "platform" field but no
+        existing field is renamed, matching what templates/index.html's
+        preflight/done handlers already read. Appends its own
+        import-history record."""
         tmp_path = None
-        started = time.monotonic()
-        candidate = None
         inspection = None
         digest = None
-        history_stage = "selection"
+        history_stage = "download"
         history_status = "error"
         history_message = None
         try:
-            job = _release_job_from_payload(payload)
-            tokens = {"github": os.environ.get("GITHUB_TOKEN"), "gitlab": os.environ.get("GITLAB_TOKEN")}
-            session_req = requests.Session()
-            yield event(stage="resolving")
-            candidate = release_ingest.select_candidate_single(job, session_req, tokens, timeout=30)
-            history_stage = "download"
-            yield event(stage="resolved", asset=candidate.asset_name,
+            yield event(stage="resolved", platform="ios", asset=candidate.asset_name,
                         release=candidate.release_tag or candidate.release_id, size=candidate.declared_size)
             fd, tmp_path = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix=".ipa")
             os.close(fd)
-
-            # ---- LIVE PROGRESS: queue + worker thread ----
-            import queue
-            q = queue.Queue()
-
-            def cb(total, declared):
-                q.put(("downloading", total, declared))
-
-            def worker():
-                try:
-                    downloaded_result = release_ingest.stream_download(
-                        session_req, candidate, job, tmp_path, tokens,
-                        release_ingest.DEFAULT_TIMEOUT, release_ingest.DEFAULT_MAX_BYTES,
-                        progress_cb=cb,
-                    )
-                    q.put(("ok", downloaded_result[0], downloaded_result[1]))
-                except Exception as e:
-                    q.put(("err", str(e), None))
-
-            t = threading.Thread(target=worker, daemon=True)
-            t.start()
-            while True:
-                kind, a, b = q.get()
+            for kind, a, b in _stream_download_with_progress(session_req, candidate, job, tmp_path, tokens):
                 if kind == "downloading":
                     pct = int(a * 100 / b) if b else None
-                    yield event(stage="downloading", downloaded=a, total=b, pct=pct)
+                    yield event(stage="downloading", platform="ios", downloaded=a, total=b, pct=pct)
                 elif kind == "ok":
                     digest = b
-                    break
                 else:
                     history_message = a
-                    yield event(stage="error", error=a)
+                    yield event(stage="error", platform="ios", error=a)
                     return
-            t.join()
-
-            yield event(stage="validating")
+            yield event(stage="validating", platform="ios")
             history_stage = "preflight"
             inspection = release_ingest.inspect_ipa_metadata(
                 tmp_path, candidate.asset_name, job, candidate)
@@ -3611,7 +3797,8 @@ def import_release():
             version = inspection.version
             detected_name = inspection.name
             if bundle_id_in and bundle_id != bundle_id_in:
-                yield event(stage="error", error=f"IPA bundle id {bundle_id} does not match the id you entered ({bundle_id_in})")
+                yield event(stage="error", platform="ios",
+                            error=f"IPA bundle id {bundle_id} does not match the id you entered ({bundle_id_in})")
                 history_message = "IPA bundle identifier did not match the configured value"
                 return
             yield event(
@@ -3625,7 +3812,7 @@ def import_release():
                 deviceFamilies=list(inspection.device_families),
                 privacyKeys=sorted(inspection.privacy),
             )
-            yield event(stage="publishing")
+            yield event(stage="publishing", platform="ios")
             history_stage = "publish"
             existing = source_manager.get_app(bundle_id)
             fs = FileStorage(stream=open(tmp_path, "rb"), filename=f"{secure_filename(version)}.ipa")
@@ -3684,22 +3871,23 @@ def import_release():
                         except OSError:
                             pass
             else:
-                yield event(stage="error", error=f"App {bundle_id} is not in the catalog. Tick 'create if missing' with a name + developer to add it.")
+                yield event(stage="error", platform="ios",
+                            error=f"App {bundle_id} is not in the catalog. Tick 'create if missing' with a name + developer to add it.")
                 return
             if ok:
                 notify("add_version", f"Imported {bundle_id} {version} from {provider}:{project}\n{base_url}/source.json")
                 history_status = "published"
-                yield event(stage="done", success=True, message=message, bundleIdentifier=bundle_id, version=version)
+                yield event(stage="done", platform="ios", success=True, message=message, bundleIdentifier=bundle_id, version=version)
             else:
                 history_message = message
-                yield event(stage="error", error=message)
+                yield event(stage="error", platform="ios", error=message)
         except (ValueError, release_ingest.ProviderError, release_ingest.ValidationError, release_ingest.ConfigError) as e:
             history_message = str(e)
-            yield event(stage="error", error=str(e))
-        except Exception as e:
-            logging.exception("import-release failed")
+            yield event(stage="error", platform="ios", error=str(e))
+        except Exception:
+            logging.exception("import-release (ios) failed")
             history_message = "Import failed"
-            yield event(stage="error", error="Import failed")
+            yield event(stage="error", platform="ios", error="Import failed")
         finally:
             if tmp_path and os.path.exists(tmp_path):
                 try:
@@ -3718,6 +3906,128 @@ def import_release():
             if digest:
                 history["sha256"] = digest
             append_import_record(history)
+
+    def handle_android(job, candidate, session_req, tokens):
+        """Download, validate, and publish one selected Android candidate as
+        SSE events tagged platform="android", reusing the bundleIdentifier/
+        version field names (holding package/versionName) so no event field
+        the frontend already reads is renamed -- see handle_ios's docstring.
+        Publishes through the exact android_repo.add_apk/write_metadata pair
+        /api/android/add-apk uses -- never a second HTTP hop through that
+        route -- and treats add_apk reporting this versionCode as already
+        present as an idempotent skip, not a failure. Appends its own
+        import-history record."""
+        tmp_path = None
+        inspection = None
+        digest = None
+        history_stage = "download"
+        history_status = "error"
+        history_message = None
+        try:
+            yield event(stage="resolved", platform="android", asset=candidate.asset_name,
+                        release=candidate.release_tag or candidate.release_id, size=candidate.declared_size)
+            fd, tmp_path = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix=".apk")
+            os.close(fd)
+            for kind, a, b in _stream_download_with_progress(session_req, candidate, job, tmp_path, tokens):
+                if kind == "downloading":
+                    pct = int(a * 100 / b) if b else None
+                    yield event(stage="downloading", platform="android", downloaded=a, total=b, pct=pct)
+                elif kind == "ok":
+                    digest = b
+                else:
+                    history_message = a
+                    yield event(stage="error", platform="android", error=a)
+                    return
+            yield event(stage="validating", platform="android")
+            history_stage = "preflight"
+            inspection = release_ingest.inspect_apk_metadata(
+                tmp_path, candidate.asset_name, job, candidate)
+            yield event(
+                stage="preflight",
+                platform="android",
+                bundleIdentifier=inspection.package,
+                name=inspection.app_name,
+                version=inspection.version_name,
+                buildVersion=str(inspection.version_code),
+                minOSVersion=inspection.min_sdk,
+                deviceFamilies=[],
+                privacyKeys=[],
+            )
+            yield event(stage="publishing", platform="android")
+            history_stage = "publish"
+            added, info = android_repo.add_apk(tmp_path, expected_package=job.package)
+            if added:
+                notify("android_add_apk",
+                       f"Imported Android APK {info['package']} {info['version_name']} from {provider}:{project}")
+                history_status = "published"
+                yield event(stage="done", platform="android", success=True,
+                            message=f"Added {info['package']} version {info['version_code']}",
+                            bundleIdentifier=info["package"], version=info["version_name"])
+            else:
+                history_status = "skipped"
+                history_message = f"Already present: {info['package']} versionCode {info['version_code']}"
+                yield event(stage="done", platform="android", success=True,
+                            message=history_message,
+                            bundleIdentifier=info["package"], version=info["version_name"])
+        except (ValueError, release_ingest.ProviderError, release_ingest.ValidationError, release_ingest.ConfigError) as e:
+            history_message = str(e)
+            yield event(stage="error", platform="android", error=str(e))
+        except Exception:
+            logging.exception("import-release (android) failed")
+            history_message = "Import failed"
+            yield event(stage="error", platform="android", error="Import failed")
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            history = {
+                "trigger": "one-off", "status": history_status,
+                "stage": history_stage,
+                "platform": "android",
+                "durationMs": int((time.monotonic() - started) * 1000),
+                "provider": provider, "project": project,
+                "message": history_message,
+                **_candidate_history_fields(candidate),
+            }
+            if inspection is not None:
+                history["bundleIdentifier"] = inspection.package
+                history["version"] = inspection.version_name
+            if digest:
+                history["sha256"] = digest
+            append_import_record(history)
+
+    def run():
+        try:
+            job = _release_job_from_payload(payload)
+            tokens = {"github": os.environ.get("GITHUB_TOKEN"), "gitlab": os.environ.get("GITLAB_TOKEN")}
+            session_req = requests.Session()
+            yield event(stage="resolving")
+            candidates = release_ingest.select_candidate(job, session_req, tokens, timeout=30)
+        except (ValueError, release_ingest.ProviderError, release_ingest.ValidationError, release_ingest.ConfigError) as e:
+            yield event(stage="error", error=str(e))
+            append_import_record({
+                "trigger": "one-off", "status": "error", "stage": "selection",
+                "durationMs": int((time.monotonic() - started) * 1000),
+                "provider": provider, "project": project, "message": str(e),
+            })
+            return
+        except Exception:
+            logging.exception("import-release failed")
+            yield event(stage="error", error="Import failed")
+            append_import_record({
+                "trigger": "one-off", "status": "error", "stage": "selection",
+                "durationMs": int((time.monotonic() - started) * 1000),
+                "provider": provider, "project": project, "message": "Import failed",
+            })
+            return
+
+        for candidate in candidates or []:
+            if candidate.platform == "ios":
+                yield from handle_ios(job, candidate, session_req, tokens)
+            elif candidate.platform == "android":
+                yield from handle_android(job, candidate, session_req, tokens)
 
     return app.response_class(run(), mimetype="application/x-ndjson")
 

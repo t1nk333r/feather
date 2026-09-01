@@ -130,22 +130,35 @@ def make_candidate(release_ingest, **overrides):
 
 
 def make_fake_select_candidate(candidate=None, exc=None):
+    """`select_candidate` returns a list -- at most one candidate per
+    platform (plan 083). `candidate` may be a single ReleaseCandidate (
+    wrapped into a one-item list) or an already-built list/tuple (for tests
+    driving more than one platform from a single job)."""
+
     def fake(job, session, tokens, timeout=30):
         if exc is not None:
             raise exc
-        return candidate
+        if candidate is None:
+            return []
+        if isinstance(candidate, (list, tuple)):
+            return list(candidate)
+        return [candidate]
 
     return fake
 
 
 def make_fake_select_candidate_by_job(mapping):
-    """Dispatches on `job.id` -- mapping is {job_id: candidate_or_Exception}."""
+    """Dispatches on `job.id` -- mapping is {job_id: candidate_or_Exception}.
+    A bare candidate is wrapped into a one-item list to match
+    `select_candidate`'s list contract; a list/tuple value is passed through."""
 
     def fake(job, session, tokens, timeout=30):
         outcome = mapping[job.id]
         if isinstance(outcome, Exception):
             raise outcome
-        return outcome
+        if isinstance(outcome, (list, tuple)):
+            return list(outcome)
+        return [outcome]
 
     return fake
 
