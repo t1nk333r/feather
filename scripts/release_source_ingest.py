@@ -686,25 +686,6 @@ def select_candidate(job, session, tokens, timeout=30):
     return candidates
 
 
-def select_candidate_single(job, session, tokens, timeout=30):
-    """Back-compat shim over `select_candidate`'s pre-083 single-candidate
-    contract: returns the first (highest-priority) candidate. Existing
-    app.py callers bind to this until plan 084 updates them to consume the
-    full per-platform list.
-
-    Calls `select_candidate` by module-level name (not a captured
-    reference) so a caller's `monkeypatch.setattr(release_ingest,
-    "select_candidate", fake)` -- the existing test convention in
-    tests/test_import_release.py and tests/test_auto_import.py -- is
-    honoured here too. Tolerant of such a fake still returning a bare
-    ReleaseCandidate (the pre-083 shape) rather than a list.
-    """
-    result = select_candidate(job, session, tokens, timeout=timeout)
-    if isinstance(result, list):
-        return result[0]
-    return result
-
-
 # ---------------------------------------------------------------------------
 # Download, redirect handling, and IPA validation
 # ---------------------------------------------------------------------------

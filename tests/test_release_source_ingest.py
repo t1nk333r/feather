@@ -910,19 +910,6 @@ def test_gitlab_selection_yields_one_candidate_per_platform():
     assert {c.platform for c in candidates} == {"ios", "android"}
 
 
-def test_select_candidate_single_returns_first_of_list():
-    job = make_job(asset_glob="App*", package="org.example.app")
-    releases = [_release_with_assets(["App.ipa", "App.apk"])]
-    session = FakeSession()
-    session.add_response(
-        "https://api.github.com/repos/owner/repo/releases",
-        FakeResponse(200, json_data=releases),
-    )
-    candidate = ingest.select_candidate_single(job, session, NO_TOKENS, timeout=30)
-    assert candidate.platform == "ios"
-    assert candidate.asset_name == "App.ipa"
-
-
 # ---------------------------------------------------------------------------
 # 8. test_download_strips_provider_auth_on_cross_host_redirect
 # ---------------------------------------------------------------------------
