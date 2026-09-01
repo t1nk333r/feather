@@ -35,6 +35,7 @@ _SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 import release_source_ingest as release_ingest
+from apk_inspection import inspect_apk, ApkInspectionError
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -2881,34 +2882,21 @@ def _extract_ipa_icon(ipa_path):
 def _inspect_apk(path):
     """Read identity and version out of an APK's binary AndroidManifest.
 
-    Returns a dict {package, version_code (int), version_name, min_sdk,
-    target_sdk, app_name} or raises ValueError with an operator-readable
-    message. pyaxmlparser returns version_code as a *string*; it is
-    converted here so callers never compare "10" < "9".
+    Thin wrapper over scripts/apk_inspection.py (shared with the release
+    importer). Returns the same dict and raises the same ValueError as
+    before, so every existing caller is unaffected.
     """
-    from pyaxmlparser import APK  # imported lazily: keeps app import fast for tests
     try:
-        apk = APK(path)
-    except Exception as e:
-        raise ValueError(f"Not a readable APK: {e}")
-    if not apk.is_valid_APK():
-        raise ValueError("Not a valid APK (no AndroidManifest.xml)")
-    package = apk.package or ""
-    if not ANDROID_PACKAGE_RE.match(package):
-        raise ValueError(f"APK declares an invalid package name: {package!r}")
-    try:
-        version_code = int(apk.version_code)
-    except (TypeError, ValueError):
-        raise ValueError(f"APK declares a non-integer versionCode: {apk.version_code!r}")
-    if version_code <= 0:
-        raise ValueError(f"APK declares versionCode {version_code}; must be > 0")
+        inspection = inspect_apk(path)
+    except ApkInspectionError as e:
+        raise ValueError(str(e))
     return {
-        "package": package,
-        "version_code": version_code,
-        "version_name": apk.version_name or str(version_code),
-        "min_sdk": apk.get_min_sdk_version(),
-        "target_sdk": apk.get_target_sdk_version(),
-        "app_name": apk.get_app_name() or package,
+        "package": inspection.package,
+        "version_code": inspection.version_code,
+        "version_name": inspection.version_name,
+        "min_sdk": inspection.min_sdk,
+        "target_sdk": inspection.target_sdk,
+        "app_name": inspection.app_name,
     }
 
 

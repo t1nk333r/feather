@@ -23,6 +23,7 @@ COPY static/ ./static/
 # only by the release-import Compose service / host crontab.
 COPY scripts/release_source_ingest.py ./scripts/release_source_ingest.py
 COPY scripts/ipa_inspection.py ./scripts/ipa_inspection.py
+COPY scripts/apk_inspection.py ./scripts/apk_inspection.py
 
 # Create non-root user for security
 RUN groupadd -r altstore && useradd -r -g altstore altstore \
