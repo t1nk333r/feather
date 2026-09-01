@@ -8,7 +8,8 @@
 > maintain the index.
 >
 > **Drift check (run first)**:
-> `git diff --stat <the SHA plan 083 landed on>..HEAD -- app.py templates/index.html`
+> `git diff --stat 0a5f41d..HEAD -- app.py templates/index.html`
+> (`0a5f41d` is the commit plan 083 landed on.)
 > Compare the "Current state" excerpts against the live code before starting;
 > on a mismatch, treat it as a STOP condition.
 
@@ -319,6 +320,24 @@ Stop and report back (do not improvise) if:
 - The full suite does not pass **before** you make any edit.
 - You find that `/api/import-release`'s SSE contract cannot carry a platform
   without breaking the existing frontend handlers.
+
+## Inherited from plan 083 — delete the shim
+
+Plan 083 added `select_candidate_single` to `scripts/release_source_ingest.py`,
+a back-compat shim returning only the first candidate, and pointed `app.py`'s
+two callers at it. **This plan's Step 2 and Step 3 replace both callers with
+the full per-platform list, after which the shim has no callers left.**
+
+It also carries an `isinstance(result, list)` branch that exists solely so the
+old-shape `monkeypatch.setattr(release_ingest, "select_candidate", fake)`
+fixtures in `tests/test_import_release.py` and `tests/test_auto_import.py`
+keep working — those files were out of scope for 083 but are **in scope
+here**. Update those fixtures to the list contract, then delete
+`select_candidate_single` entirely. Leaving a shim whose only remaining
+branch is reachable by test mocks is worse than no shim.
+
+Verify when done: `grep -rn "select_candidate_single" .` returns nothing
+outside `plans/`.
 
 ## Maintenance notes
 
