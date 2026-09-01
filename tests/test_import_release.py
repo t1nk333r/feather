@@ -1117,3 +1117,117 @@ def test_import_explicit_icon_url_still_wins(authed_client):
     app_info = app_module.source_manager.get_app("com.icon.explicit")
     assert app_info is not None
     assert app_info["iconURL"].endswith("/icons/com.icon.explicit/icon.png")
+
+
+# ---------------------------------------------------------------------------
+# Plan 084: /api/import-release and /api/import-release/inspect learn APKs
+# ---------------------------------------------------------------------------
+
+
+class _FakeApk:
+    """Stand-in for pyaxmlparser.APK, mirroring tests/test_apk_inspection.py
+    and tests/test_android.py's fake_inspect -- a real binary
+    AndroidManifest.xml cannot be authored by hand in a test."""
+
+    def __init__(self, package="com.example.android", version_code="3",
+                 version_name="1.3", min_sdk=21, target_sdk=34,
+                 app_name="Android App", valid=True):
+        self.package = package
+        self.version_code = version_code
+        self.version_name = version_name
+        self._min_sdk = min_sdk
+        self._target_sdk = target_sdk
+        self._app_name = app_name
+        self._valid = valid
+
+    def is_valid_APK(self):
+        return self._valid
+
+    def get_min_sdk_version(self):
+        return self._min_sdk
+
+    def get_target_sdk_version(self):
+        return self._target_sdk
+
+    def get_app_name(self):
+        return self._app_name
+
+
+def patch_pyaxmlparser(monkeypatch, **fake_kwargs):
+    """Patch the one point both release_ingest.inspect_apk_metadata (via
+    scripts/apk_inspection.inspect_apk) and android_repo.add_apk (via
+    app.py's _inspect_apk, the same shared module) read APK metadata from."""
+    import pyaxmlparser
+
+    def fake_ctor(path):
+        return _FakeApk(**fake_kwargs)
+
+    monkeypatch.setattr(pyaxmlparser, "APK", fake_ctor)
+
+
+def test_inspect_release_labels_asset_platform(authed_client, monkeypatch):
+    def fake_inspect(job, session, tokens, timeout=30, limit=5):
+        return [{
+            "release": "v1", "releasedAt": "2026-01-01T00:00:00Z",
+            "assets": [
+                {"name": "App.ipa", "size": 1, "included": True, "excluded": False, "matched": True},
+                {"name": "App.apk", "size": 2, "included": True, "excluded": False, "matched": True},
+                {"name": "App.ipa.sha256", "size": 3, "included": False, "excluded": False, "matched": False},
+            ],
+            "matchCount": 2,
+        }]
+
+    monkeypatch.setattr(
+        authed_client.app_module.release_ingest, "inspect_release_assets", fake_inspect,
+    )
+    response = authed_client.post("/api/import-release/inspect", json={
+        "provider": "github", "project": "owner/repo", "assetGlob": "*",
+    })
+    assert response.status_code == 200
+    assets = {a["name"]: a["platform"] for a in response.get_json()["releases"][0]["assets"]}
+    assert assets["App.ipa"] == "ios"
+    assert assets["App.apk"] == "android"
+    assert assets["App.ipa.sha256"] is None
+
+
+def test_import_publishes_apk_to_android_repo(authed_client, monkeypatch, tmp_path):
+    app_module = authed_client.app_module
+    release_ingest = app_module.release_ingest
+
+    apk_bytes = b"fake-apk-bytes-one-off"
+    candidate = release_ingest.ReleaseCandidate(
+        provider="github", project="owner/repo", release_id="1", release_tag="v1.0.0",
+        release_time="2026-01-01T00:00:00Z", asset_id="1", asset_name="App.apk",
+        declared_size=len(apk_bytes), download_url="https://api.github.com/repos/owner/repo/releases/assets/1",
+        auth_host="api.github.com", platform="android",
+    )
+    patch_pyaxmlparser(monkeypatch, package="com.example.android", version_code="3", version_name="1.3")
+
+    status, events = post_and_collect(
+        authed_client,
+        {
+            "provider": "github",
+            "project": "owner/repo",
+            "package": "com.example.android",
+            "assetGlob": "*.apk",
+            "createIfMissing": False,
+        },
+        {
+            "select_candidate": make_fake_select_candidate(candidate),
+            "stream_download": make_fake_stream_download(apk_bytes),
+        },
+    )
+
+    assert status == 200
+    done_events = [e for e in events if e.get("stage") == "done"]
+    assert done_events, events
+    assert done_events[-1]["platform"] == "android"
+    assert done_events[-1]["bundleIdentifier"] == "com.example.android"
+    assert done_events[-1]["version"] == "1.3"
+    # Distinguishes a real publish from add_apk's idempotent already-present
+    # skip -- both report stage="done", only the message text differs.
+    assert "Added" in done_events[-1]["message"]
+
+    # The artifact actually reached android_repo -- not just an SSE flag.
+    apk_path = tmp_path / "fdroid" / "repo" / "com.example.android_3.apk"
+    assert apk_path.exists()

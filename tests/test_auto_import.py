@@ -172,6 +172,62 @@ def make_fake_stream_download(ipa_bytes):
     return fake
 
 
+def make_fake_stream_download_by_platform(content_by_platform):
+    """Like make_fake_stream_download, but writes different bytes depending
+    on which platform's candidate is being downloaded -- needed once a job
+    matches both an .ipa and an .apk in the same run."""
+
+    def fake(session, candidate, job, dest_path, tokens, timeout, max_bytes, progress_cb=None):
+        content = content_by_platform[candidate.platform]
+        with open(dest_path, "wb") as fh:
+            fh.write(content)
+        return len(content), hashlib.sha256(content).hexdigest()
+
+    return fake
+
+
+class _FakeApk:
+    """Stand-in for pyaxmlparser.APK, mirroring tests/test_apk_inspection.py
+    and tests/test_android.py's fake_inspect -- a real binary
+    AndroidManifest.xml cannot be authored by hand in a test."""
+
+    def __init__(self, package="com.cross.app.android", version_code="7",
+                 version_name="1.7", min_sdk=21, target_sdk=34,
+                 app_name="Cross App", valid=True):
+        self.package = package
+        self.version_code = version_code
+        self.version_name = version_name
+        self._min_sdk = min_sdk
+        self._target_sdk = target_sdk
+        self._app_name = app_name
+        self._valid = valid
+
+    def is_valid_APK(self):
+        return self._valid
+
+    def get_min_sdk_version(self):
+        return self._min_sdk
+
+    def get_target_sdk_version(self):
+        return self._target_sdk
+
+    def get_app_name(self):
+        return self._app_name
+
+
+def patch_pyaxmlparser(monkeypatch, **fake_kwargs):
+    """Patch the one point both release_ingest.inspect_apk_metadata (via
+    scripts/apk_inspection.inspect_apk) and android_repo.add_apk (via
+    app.py's _inspect_apk, the same shared module) read APK metadata from,
+    so a single patch covers the whole watcher pipeline."""
+    import pyaxmlparser
+
+    def fake_ctor(path):
+        return _FakeApk(**fake_kwargs)
+
+    monkeypatch.setattr(pyaxmlparser, "APK", fake_ctor)
+
+
 VALID_GITHUB_JOB = {
     "id": "anymex",
     "provider": "github",
@@ -489,3 +545,200 @@ def test_admin_edit_survives_concurrent_store_mutation(authed_client):
     stored = authed_client.get("/api/auto-import").get_json()
     assert {job["id"] for job in stored["jobs"]} == {"anymex", "second"}
     assert stored["lastRunAt"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Plan 084: watcher support for Android (.apk) candidates
+# ---------------------------------------------------------------------------
+
+
+def android_only_job(job_id="android-only", package="com.cross.app.android"):
+    return {
+        "id": job_id,
+        "provider": "gitlab",
+        "project": "group/project",
+        "bundleIdentifier": None,
+        "package": package,
+        "assetGlob": "*.apk",
+        "includePrereleases": False,
+        "createIfMissing": False,
+        "name": None,
+        "developerName": None,
+        "allowedDownloadHosts": ["gitlab.example.com"],
+    }
+
+
+def cross_platform_job(job_id="crossplat"):
+    return {
+        "id": job_id,
+        "provider": "gitlab",
+        "project": "group/project",
+        "bundleIdentifier": "com.cross.app",
+        "package": "com.cross.app.android",
+        "assetGlob": "App*",
+        "includePrereleases": False,
+        "createIfMissing": True,
+        "name": "Cross App",
+        "developerName": "Cross Dev",
+        "allowedDownloadHosts": ["gitlab.example.com"],
+    }
+
+
+def test_auto_import_job_with_only_package_validates_and_runs(authed_client, monkeypatch, tmp_path):
+    app_module = authed_client.app_module
+    release_ingest = app_module.release_ingest
+
+    resp = authed_client.post("/api/auto-import/job", json=android_only_job())
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["job"]["bundleIdentifier"] is None
+    assert resp.get_json()["job"]["package"] == "com.cross.app.android"
+
+    apk_bytes = b"fake-apk-bytes-android-only"
+    candidate = release_ingest.ReleaseCandidate(
+        provider="gitlab", project="group/project", release_id="1", release_tag="v1.0.0",
+        release_time="2026-01-01T00:00:00Z", asset_id="1", asset_name="App.apk",
+        declared_size=len(apk_bytes), download_url="https://gitlab.example.com/dl/App.apk",
+        auth_host="gitlab.example.com", platform="android",
+    )
+    patch_pyaxmlparser(monkeypatch, package="com.cross.app.android", version_code="7", version_name="1.7")
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(release_ingest, "select_candidate", make_fake_select_candidate(candidate))
+    mp.setattr(release_ingest, "stream_download", make_fake_stream_download(apk_bytes))
+    try:
+        resp = authed_client.post("/api/auto-import/run", json={"id": "android-only"})
+    finally:
+        mp.undo()
+
+    assert resp.status_code == 200
+    result = resp.get_json()["results"]["android-only"]
+    assert result["status"] == "published"
+    assert result["package"] == "com.cross.app.android"
+    assert result["versionCode"] == 7
+    assert result["platforms"]["android"]["status"] == "published"
+    assert "ios" not in result["platforms"]
+
+    # The artifact actually reached android_repo, not just a success flag.
+    apk_path = tmp_path / "fdroid" / "repo" / "com.cross.app.android_7.apk"
+    assert apk_path.exists()
+
+
+def test_auto_import_bundle_identifier_only_job_unchanged(authed_client):
+    """Regression: a job configured exactly like every job stored before
+    plan 084 (bundleIdentifier only, no package) validates and stores with
+    package == None, and the store round-trips the pre-084 fields
+    unchanged."""
+    resp = authed_client.post("/api/auto-import/job", json=VALID_GITHUB_JOB)
+    assert resp.status_code == 200, resp.get_json()
+    stored = resp.get_json()["job"]
+    assert stored["bundleIdentifier"] == "com.ryan.anymex"
+    assert stored["package"] is None
+
+    resp = authed_client.get("/api/auto-import")
+    jobs = resp.get_json()["jobs"]
+    assert jobs[0]["bundleIdentifier"] == "com.ryan.anymex"
+    assert jobs[0]["package"] is None
+
+
+def test_auto_import_job_requires_bundle_identifier_or_package(authed_client):
+    bad_job = dict(VALID_GITHUB_JOB, id="neither", bundleIdentifier="", package="")
+    resp = authed_client.post("/api/auto-import/job", json=bad_job)
+    assert resp.status_code == 400
+    error = resp.get_json()["error"].lower()
+    assert "bundleidentifier" in error and "package" in error
+
+    resp = authed_client.get("/api/auto-import")
+    assert resp.get_json()["jobs"] == []
+
+
+def test_auto_import_run_publishes_both_platforms(authed_client, monkeypatch, tmp_path):
+    app_module = authed_client.app_module
+    release_ingest = app_module.release_ingest
+
+    resp = authed_client.post("/api/auto-import/job", json=cross_platform_job())
+    assert resp.status_code == 200, resp.get_json()
+
+    ipa_bytes = build_ipa_bytes(bundle_id="com.cross.app", version="2.0.0", name="Cross App")
+    apk_bytes = b"fake-apk-bytes-crossplat"
+
+    ios_candidate = make_candidate(
+        release_ingest, asset_id="1", asset_name="App.ipa",
+        declared_size=len(ipa_bytes), platform="ios",
+    )
+    android_candidate = make_candidate(
+        release_ingest, asset_id="2", asset_name="App.apk",
+        declared_size=len(apk_bytes), platform="android",
+    )
+    patch_pyaxmlparser(monkeypatch, package="com.cross.app.android", version_code="7", version_name="1.7")
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(release_ingest, "select_candidate",
+               make_fake_select_candidate([ios_candidate, android_candidate]))
+    mp.setattr(release_ingest, "stream_download",
+               make_fake_stream_download_by_platform({"ios": ipa_bytes, "android": apk_bytes}))
+    try:
+        resp = authed_client.post("/api/auto-import/run", json={"id": "crossplat"})
+    finally:
+        mp.undo()
+
+    assert resp.status_code == 200
+    result = resp.get_json()["results"]["crossplat"]
+    assert result["status"] == "published"
+    assert result["platforms"]["ios"]["status"] == "published"
+    assert result["platforms"]["ios"]["version"] == "2.0.0"
+    assert result["platforms"]["android"]["status"] == "published"
+    assert result["platforms"]["android"]["versionName"] == "1.7"
+
+    # Both artifacts actually reached their respective managers -- not just
+    # a top-level "ok".
+    app_info = app_module.source_manager.get_app("com.cross.app")
+    assert app_info is not None
+    assert "2.0.0" in [v["version"] for v in app_info["versions"]]
+
+    apk_path = tmp_path / "fdroid" / "repo" / "com.cross.app.android_7.apk"
+    assert apk_path.exists()
+
+    stored_job = authed_client.get("/api/auto-import").get_json()["jobs"][0]
+    assert stored_job["lastResult"]["platforms"]["ios"]["status"] == "published"
+    assert stored_job["lastResult"]["platforms"]["android"]["status"] == "published"
+
+
+def test_auto_import_android_rerun_already_present_is_skip_not_failure(authed_client, monkeypatch, tmp_path):
+    app_module = authed_client.app_module
+    release_ingest = app_module.release_ingest
+
+    resp = authed_client.post("/api/auto-import/job", json=android_only_job(job_id="rerun-android"))
+    assert resp.status_code == 200
+
+    apk_bytes = b"fake-apk-bytes-rerun"
+    candidate = release_ingest.ReleaseCandidate(
+        provider="gitlab", project="group/project", release_id="1", release_tag="v1.0.0",
+        release_time="2026-01-01T00:00:00Z", asset_id="1", asset_name="App.apk",
+        declared_size=len(apk_bytes), download_url="https://gitlab.example.com/dl/App.apk",
+        auth_host="gitlab.example.com", platform="android",
+    )
+    patch_pyaxmlparser(monkeypatch, package="com.cross.app.android", version_code="9", version_name="1.9")
+
+    def run_once():
+        mp = pytest.MonkeyPatch()
+        mp.setattr(release_ingest, "select_candidate", make_fake_select_candidate(candidate))
+        mp.setattr(release_ingest, "stream_download", make_fake_stream_download(apk_bytes))
+        try:
+            return authed_client.post("/api/auto-import/run", json={"id": "rerun-android"})
+        finally:
+            mp.undo()
+
+    first = run_once()
+    assert first.status_code == 200
+    first_result = first.get_json()["results"]["rerun-android"]
+    assert first_result["status"] == "published"
+
+    second = run_once()
+    assert second.status_code == 200
+    second_result = second.get_json()["results"]["rerun-android"]
+    assert second_result["status"] == "skipped"
+    assert second_result["platforms"]["android"]["status"] == "skipped"
+    assert "error" not in second_result
+
+    apk_path = tmp_path / "fdroid" / "repo" / "com.cross.app.android_9.apk"
+    assert apk_path.exists()
