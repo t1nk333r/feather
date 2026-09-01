@@ -440,6 +440,67 @@ def test_load_manifest_rejects_unknown_duplicate_or_unsafe_jobs():
 
 
 # ---------------------------------------------------------------------------
+# Job identity: bundleIdentifier (iOS) / package (Android) -- plan 083
+# ---------------------------------------------------------------------------
+
+
+def test_manifest_with_only_bundle_identifier_behaves_exactly_as_before():
+    """Backward-compatibility gate (plan 083 done criteria): an iOS-only
+    manifest specifying only bundleIdentifier must keep parsing exactly as
+    it did before `package` was introduced."""
+    job = ingest.parse_manifest_dict({
+        "schemaVersion": 1,
+        "jobs": [_valid_github_job()],
+    })[0]
+    assert job.bundle_identifier == "com.example.app"
+    assert job.package is None
+    assert job.asset_glob == "*.ipa"
+
+
+def test_manifest_accepts_android_only_job_via_package():
+    job = ingest.parse_manifest_dict({
+        "schemaVersion": 1,
+        "jobs": [_valid_github_job(bundleIdentifier=None, package="org.example.app",
+                                    assetGlob="*.apk")],
+    })[0]
+    assert job.bundle_identifier is None
+    assert job.package == "org.example.app"
+
+
+def test_manifest_accepts_job_with_both_identities():
+    job = ingest.parse_manifest_dict({
+        "schemaVersion": 1,
+        "jobs": [_valid_github_job(package="org.example.app", assetGlob="*.{ipa,apk}")],
+    })[0]
+    assert job.bundle_identifier == "com.example.app"
+    assert job.package == "org.example.app"
+
+
+def test_manifest_requires_bundle_identifier_or_package():
+    with pytest.raises(ingest.ConfigError, match="bundleIdentifier.*package|package.*bundleIdentifier"):
+        ingest.parse_manifest_dict({
+            "schemaVersion": 1,
+            "jobs": [_valid_github_job(bundleIdentifier=None)],
+        })
+
+
+def test_manifest_rejects_invalid_package_name():
+    with pytest.raises(ingest.ConfigError, match="package"):
+        ingest.parse_manifest_dict({
+            "schemaVersion": 1,
+            "jobs": [_valid_github_job(package="not_a_valid_package")],
+        })
+
+
+def test_manifest_rejects_non_string_package():
+    with pytest.raises(ingest.ConfigError, match="package"):
+        ingest.parse_manifest_dict({
+            "schemaVersion": 1,
+            "jobs": [_valid_github_job(package=123)],
+        })
+
+
+# ---------------------------------------------------------------------------
 # 3. test_config_errors_and_logs_never_expose_tokens
 # ---------------------------------------------------------------------------
 

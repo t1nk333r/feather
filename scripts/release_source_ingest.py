@@ -46,8 +46,10 @@ import requests
 
 try:
     from .ipa_inspection import InspectionError, inspect_ipa
+    from .apk_inspection import ANDROID_PACKAGE_RE, ApkInspectionError, inspect_apk
 except ImportError:  # direct execution from scripts/
     from ipa_inspection import InspectionError, inspect_ipa
+    from apk_inspection import ANDROID_PACKAGE_RE, ApkInspectionError, inspect_apk
 
 try:
     import fcntl
@@ -106,13 +108,21 @@ _APP_INFO_PLIST = re.compile(r"^Payload/[^/]+\.app/Info\.plist$")
 
 @dataclass(frozen=True)
 class Job:
-    """One validated manifest entry."""
+    """One validated manifest entry.
+
+    `bundle_identifier` (iOS) and `package` (Android) are each optional, but
+    parse_manifest_dict requires at least one -- a job publishes whichever
+    platforms it has an identity for. Both fields default to None so that
+    Job can still be constructed with only one of them; `asset_glob` stays
+    ahead of them in field order because it never has a dataclass default.
+    """
 
     id: str
     provider: str
     project: str
-    bundle_identifier: str
     asset_glob: str
+    bundle_identifier: str = None
+    package: str = None
     asset_exclude_glob: str = None
     include_prereleases: bool = False
     create_if_missing: bool = False
@@ -262,7 +272,27 @@ def parse_manifest_dict(data):
                     f"job {job_id}: github 'project' must be exactly owner/repository"
                 )
 
-        bundle_identifier = _require_nonempty_str(raw, "bundleIdentifier", job_id)
+        bundle_identifier_raw = raw.get("bundleIdentifier")
+        if bundle_identifier_raw is not None and (
+            not isinstance(bundle_identifier_raw, str) or not bundle_identifier_raw.strip()
+        ):
+            raise ConfigError(f"job {job_id}: 'bundleIdentifier' must be a non-empty string")
+        bundle_identifier = bundle_identifier_raw.strip() if bundle_identifier_raw else None
+
+        package_raw = raw.get("package")
+        if package_raw is not None and (
+            not isinstance(package_raw, str) or not package_raw.strip()
+        ):
+            raise ConfigError(f"job {job_id}: 'package' must be a non-empty string")
+        package = package_raw.strip() if package_raw else None
+        if package is not None and not ANDROID_PACKAGE_RE.match(package):
+            raise ConfigError(f"job {job_id}: 'package' {package!r} is not a valid Android package name")
+
+        if bundle_identifier is None and package is None:
+            raise ConfigError(
+                f"job {job_id}: at least one of 'bundleIdentifier' or 'package' is required"
+            )
+
         asset_glob = _require_nonempty_str(raw, "assetGlob", job_id)
         asset_exclude_glob = raw.get("assetExcludeGlob")
         if asset_exclude_glob is not None and not isinstance(asset_exclude_glob, str):
@@ -306,6 +336,7 @@ def parse_manifest_dict(data):
                 provider=provider,
                 project=project,
                 bundle_identifier=bundle_identifier,
+                package=package,
                 asset_glob=asset_glob,
                 asset_exclude_glob=asset_exclude_glob,
                 include_prereleases=include_prereleases,
