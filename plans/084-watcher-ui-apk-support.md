@@ -20,7 +20,7 @@
 - **Risk**: MED
 - **Depends on**: **083** — this plan cannot start until 083 is merged
 - **Category**: direction
-- **Planned at**: commit `dc43400`, 2026-09-01
+- **Planned at**: commit `dc43400`, 2026-09-01; **`app.py` citations refreshed at `4b56a15`, 2026-09-01** after plan 083 shifted every line by 12. `templates/index.html` was untouched by 083, so its citations are original and still correct.
 
 ## Why this matters
 
@@ -43,14 +43,14 @@ This is the fact that shapes the whole plan. `scripts/release_source_ingest.py`
 has `process_job`, but `app.py` does **not** call it. It calls the engine's
 *pieces* twice over:
 
-1. `POST /api/import-release` (`app.py:3533`) — the UI's one-off import, which
+1. `POST /api/import-release` (`app.py:3521`) — the UI's one-off import, which
    streams SSE progress
-2. `_run_auto_import_job` (`app.py:3212`) — the watcher's per-job runner
+2. `_run_auto_import_job` (`app.py:3200`) — the watcher's per-job runner
 
 Both do: `select_candidate` → `mkstemp(suffix=".ipa")` → `stream_download` →
 `inspect_ipa_metadata` → publish in-process through `source_manager`.
 
-`_run_auto_import_job` at `app.py:3226-3260`:
+`_run_auto_import_job` at `app.py:3214-3248`:
 
 ```python
         job_obj = release_ingest.Job(
@@ -86,9 +86,9 @@ Keep that mechanism and add the platform to it.
 
 ### The job schema the watcher validates
 
-`_validate_auto_import_job` at `app.py:3150-3210` is the API-facing validator.
+`_validate_auto_import_job` at `app.py:3138-3198` is the API-facing validator.
 It mirrors the engine's manifest rules deliberately (its own docstring says
-so). Today it hard-requires an iOS identity at `:3172-3174`:
+so). Today it hard-requires an iOS identity at `:3160-3162`:
 
 ```python
     bundle_id = (raw.get('bundleIdentifier') or '').strip()
@@ -96,8 +96,8 @@ so). Today it hard-requires an iOS identity at `:3172-3174`:
         raise ValueError("bundleIdentifier is required")
 ```
 
-and defaults the glob at `:3176`: `asset_glob = (raw.get('assetGlob') or '*.ipa').strip()`.
-It returns an explicit dict of keys (`:3196-3210`) — anything not listed there
+and defaults the glob at `:3164`: `asset_glob = (raw.get('assetGlob') or '*.ipa').strip()`.
+It returns an explicit dict of keys (`:3184-3198`) — anything not listed there
 is dropped, so a new field must be added in **both** the validation and the
 returned dict.
 
@@ -131,9 +131,9 @@ The form's fields are at `:815-841`:
 Two JS sites build the request body — `:1479` (one-off import) and `:1635`
 (save watcher job). Both must learn the new field.
 
-`_release_job_from_payload` at `app.py:3469-3510` normalises the shared
+`_release_job_from_payload` at `app.py:3457-3498` normalises the shared
 provider/selector fields for both the `/inspect` and `/import-release` routes,
-and defaults `assetGlob` to `*.ipa` at `:3482`.
+and defaults `assetGlob` to `*.ipa` at `:3470`.
 
 ### Conventions to honour
 
@@ -184,17 +184,17 @@ and defaults `assetGlob` to `*.ipa` at `:3482`.
 
 ### Step 1: Accept an Android identity in the job schema
 
-In `_validate_auto_import_job` (`app.py:3150`):
+In `_validate_auto_import_job` (`app.py:3138`):
 
 - add an optional `package` field, validated with the same Android package
   rule the shared inspector uses
 - require **at least one** of `bundleIdentifier` / `package`, replacing the
-  unconditional `bundleIdentifier is required` at `:3172-3174`; the error
+  unconditional `bundleIdentifier is required` at `:3160-3162`; the error
   message must tell the operator that one of the two is needed
-- add `package` to the returned dict at `:3196-3210` — a field missing there
+- add `package` to the returned dict at `:3184-3198` — a field missing there
   is silently dropped
 
-Apply the same two changes to `_release_job_from_payload` (`app.py:3469`).
+Apply the same two changes to `_release_job_from_payload` (`app.py:3457`).
 
 **Backward compatibility is a hard requirement**: every stored job in
 `data/auto-import.json` today has `bundleIdentifier` and no `package`, and
@@ -204,9 +204,12 @@ must keep validating and running unchanged.
 
 ### Step 2: Give the watcher a per-platform branch
 
-Restructure `_run_auto_import_job` (`app.py:3212`) to iterate the candidate
-list plan 083's `select_candidate` now returns, instead of the single
-`candidate` it binds today.
+Restructure `_run_auto_import_job` (`app.py:3200`) to iterate the candidate
+list `select_candidate` returns, instead of the single candidate it binds
+today. **Note**: since plan 083 landed, the line you are replacing is
+`app.py:3228` and reads `release_ingest.select_candidate_single(...)` — 083's
+back-compat shim. Replace it with `release_ingest.select_candidate(...)` and
+iterate. The sibling call in `/api/import-release` is at `app.py:3555`.
 
 Per candidate, branch on `candidate.platform`:
 
@@ -214,7 +217,7 @@ Per candidate, branch on `candidate.platform`:
 - **android** — `mkstemp(..., suffix=".apk")`; validate with the engine's
   `inspect_apk_metadata`; publish by calling the same in-process
   `android_repo.add_apk(...)` + `android_repo.write_metadata(...)` pair that
-  `/api/android/add-apk` uses at `app.py:4805-4820`. Treat `add_apk` returning
+  `/api/android/add-apk` uses at `app.py:4794-4806`. Treat `add_apk` returning
   `(False, ...)` as an idempotent skip, not a failure.
 
 Keep the function's contract: it **never raises**, always returns a result
@@ -231,13 +234,13 @@ notification, if you reimplement it you must not add a second.
 
 ### Step 3: Give the one-off import route the same branch
 
-Apply the equivalent change to `POST /api/import-release` (`app.py:3533`).
-Its SSE progress events (`q.put((...))` at `app.py:3579-3590`) must name the
+Apply the equivalent change to `POST /api/import-release` (`app.py:3521`).
+Its SSE progress events (`q.put((...))` at `app.py:3567-3578`) must name the
 platform so the UI can label progress; keep the existing event shapes
 backward compatible rather than renaming fields the frontend already reads at
 `templates/index.html:1589` and `:1598`.
 
-Update `/api/import-release/inspect` (`app.py:3512`) so the asset preview
+Update `/api/import-release/inspect` (`app.py:3500`) so the asset preview
 reports each asset's inferred platform — that is what makes the feature
 discoverable, since the operator sees `.apk` assets listed before importing.
 
