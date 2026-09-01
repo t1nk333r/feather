@@ -97,7 +97,8 @@ class FakeFeatherClient:
     process_job deletes its temp directory before a test can inspect it.
     """
 
-    def __init__(self, apps=None, add_version_result=(True, "ok"), add_app_result=(True, "ok"), get_app_error=None):
+    def __init__(self, apps=None, add_version_result=(True, "ok"), add_app_result=(True, "ok"),
+                 get_app_error=None, add_apk_result=(True, "Added", True)):
         self.apps = {k: dict(v) for k, v in (apps or {}).items()}
         for app in self.apps.values():
             app.setdefault("versions", [])
@@ -105,9 +106,14 @@ class FakeFeatherClient:
         self.get_app_calls = []
         self.add_version_calls = []
         self.add_app_calls = []
+        self.add_apk_calls = []
         self.add_version_result = add_version_result
         self.add_app_result = add_app_result
         self.get_app_error = get_app_error
+        # (ok, message, added), matching FeatherClient.add_apk's return shape.
+        # Reassign between calls (`feather.add_apk_result = (...)`) to
+        # simulate the endpoint's own idempotency on a second run.
+        self.add_apk_result = add_apk_result
 
     def get_app(self, bundle_id):
         self.get_app_calls.append(bundle_id)
@@ -135,6 +141,13 @@ class FakeFeatherClient:
         if ok:
             self.apps[bundle_id] = {"bundleIdentifier": bundle_id, "versions": [{"version": version}]}
         return ok, message
+
+    def add_apk(self, path, package=None):
+        self.login_calls += 1
+        with open(path, "rb") as fh:
+            content = fh.read()
+        self.add_apk_calls.append((path, package, content))
+        return self.add_apk_result
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +236,43 @@ def make_github_session(
         ),
     )
     session.add_response(asset_url, FakeResponse(200, content_chunks=[ipa_bytes]))
+    return session
+
+
+def make_github_session_dual(
+    ipa_bytes,
+    apk_bytes,
+    ipa_name="App.ipa",
+    apk_name="App.apk",
+    release_id=DEFAULT_RELEASE_ID,
+    ipa_asset_id=DEFAULT_ASSET_ID,
+    apk_asset_id=DEFAULT_ASSET_ID + 1,
+    tag="v1.0.0",
+    published_at="2026-01-01T00:00:00Z",
+    project="owner/repo",
+):
+    """Like make_github_session, but for a release with both an .ipa and an
+    .apk asset -- for plan 083's cross-platform-in-one-release tests."""
+    releases_url = f"https://api.github.com/repos/{project}/releases"
+    ipa_url = f"https://api.github.com/repos/{project}/releases/assets/{ipa_asset_id}"
+    apk_url = f"https://api.github.com/repos/{project}/releases/assets/{apk_asset_id}"
+    session = FakeSession()
+    session.add_response(
+        releases_url,
+        FakeResponse(
+            200,
+            json_data=[{
+                "id": release_id, "tag_name": tag, "draft": False, "prerelease": False,
+                "published_at": published_at,
+                "assets": [
+                    {"id": ipa_asset_id, "name": ipa_name, "size": None, "url": ipa_url},
+                    {"id": apk_asset_id, "name": apk_name, "size": None, "url": apk_url},
+                ],
+            }],
+        ),
+    )
+    session.add_response(ipa_url, FakeResponse(200, content_chunks=[ipa_bytes]))
+    session.add_response(apk_url, FakeResponse(200, content_chunks=[apk_bytes]))
     return session
 
 
@@ -1344,9 +1394,11 @@ def test_existing_app_publishes_multipart_add_version(tmp_path):
     assert version == "1.0.0"
     assert content == ipa_bytes
     assert feather.add_app_calls == []
-    assert state["jobs"][job.id]["version"] == "1.0.0"
-    assert state["jobs"][job.id]["releaseId"] == str(DEFAULT_RELEASE_ID)
-    assert state["jobs"][job.id]["assetId"] == str(DEFAULT_ASSET_ID)
+    # State is keyed per platform (plan 083) so an Android publish can never
+    # mask a pending iOS one, or vice versa.
+    assert state["jobs"][job.id]["ios"]["version"] == "1.0.0"
+    assert state["jobs"][job.id]["ios"]["releaseId"] == str(DEFAULT_RELEASE_ID)
+    assert state["jobs"][job.id]["ios"]["assetId"] == str(DEFAULT_ASSET_ID)
 
 
 # ---------------------------------------------------------------------------
@@ -1456,7 +1508,7 @@ def test_state_advances_only_after_verified_publish(tmp_path):
         job, session_ok, NO_TOKENS, feather_ok, state_ok, True, 30, 1_000_000, summary_ok
     )
     assert ok2 is True
-    assert state_ok["jobs"][job.id]["version"] == "1.0.0"
+    assert state_ok["jobs"][job.id]["ios"]["version"] == "1.0.0"
 
 
 # ---------------------------------------------------------------------------
@@ -1494,7 +1546,7 @@ def test_second_run_is_idempotent_after_state_or_catalog_recovery(tmp_path):
     ok3 = ingest.process_job(job, session3, NO_TOKENS, feather, fresh_state, True, 30, 1_000_000, summary)
     assert ok3 is True
     assert len(feather.add_version_calls) == 1
-    assert fresh_state["jobs"][job.id]["version"] == "1.0.0"
+    assert fresh_state["jobs"][job.id]["ios"]["version"] == "1.0.0"
 
 
 # ---------------------------------------------------------------------------
@@ -1602,3 +1654,150 @@ def test_one_job_failure_does_not_block_remaining_jobs_and_sets_exit_one(tmp_pat
     exit_code = ingest.main(["--config", str(cfg), "--state", str(state_path)])
 
     assert exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# 22. process_job -- Android candidate path (plan 083)
+# ---------------------------------------------------------------------------
+
+
+def _make_apk_job(**overrides):
+    overrides.setdefault("bundle_identifier", None)
+    overrides.setdefault("package", "org.example.app")
+    overrides.setdefault("asset_glob", "*.apk")
+    return make_job(**overrides)
+
+
+def test_android_candidate_publishes_and_advances_state(tmp_path, monkeypatch):
+    job = _make_apk_job()
+    session = make_github_session(b"fake-apk-bytes", asset_name="App.apk")
+    _patch_pyaxmlparser_apk(
+        monkeypatch, package="org.example.app", version_code="7", version_name="1.7"
+    )
+    feather = FakeFeatherClient(add_apk_result=(True, "Added org.example.app version 7", True))
+    state = ingest.load_state(str(tmp_path / "state.json"))
+    summary = ingest.Summary()
+
+    ok = ingest.process_job(job, session, NO_TOKENS, feather, state, True, 30, 1_000_000, summary)
+
+    assert ok is True
+    assert summary.published == 1
+    assert summary.failed == 0
+    assert len(feather.add_apk_calls) == 1
+    _, package_sent, content = feather.add_apk_calls[0]
+    assert package_sent == "org.example.app"
+    assert content == b"fake-apk-bytes"
+    # Android never reads the iOS catalog.
+    assert feather.get_app_calls == []
+    assert state["jobs"][job.id]["android"]["version"] == "1.7"
+    assert state["jobs"][job.id]["android"]["versionCode"] == 7
+    assert state["jobs"][job.id]["android"]["package"] == "org.example.app"
+    assert "ios" not in state["jobs"][job.id]
+
+
+def test_android_candidate_second_run_reports_skip_not_failure(tmp_path, monkeypatch):
+    job = _make_apk_job()
+    _patch_pyaxmlparser_apk(
+        monkeypatch, package="org.example.app", version_code="7", version_name="1.7"
+    )
+    state = ingest.load_state(str(tmp_path / "state.json"))
+    summary = ingest.Summary()
+    feather = FakeFeatherClient(add_apk_result=(True, "Added org.example.app version 7", True))
+
+    session1 = make_github_session(b"fake-apk-bytes", asset_name="App.apk")
+    ok1 = ingest.process_job(job, session1, NO_TOKENS, feather, state, True, 30, 1_000_000, summary)
+    assert ok1 is True
+    assert summary.published == 1
+
+    # Second run -- the endpoint's own idempotency reports added: false.
+    # This must count as a skip, not a failure.
+    feather.add_apk_result = (True, "Already present: org.example.app versionCode 7", False)
+    session2 = make_github_session(b"fake-apk-bytes", asset_name="App.apk")
+    ok2 = ingest.process_job(job, session2, NO_TOKENS, feather, state, True, 30, 1_000_000, summary)
+
+    assert ok2 is True
+    assert summary.skipped == 1
+    assert summary.failed == 0
+    assert len(feather.add_apk_calls) == 2
+
+
+def test_job_publishing_both_platforms_from_one_release_records_both(tmp_path, monkeypatch):
+    job = make_job(package="org.example.app", asset_glob="App.*")
+    _patch_pyaxmlparser_apk(
+        monkeypatch, package="org.example.app", version_code="9", version_name="2.0"
+    )
+    session = make_github_session_dual(
+        build_ipa_bytes(bundle_id="com.example.app", version="2.0.0"), b"fake-apk-bytes"
+    )
+    feather = FakeFeatherClient(
+        apps={"com.example.app": {"bundleIdentifier": "com.example.app", "versions": []}},
+        add_apk_result=(True, "Added", True),
+    )
+    state = ingest.load_state(str(tmp_path / "state.json"))
+    summary = ingest.Summary()
+
+    ok = ingest.process_job(job, session, NO_TOKENS, feather, state, True, 30, 1_000_000, summary)
+
+    assert ok is True
+    assert len(feather.add_version_calls) == 1
+    assert len(feather.add_apk_calls) == 1
+    assert state["jobs"][job.id]["ios"]["version"] == "2.0.0"
+    assert state["jobs"][job.id]["android"]["versionCode"] == 9
+    assert state["jobs"][job.id]["android"]["package"] == "org.example.app"
+
+
+def test_dry_run_reports_each_platform_separately_and_writes_no_state(tmp_path, monkeypatch):
+    job = make_job(package="org.example.app", asset_glob="App.*")
+    session = make_github_session_dual(build_ipa_bytes(), b"fake-apk-bytes")
+    feather = FakeFeatherClient(
+        apps={"com.example.app": {"bundleIdentifier": "com.example.app", "versions": []}},
+    )
+    state = ingest.load_state(str(tmp_path / "state.json"))
+    summary = ingest.Summary()
+
+    def boom(*a, **k):
+        raise AssertionError("stream_download must not be called in dry-run")
+
+    monkeypatch.setattr(ingest, "stream_download", boom)
+
+    ok = ingest.process_job(job, session, NO_TOKENS, feather, state, False, 30, 1_000_000, summary)
+
+    assert ok is True
+    assert summary.would_publish == 2  # one per platform
+    assert summary.downloaded == 0
+    assert state["jobs"] == {}
+
+
+def test_old_flat_state_migrates_when_android_platform_added(tmp_path, monkeypatch):
+    """A pre-083 state file only ever recorded an iOS publish, flat at the
+    job's top level. Adding an Android identity to an existing job must not
+    require deleting or hand-editing that old entry -- it is tolerated and
+    migrated into the nested shape in place, rather than discarded."""
+    job = make_job(package="org.example.app", asset_glob="App.*")
+    old_flat_record = {
+        "provider": "github", "project": "owner/repo",
+        "releaseId": str(DEFAULT_RELEASE_ID), "assetId": "OLD-ASSET-ID",
+        "bundleIdentifier": "com.example.app", "version": "0.9.0",
+        "sha256": "deadbeef", "publishedAt": "2026-01-01T00:00:00Z",
+    }
+    state = {"schemaVersion": 1, "jobs": {job.id: dict(old_flat_record)}}
+    _patch_pyaxmlparser_apk(
+        monkeypatch, package="org.example.app", version_code="3", version_name="1.0"
+    )
+    session = make_github_session_dual(build_ipa_bytes(version="1.0.0"), b"fake-apk-bytes")
+    feather = FakeFeatherClient(
+        apps={"com.example.app": {"bundleIdentifier": "com.example.app", "versions": []}},
+        add_apk_result=(True, "Added", True),
+    )
+    summary = ingest.Summary()
+
+    ok = ingest.process_job(job, session, NO_TOKENS, feather, state, True, 30, 1_000_000, summary)
+
+    assert ok is True
+    # Old iOS record migrated into the nested shape, then overwritten with
+    # this run's fresh publish -- not discarded, not left in the flat shape.
+    assert state["jobs"][job.id]["ios"]["version"] == "1.0.0"
+    assert state["jobs"][job.id]["android"]["versionCode"] == 3
+    # No stray top-level flat keys survive the migration -- the entry is
+    # cleanly {"ios": ..., "android": ...}, not a hybrid of both shapes.
+    assert set(state["jobs"][job.id].keys()) == {"ios", "android"}

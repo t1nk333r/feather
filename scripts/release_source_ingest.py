@@ -445,6 +445,15 @@ def _platform_for_asset(name):
     return None
 
 
+# The inverse of _platform_for_asset -- the extension a downloaded
+# candidate's temp file gets, keyed by the same platform names.
+_DOWNLOAD_EXTENSION_BY_PLATFORM = {"ios": "ipa", "android": "apk"}
+
+
+def _download_tmp_path(tmp_dir, platform):
+    return os.path.join(tmp_dir, f"download.{_DOWNLOAD_EXTENSION_BY_PLATFORM[platform]}")
+
+
 def _group_matches_by_platform(job, matches, name_of):
     """Group matched assets/links by platform, dropping those the job has no
     identity for and any whose extension is neither .ipa nor .apk (so a `*`
@@ -1067,12 +1076,20 @@ def _catalog_has_version(catalog_app, version):
 # ---------------------------------------------------------------------------
 
 
+# schemaVersion 2 (083): a job's state entry became per-platform-nested
+# ({"ios": {...}, "android": {...}}) instead of one flat record. 1 is still
+# accepted on read -- a deployment already has a schemaVersion:1 state file
+# on disk, and its flat records are always interpreted as the iOS record
+# (see _platform_state_record / _advance_state).
+_STATE_SCHEMA_VERSIONS = (1, 2)
+
+
 def load_state(path):
     if not path or not os.path.exists(path):
-        return {"schemaVersion": 1, "jobs": {}}
+        return {"schemaVersion": 2, "jobs": {}}
     with open(path, "r") as fh:
         data = json.load(fh)
-    if not isinstance(data, dict) or data.get("schemaVersion") != 1:
+    if not isinstance(data, dict) or data.get("schemaVersion") not in _STATE_SCHEMA_VERSIONS:
         raise ConfigError(f"state file {path} has an unsupported schemaVersion")
     data.setdefault("jobs", {})
     return data
@@ -1102,17 +1119,50 @@ def _utcnow_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _advance_state(state, job, candidate, version, sha256_hex):
-    state.setdefault("jobs", {})[job.id] = {
+def _platform_state_record(state, job_id, platform):
+    """Read the last-verified-publish record for one job+platform, tolerating
+    the pre-083 flat per-job shape (which only ever recorded an iOS publish).
+
+    Read-only: never mutates `state`, so it is safe to call before the
+    dry-run gate (process_job must write nothing -- not even a shape
+    migration -- when `apply` is false).
+    """
+    entry = state.get("jobs", {}).get(job_id)
+    if not isinstance(entry, dict):
+        return None
+    if "releaseId" in entry:  # pre-083 flat shape -- implicitly the iOS record
+        return entry if platform == "ios" else None
+    return entry.get(platform)
+
+
+def _advance_state(state, job, platform, candidate, version, sha256_hex, **identity):
+    """Record one platform's last verified publish for `job`.
+
+    A job's entry is keyed by platform ({"ios": {...}, "android": {...}})
+    so an iOS publish can never mask a pending Android one, or vice versa.
+    A pre-083 flat entry (identifiable by its top-level "releaseId") is
+    migrated into `{"ios": <that record>}` rather than discarded, since it
+    always described an iOS publish.
+    """
+    jobs = state.setdefault("jobs", {})
+    entry = jobs.get(job.id)
+    if not isinstance(entry, dict):
+        entry = {}
+        jobs[job.id] = entry
+    elif "releaseId" in entry:
+        entry = {"ios": dict(entry)}
+        jobs[job.id] = entry
+    record = {
         "provider": job.provider,
         "project": job.project,
         "releaseId": candidate.release_id,
         "assetId": candidate.asset_id,
-        "bundleIdentifier": job.bundle_identifier,
         "version": version,
         "sha256": sha256_hex,
         "publishedAt": _utcnow_iso(),
     }
+    record.update(identity)
+    entry[platform] = record
 
 
 def acquire_apply_lock(state_path):
@@ -1139,28 +1189,14 @@ def acquire_apply_lock(state_path):
 # ---------------------------------------------------------------------------
 
 
-def process_job(job, session, tokens, feather, state, apply, timeout, max_bytes, summary):
-    """Handle one job end to end, isolating its failures from other jobs.
+def _process_ios_candidate(job, candidate, session, tokens, feather, state, apply,
+                            timeout, max_bytes, summary, tmp_dir):
+    """iOS candidate path -- unchanged behavior from pre-083 process_job.
 
     Returns True on success (including a clean skip/would-publish), False
     on failure (summary.failed is also incremented in that case).
     """
-    summary.checked += 1
-
-    try:
-        # NOTE: still single-candidate (iOS only) here -- Step 6 rewrites this
-        # function to iterate select_candidate's full per-platform list.
-        candidate = select_candidate_single(job, session, tokens, timeout=timeout)
-    except (ProviderError, ConfigError) as e:
-        _log_job_error(str(e))
-        summary.failed += 1
-        return False
-    except Exception:
-        logger.exception("job %s: unexpected error selecting a release", job.id)
-        summary.failed += 1
-        return False
-
-    recorded = state.get("jobs", {}).get(job.id)
+    recorded = _platform_state_record(state, job.id, "ios")
     already_recorded = bool(
         recorded
         and recorded.get("releaseId") == candidate.release_id
@@ -1196,93 +1232,50 @@ def process_job(job, session, tokens, feather, state, apply, timeout, max_bytes,
     if not apply:
         summary.would_publish += 1
         logger.info(
-            "job %s: dry-run -- would download and publish release %s",
+            "job %s: dry-run -- would download and publish release %s (ios)",
             job.id,
             candidate.release_tag or candidate.release_id,
         )
         return True
 
     # --apply from here: download, validate, reconcile, publish.
-    tmp_dir = tempfile.mkdtemp(prefix="release-import-")
-    tmp_path = os.path.join(tmp_dir, "download.ipa")
+    tmp_path = _download_tmp_path(tmp_dir, "ios")
     try:
-        try:
-            _actual_size, sha256_hex = stream_download(
-                session, candidate, job, tmp_path, tokens, timeout, max_bytes
+        _actual_size, sha256_hex = stream_download(
+            session, candidate, job, tmp_path, tokens, timeout, max_bytes
+        )
+        summary.downloaded += 1
+    except (ProviderError, ValidationError) as e:
+        _log_job_error(f"job {job.id}: download failed: {e}")
+        summary.failed += 1
+        return False
+
+    try:
+        inspection = inspect_ipa_metadata(tmp_path, candidate.asset_name, job, candidate)
+        bundle_id = inspection.bundle_identifier
+        version = inspection.version
+        if bundle_id != job.bundle_identifier:
+            raise ValidationError(
+                f"job {job.id}: extracted bundle identifier {bundle_id!r} does not "
+                f"match configured bundleIdentifier {job.bundle_identifier!r}"
             )
-            summary.downloaded += 1
-        except (ProviderError, ValidationError) as e:
-            _log_job_error(f"job {job.id}: download failed: {e}")
-            summary.failed += 1
-            return False
+    except ValidationError as e:
+        _log_job_error(str(e))
+        summary.failed += 1
+        return False
 
-        try:
-            inspection = inspect_ipa_metadata(tmp_path, candidate.asset_name, job, candidate)
-            bundle_id = inspection.bundle_identifier
-            version = inspection.version
-            if bundle_id != job.bundle_identifier:
-                raise ValidationError(
-                    f"job {job.id}: extracted bundle identifier {bundle_id!r} does not "
-                    f"match configured bundleIdentifier {job.bundle_identifier!r}"
-                )
-        except ValidationError as e:
-            _log_job_error(str(e))
-            summary.failed += 1
-            return False
-
-        if catalog_app and _catalog_has_version(catalog_app, version):
-            _advance_state(state, job, candidate, version, sha256_hex)
-            summary.skipped += 1
-            logger.info(
-                "job %s: catalog already has extracted version %s -- not "
-                "re-uploading",
-                job.id,
-                version,
-            )
-            _report_provenance(feather, {
-                "trigger": "standalone", "jobId": job.id, "status": "skipped",
-                "stage": "publish", "provider": candidate.provider,
-                "project": candidate.project, "releaseId": candidate.release_id,
-                "releaseTag": candidate.release_tag, "assetId": candidate.asset_id,
-                "assetName": candidate.asset_name, "bundleIdentifier": bundle_id,
-                "version": version, "buildVersion": inspection.build_version,
-                "platform": inspection.platform, "sha256": sha256_hex,
-            })
-            return True
-
-        try:
-            created = False
-            if hasattr(feather, "set_preflight"):
-                feather.set_preflight(inspection)
-            if catalog_app is not None:
-                ok, message = feather.add_version(bundle_id, version, tmp_path)
-                if not ok and message == "App not found" and job.create_if_missing:
-                    ok, message = feather.add_app(
-                        bundle_id, version, job.name, job.developer_name, tmp_path
-                    )
-                    created = ok
-            else:
-                ok, message = feather.add_app(
-                    bundle_id, version, job.name, job.developer_name, tmp_path
-                )
-                created = ok
-        except FeatherAuthError as e:
-            _log_job_error(f"job {job.id}: {e}")
-            summary.failed += 1
-            return False
-
-        if not ok:
-            _log_job_error(f"job {job.id}: feather publish failed: {message}")
-            summary.failed += 1
-            return False
-
-        _advance_state(state, job, candidate, version, sha256_hex)
-        if created:
-            summary.created += 1
-        else:
-            summary.published += 1
+    if catalog_app and _catalog_has_version(catalog_app, version):
+        _advance_state(state, job, "ios", candidate, version, sha256_hex,
+                        bundleIdentifier=job.bundle_identifier)
+        summary.skipped += 1
+        logger.info(
+            "job %s: catalog already has extracted version %s -- not "
+            "re-uploading",
+            job.id,
+            version,
+        )
         _report_provenance(feather, {
-            "trigger": "standalone", "jobId": job.id, "status": "published",
+            "trigger": "standalone", "jobId": job.id, "status": "skipped",
             "stage": "publish", "provider": candidate.provider,
             "project": candidate.project, "releaseId": candidate.release_id,
             "releaseTag": candidate.release_tag, "assetId": candidate.asset_id,
@@ -1291,8 +1284,171 @@ def process_job(job, session, tokens, feather, state, apply, timeout, max_bytes,
             "platform": inspection.platform, "sha256": sha256_hex,
         })
         return True
+
+    try:
+        created = False
+        if hasattr(feather, "set_preflight"):
+            feather.set_preflight(inspection)
+        if catalog_app is not None:
+            ok, message = feather.add_version(bundle_id, version, tmp_path)
+            if not ok and message == "App not found" and job.create_if_missing:
+                ok, message = feather.add_app(
+                    bundle_id, version, job.name, job.developer_name, tmp_path
+                )
+                created = ok
+        else:
+            ok, message = feather.add_app(
+                bundle_id, version, job.name, job.developer_name, tmp_path
+            )
+            created = ok
+    except FeatherAuthError as e:
+        _log_job_error(f"job {job.id}: {e}")
+        summary.failed += 1
+        return False
+
+    if not ok:
+        _log_job_error(f"job {job.id}: feather publish failed: {message}")
+        summary.failed += 1
+        return False
+
+    _advance_state(state, job, "ios", candidate, version, sha256_hex,
+                    bundleIdentifier=job.bundle_identifier)
+    if created:
+        summary.created += 1
+    else:
+        summary.published += 1
+    _report_provenance(feather, {
+        "trigger": "standalone", "jobId": job.id, "status": "published",
+        "stage": "publish", "provider": candidate.provider,
+        "project": candidate.project, "releaseId": candidate.release_id,
+        "releaseTag": candidate.release_tag, "assetId": candidate.asset_id,
+        "assetName": candidate.asset_name, "bundleIdentifier": bundle_id,
+        "version": version, "buildVersion": inspection.build_version,
+        "platform": inspection.platform, "sha256": sha256_hex,
+    })
+    return True
+
+
+def _process_android_candidate(job, candidate, session, tokens, feather, state, apply,
+                                timeout, max_bytes, summary, tmp_dir):
+    """Android candidate path.
+
+    Never calls feather.get_app or _catalog_has_version -- those read the
+    iOS catalog and mean nothing for an APK. Dedupe is delegated entirely
+    to /api/android/add-apk's own idempotency (`added: false` on a re-post
+    of a version that already exists), so there is no local pre-check
+    equivalent to iOS's `already_recorded` short-circuit.
+
+    Returns True on success (including a clean would-publish, or a publish
+    the endpoint reports as already present), False on failure
+    (summary.failed is also incremented in that case).
+    """
+    if not apply:
+        summary.would_publish += 1
+        logger.info(
+            "job %s: dry-run -- would download and publish release %s (android)",
+            job.id,
+            candidate.release_tag or candidate.release_id,
+        )
+        return True
+
+    tmp_path = _download_tmp_path(tmp_dir, "android")
+    try:
+        _actual_size, sha256_hex = stream_download(
+            session, candidate, job, tmp_path, tokens, timeout, max_bytes
+        )
+        summary.downloaded += 1
+    except (ProviderError, ValidationError) as e:
+        _log_job_error(f"job {job.id}: download failed: {e}")
+        summary.failed += 1
+        return False
+
+    try:
+        inspection = inspect_apk_metadata(tmp_path, candidate.asset_name, job, candidate)
+    except ValidationError as e:
+        _log_job_error(str(e))
+        summary.failed += 1
+        return False
+
+    try:
+        ok, message, added = feather.add_apk(tmp_path, package=job.package)
+    except FeatherAuthError as e:
+        _log_job_error(f"job {job.id}: {e}")
+        summary.failed += 1
+        return False
+
+    if not ok:
+        _log_job_error(f"job {job.id}: feather publish failed: {message}")
+        summary.failed += 1
+        return False
+
+    _advance_state(state, job, "android", candidate, inspection.version_name, sha256_hex,
+                    package=inspection.package, versionCode=inspection.version_code)
+    if added:
+        summary.published += 1
+    else:
+        summary.skipped += 1
+        logger.info(
+            "job %s: feather already has %s versionCode %s -- not re-uploading",
+            job.id, inspection.package, inspection.version_code,
+        )
+    _report_provenance(feather, {
+        "trigger": "standalone", "jobId": job.id,
+        "status": "published" if added else "skipped",
+        "stage": "publish", "provider": candidate.provider,
+        "project": candidate.project, "releaseId": candidate.release_id,
+        "releaseTag": candidate.release_tag, "assetId": candidate.asset_id,
+        "assetName": candidate.asset_name, "package": inspection.package,
+        "versionCode": inspection.version_code, "versionName": inspection.version_name,
+        "platform": "android", "sha256": sha256_hex,
+    })
+    return True
+
+
+def process_job(job, session, tokens, feather, state, apply, timeout, max_bytes, summary):
+    """Handle one job end to end, isolating its failures from other jobs.
+
+    Selects at most one candidate per platform (see `select_candidate`) and
+    processes each independently via `_process_ios_candidate` /
+    `_process_android_candidate`, so a failure on one platform never blocks
+    the other's publish within the same job/release.
+
+    Returns True only if every candidate succeeded (including a clean
+    skip/would-publish); False if any failed (summary.failed is also
+    incremented, once per failing candidate, in that case).
+    """
+    summary.checked += 1
+
+    try:
+        candidates = select_candidate(job, session, tokens, timeout=timeout)
+    except (ProviderError, ConfigError) as e:
+        _log_job_error(str(e))
+        summary.failed += 1
+        return False
+    except Exception:
+        logger.exception("job %s: unexpected error selecting a release", job.id)
+        summary.failed += 1
+        return False
+
+    tmp_dir = tempfile.mkdtemp(prefix="release-import-") if apply else None
+    try:
+        job_ok = True
+        for candidate in candidates:
+            if candidate.platform == "android":
+                candidate_ok = _process_android_candidate(
+                    job, candidate, session, tokens, feather, state, apply,
+                    timeout, max_bytes, summary, tmp_dir,
+                )
+            else:
+                candidate_ok = _process_ios_candidate(
+                    job, candidate, session, tokens, feather, state, apply,
+                    timeout, max_bytes, summary, tmp_dir,
+                )
+            job_ok = job_ok and candidate_ok
+        return job_ok
     finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        if tmp_dir is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
