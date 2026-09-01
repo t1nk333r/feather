@@ -79,6 +79,15 @@ class FakeSession:
             return queue.pop(0)
         return queue[0]
 
+    def post(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        queue = self.responses.get(url)
+        if not queue:
+            raise AssertionError(f"no fake response configured for POST {url}")
+        if len(queue) > 1:
+            return queue.pop(0)
+        return queue[0]
+
 
 class FakeFeatherClient:
     """Stands in for FeatherClient -- records calls, never touches HTTP.
@@ -1234,6 +1243,80 @@ def test_bundle_mismatch_fails_before_feather_login(tmp_path):
     assert feather.add_app_calls == []
     assert feather.login_calls == 0
     assert job.id not in state["jobs"]
+
+
+# ---------------------------------------------------------------------------
+# 14b. FeatherClient.add_apk (plan 083)
+# ---------------------------------------------------------------------------
+
+
+def test_feather_client_add_apk_reports_added_and_message(tmp_path):
+    apk_path = tmp_path / "App.apk"
+    apk_path.write_bytes(b"fake-apk-bytes")
+
+    session = FakeSession()
+    session.add_response(
+        "https://feather.example/api/login", FakeResponse(200, json_data={"success": True})
+    )
+    session.add_response(
+        "https://feather.example/api/android/add-apk",
+        FakeResponse(200, json_data={
+            "success": True, "added": True, "message": "Added org.example.app version 7",
+            "package": "org.example.app", "versionCode": 7,
+        }),
+    )
+
+    feather = ingest.FeatherClient(session, "https://feather.example", "secret")
+    ok, message, added = feather.add_apk(str(apk_path), package="org.example.app")
+
+    assert ok is True
+    assert added is True
+    assert "Added" in message
+    # Multipart file + package form field were sent on the add-apk call.
+    post_url, post_kwargs = session.calls[-1]
+    assert post_url == "https://feather.example/api/android/add-apk"
+    assert post_kwargs["data"]["package"] == "org.example.app"
+    assert post_kwargs["files"]["apkFile"][0] == "App.apk"
+
+
+def test_feather_client_add_apk_reports_already_present_as_not_added(tmp_path):
+    apk_path = tmp_path / "App.apk"
+    apk_path.write_bytes(b"fake-apk-bytes")
+
+    session = FakeSession()
+    session.add_response(
+        "https://feather.example/api/login", FakeResponse(200, json_data={"success": True})
+    )
+    session.add_response(
+        "https://feather.example/api/android/add-apk",
+        FakeResponse(200, json_data={
+            "success": True, "added": False,
+            "message": "Already present: org.example.app versionCode 7",
+        }),
+    )
+
+    feather = ingest.FeatherClient(session, "https://feather.example", "secret")
+    ok, message, added = feather.add_apk(str(apk_path))
+
+    assert ok is True
+    assert added is False
+    assert "Already present" in message
+
+
+def test_feather_client_add_apk_raises_on_401(tmp_path):
+    apk_path = tmp_path / "App.apk"
+    apk_path.write_bytes(b"fake-apk-bytes")
+
+    session = FakeSession()
+    session.add_response(
+        "https://feather.example/api/login", FakeResponse(200, json_data={"success": True})
+    )
+    session.add_response(
+        "https://feather.example/api/android/add-apk", FakeResponse(401)
+    )
+    feather = ingest.FeatherClient(session, "https://feather.example", "secret")
+    with pytest.raises(ingest.FeatherAuthError):
+        feather.add_apk(str(apk_path))
 
 
 # ---------------------------------------------------------------------------

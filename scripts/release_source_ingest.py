@@ -1001,6 +1001,35 @@ class FeatherClient:
             "message"
         )
 
+    def add_apk(self, path, package=None):
+        """Publish an APK. `/api/android/add-apk` is already idempotent: a
+        re-post of a version that exists returns HTTP 200 with
+        `{"success": true, "added": false, ...}` rather than an error --
+        so return `added` too and let the caller distinguish "published"
+        from "already present" without a second dedupe check."""
+        self._ensure_login()
+        with open(path, "rb") as fh:
+            files = {"apkFile": (os.path.basename(path), fh)}
+            data = {}
+            if package:
+                data["package"] = package
+            resp = self.session.post(
+                f"{self.base_url}/api/android/add-apk",
+                data=data,
+                files=files,
+                timeout=self.timeout,
+            )
+        if resp.status_code == 401:
+            raise FeatherAuthError("feather /api/android/add-apk returned 401")
+        try:
+            payload = resp.json()
+        except ValueError:
+            raise ProviderError("feather /api/android/add-apk returned a non-JSON response")
+        ok = bool(payload.get("success"))
+        message = payload.get("error") or payload.get("message")
+        added = bool(payload.get("added"))
+        return ok, message, added
+
     def record_import_event(self, record):
         self._ensure_login()
         resp = self.session.post(
