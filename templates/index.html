@@ -820,8 +820,12 @@
                     <input type="text" name="bundleIdentifier" placeholder="leave blank to auto-detect">
                 </div>
                 <div class="form-group">
+                    <label>Android Package:</label>
+                    <input type="text" name="package" placeholder="com.example.app — leave blank for iOS-only">
+                </div>
+                <div class="form-group">
                     <label>Asset Glob:</label>
-                    <input type="text" name="assetGlob" value="*.ipa">
+                    <input type="text" name="assetGlob" value="*.ipa" placeholder="*.ipa — for both platforms, e.g. *.{ipa,apk}">
                 </div>
                 <div class="form-group">
                     <label>Exclude Glob (optional):</label>
@@ -1477,6 +1481,7 @@
                 provider: f.provider.value,
                 project: f.project.value.trim(),
                 bundleIdentifier: f.bundleIdentifier.value.trim(),
+                package: f.package.value.trim(),
                 assetGlob: f.assetGlob.value.trim() || '*.ipa',
                 assetExcludeGlob: f.assetExcludeGlob.value.trim(),
                 includePrereleases: f.includePrereleases.checked,
@@ -1517,17 +1522,32 @@
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.error || 'Asset discovery failed');
                 const releases = Array.isArray(data.releases) ? data.releases : [];
-                const latestUnsafe = releases.length === 0 || releases[0].matchCount !== 1;
+                // A cross-platform job legitimately matches one .ipa AND one .apk in the
+                // same release (plan 084/engine plan 083: at most one match *per
+                // platform*, not one match overall) -- so "unsafe" means more than one
+                // match within a single platform, not a raw matchCount over 1.
+                const latestMatchedByPlatform = {};
+                if (releases.length) {
+                    for (const asset of releases[0].assets || []) {
+                        if (!asset.matched) continue;
+                        const p = asset.platform || 'other';
+                        latestMatchedByPlatform[p] = (latestMatchedByPlatform[p] || 0) + 1;
+                    }
+                }
+                const latestUnsafe = releases.length === 0
+                    || Object.keys(latestMatchedByPlatform).length === 0
+                    || Object.values(latestMatchedByPlatform).some(count => count > 1);
                 importAssetPreview = {signature: selectorSignature(body), unsafe: latestUnsafe};
                 preview.style.display = '';
                 preview.innerHTML = releases.length ? releases.map(release => {
                     const count = Number(release.matchCount) || 0;
-                    const status = count === 1 ? '1 match' : `${count} matches — adjust selectors before importing`;
+                    const status = count === 0 ? 'no matches' : `${count} matched asset${count === 1 ? '' : 's'}`;
                     const assets = (release.assets || []).map(asset => {
                         const size = asset.size == null ? '' : ` (${(asset.size / 1048576).toFixed(1)} MB)`;
                         const flags = asset.matched ? 'matched' : (asset.excluded ? 'excluded' : 'not matched');
                         const host = asset.hostAllowed === false ? ', host not allowed' : '';
-                        return `<li><code>${escapeHtml(String(asset.name || ''))}</code>${escapeHtml(size)} — ${escapeHtml(flags + host)} ` +
+                        const platform = asset.platform ? ` [${escapeHtml(asset.platform)}]` : '';
+                        return `<li><code>${escapeHtml(String(asset.name || ''))}</code>${platform}${escapeHtml(size)} — ${escapeHtml(flags + host)} ` +
                             `<button type="button" class="btn btn-secondary" data-asset="${escapeHtml(String(asset.name || ''))}" onclick="copyImportAssetName(this)">Use exact name</button></li>`;
                     }).join('');
                     return `<div style="margin-bottom:12px"><strong>${escapeHtml(String(release.release || ''))}</strong> — ${escapeHtml(status)}<ul>${assets}</ul></div>`;
@@ -1575,13 +1595,17 @@
                         buf = buf.slice(nl + 1);
                         if (!line) continue;
                         const ev = JSON.parse(line);
+                        // A cross-platform job streams this sequence twice (once per
+                        // matched .ipa/.apk); ev.platform (present on every event since
+                        // plan 084) labels which artifact is in flight.
+                        const platformLabel = ev.platform ? `${ev.platform} ` : '';
                         if (ev.stage === 'downloading') {
                             if (ev.pct != null) {
                                 bar.value = ev.pct;
-                                status.textContent = `Downloading ${ev.pct}%`;
+                                status.textContent = `Downloading ${platformLabel}${ev.pct}%`;
                             } else {
                                 bar.removeAttribute('value');
-                                status.textContent = `Downloading ${(ev.downloaded / 1048576).toFixed(1)} MB`;
+                                status.textContent = `Downloading ${platformLabel}${(ev.downloaded / 1048576).toFixed(1)} MB`;
                             }
                         } else if (ev.stage === 'preflight') {
                             const minimum = ev.minOSVersion || 'unknown';
@@ -1595,7 +1619,7 @@
                         } else if (ev.stage === 'done') {
                             bar.value = 100;
                             showToast(ev.message || 'Imported', 'success');
-                            status.textContent = `Imported ${ev.bundleIdentifier} ${ev.version}`;
+                            status.textContent = `Imported ${platformLabel}${ev.bundleIdentifier} ${ev.version}`;
                             f.reset();
                         } else {
                             status.textContent = ev.stage.charAt(0).toUpperCase() + ev.stage.slice(1) + '...';
@@ -1633,6 +1657,7 @@
                     provider: f.provider.value,
                     project: project,
                     bundleIdentifier: f.bundleIdentifier.value.trim(),
+                    package: f.package.value.trim(),
                     assetGlob: f.assetGlob.value.trim() || '*.ipa',
                     assetExcludeGlob: f.assetExcludeGlob.value.trim(),
                     includePrereleases: f.includePrereleases.checked,
@@ -2862,8 +2887,24 @@
         // ------------------------------------------------------------------
         let autoImportJobsCache = [];
 
+        function formatPlatformOutcome(platform, r) {
+            const label = platform === 'android' ? 'Android' : 'iOS';
+            const status = (r && r.status) || 'unknown';
+            const version = (r && (r.version || r.versionName)) || '';
+            if (status === 'published') return `${label}: Published ${escapeHtml(version)}`;
+            if (status === 'skipped') return `${label}: Skipped (already have ${escapeHtml(version)})`;
+            if (status === 'error') return `${label}: Error: ${escapeHtml((r && r.message) || 'unknown error')}`;
+            return `${label}: ${escapeHtml(status)}`;
+        }
+
         function formatAutoImportResult(result) {
             if (!result) return 'Never run';
+            // Plan 084: a job publishing both platforms carries a
+            // per-platform breakdown so one outcome never hides the other.
+            const platforms = result.platforms && typeof result.platforms === 'object' ? result.platforms : null;
+            if (platforms && Object.keys(platforms).length > 1) {
+                return Object.keys(platforms).map(p => formatPlatformOutcome(p, platforms[p])).join(' | ');
+            }
             const status = result.status || 'unknown';
             if (status === 'published') return `Published ${escapeHtml(result.version || '')}`;
             if (status === 'skipped') return `Skipped (already have ${escapeHtml(result.version || '')})`;
@@ -2885,7 +2926,7 @@
                     <div class="app-card">
                         <div class="app-header">
                             <div class="app-info">
-                                <h3>${escapeHtml(job.bundleIdentifier || job.id)}</h3>
+                                <h3>${escapeHtml(job.bundleIdentifier || job.package || job.id)}</h3>
                                 <p><strong>Job ID:</strong> ${escapeHtml(job.id)}</p>
                                 <p><strong>Provider:</strong> ${escapeHtml(job.provider)} &middot; <strong>Repo:</strong> ${escapeHtml(job.project)}</p>
                                 <div class="version-info">
@@ -2993,7 +3034,8 @@
             const f = document.getElementById('importRepoForm');
             f.provider.value = job.provider;
             f.project.value = job.project;
-            f.bundleIdentifier.value = job.bundleIdentifier;
+            f.bundleIdentifier.value = job.bundleIdentifier || '';
+            f.package.value = job.package || '';
             f.assetGlob.value = job.assetGlob || '*.ipa';
             f.assetExcludeGlob.value = job.assetExcludeGlob || '';
             f.includePrereleases.checked = !!job.includePrereleases;
