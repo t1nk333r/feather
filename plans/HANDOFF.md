@@ -1,6 +1,6 @@
 # Handoff
 
-Written 2026-08-12 against `1b75e2c`; refreshed 2026-08-28 against `5e8f447` plus the current working implementation. Read the Traps section first.
+Written 2026-08-12 against `1b75e2c`; refreshed 2026-08-31 against `3e0cd8a` and the live deployment. Read **Immediate blocker** and **Traps** first.
 
 ## What this is
 
@@ -14,8 +14,8 @@ A self-hosted iOS AltStore source and third-party Android F-Droid repository. It
 - `Dockerfile.bot`, `Dockerfile.fdroid` — optional service images
 - `Jenkinsfile` — test, build, smoke, then publish pipeline
 - `scripts/migrate_ipas_to_garage.py` — one-shot local-disk → Garage S3 migration
-- `tests/` — 280 test functions (301 cases currently collected), no real provider calls
-- `plans/` — 80 numbered plans; `README.md` is the status index
+- `tests/` — latest CI result is 307 passed and 1 skipped on both supported Python versions; no real provider calls
+- `plans/` — 81 numbered plans; `README.md` is the status index
 
 **Test command** (the `ADMIN_PASSWORD` prefix is mandatory — the app refuses to import without it):
 
@@ -25,13 +25,49 @@ ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q -p no:cacheprovider
 
 ## State
 
-All currently selected plans through 081 are implemented or explicitly rejected; see `plans/README.md` for historical statuses and deferred findings.
+All currently selected plans through 081 are implemented or explicitly rejected; see `plans/README.md` for historical statuses and deferred findings. The working tree was clean before this handoff-only edit. `main` is at `3e0cd8a` (`fix(android): encode QR as F-Droid deep link`).
 
 Jenkins tests Python 3.11 and 3.14, checks the `requests` pin, builds and smokes all three images, then publishes `ghcr.io/t1nk333r/feather`, `feather-bot`, and `feather-fdroid` only after every smoke stage passes.
 
+The latest observed successful Jenkins run for `3e0cd8a` passed 307 tests with 1 skip on each Python version and deployed the refreshed core image. The Android QR now encodes a standard `fdroidrepos://` deep link while the manual repository address remains HTTPS.
+
+## Immediate blocker — restore the GHCR F-Droid image
+
+The live Android repository is healthy, but a cold pull of its sidecar image is not:
+
+```text
+docker pull ghcr.io/t1nk333r/feather-fdroid:latest
+Error response from daemon: Head "https://ghcr.io/v2/t1nk333r/feather-fdroid/manifests/latest": unauthorized
+```
+
+Verified on 2026-08-31:
+
+- `feather` and `feather-bot` issue anonymous GHCR pull tokens (`HTTP 200`).
+- `feather-fdroid` does not (`HTTP 401`), its public package page returns 404, and it is absent from the public package list.
+- The operator reports that `feather-fdroid` is also absent while signed into the owning GitHub account. Treat the package as deleted, not merely private, unless the authenticated GitHub package view proves otherwise.
+- Jenkins successfully pushed `feather-fdroid` tags in an earlier run. The live `feather-fdroid-index` container is therefore running a cached local image; this does **not** prove that the registry package still exists.
+- The local GitHub CLI credential has repository/workflow scopes but no package scope, so it cannot inspect or repair this package. Do not print, copy, or replace any credential value.
+
+Recovery sequence:
+
+1. Run a Jenkins build of current `main`. The `Push images` stage at `Jenkinsfile:170-190` must push `feather-fdroid:main`, `:latest`, and `:sha-3e0cd8a` using the existing `ghcr-pat` Jenkins credential.
+2. Confirm the Jenkins log contains a successful digest line for all three `feather-fdroid` tags and ends in `Finished: SUCCESS`. If the push reports `denied`, stop and repair the Jenkins credential's GHCR package-write permission; do not work around it with an untracked local image.
+3. While signed into GitHub as `t1nk333r`, confirm the recreated package appears under the account's Packages tab. Make it public if anonymous deployment pulls are desired. GitHub treats public visibility as irreversible, so this remains an operator decision.
+4. Verify anonymously from a Docker host that has no cached copy:
+
+   ```bash
+   docker pull ghcr.io/t1nk333r/feather-fdroid:latest
+   ```
+
+   Expected: pull succeeds without `docker login`. A cached-host `docker image inspect` is not sufficient verification.
+5. In Dockhand, pull the stack images and redeploy the Feather stack without changing or regenerating `data/fdroid/keystore.p12` or `FDROID_KEYSTORE_PASSWORD`.
+6. Run every Android check in **Verifying a deployment** below. The repository fingerprint before and after redeploy must be identical.
+
+STOP and report instead of improvising if Jenkins succeeds but no authenticated package appears, the package owner is not `t1nk333r`, the signing fingerprint changes, or recovery appears to require deleting/recreating `data/fdroid`.
+
 ## Deployment
 
-TrueNAS, managed by **Dockge**, stack at `/path/to/feather`. Optional profiles add services:
+TrueNAS, managed through **Dockhand** at the Tailscale address `http://<tailnet-host>` (environment `truenas`, ID 1). The stack data is at `/path/to/feather`; the historical path name does not mean Dockge is still the control plane. Optional profiles add services:
 
 | Container | Image | Notes |
 |---|---|---|
@@ -41,6 +77,8 @@ TrueNAS, managed by **Dockge**, stack at `/path/to/feather`. Optional profiles a
 | `feather-fdroid-index` | `ghcr.io/t1nk333r/feather-fdroid:latest` | profile `android`; root by necessity; mounts only `./data/fdroid` |
 
 Public at `https://feather.example.com` (openresty on `<proxy-ip>`). Garage S3 at `https://s3.example.com`, bucket `feather-repo` served at `https://feather-repo.web.example.com`.
+
+The custom Dockhand MCP bridge is installed locally under `~/.local/share/mcp-dockhand`, configured in `~/.codex/config.toml`, and run by `~/.config/systemd/user/mcp-dockhand.service`. Its environment file is `~/.config/mcp-dockhand/env` (mode 0600). The MCP bridge is bound to `127.0.0.1:8080` and separately bearer-protected. Never copy its bearer credential into this repository or a handoff.
 
 **Update ritual:**
 ```bash
@@ -59,7 +97,7 @@ Ordered by urgency. None of these are code.
 5. **Garage is configured but not in use.** `STORAGE_BACKEND` defaults to `local`. To switch: fill the Garage keys, run the migration **dry-run first** (expect 8 uploadable / 3 corrupt-skipped / 2 orphans), then `--apply`, *then* set `STORAGE_BACKEND=garage`. Doing it in the other order makes every existing app un-installable on restart.
 6. **`developerName` is `"Unknown"`** on anything the bot created (Plan 023's default), and `localizedDescription` is empty. Cosmetic; fix in the web UI.
 7. **Enable and protect Android signing state.** Set `COMPOSE_PROFILES=android`, run `chown -R 999:999 data/fdroid`, and back up both `data/fdroid/keystore.p12` and `FDROID_KEYSTORE_PASSWORD`. Losing either changes the repository fingerprint for every subscriber.
-8. **After the first Jenkins publish, make all three `t1nk333r` GHCR packages public** if deployment pulls without registry credentials.
+8. **Restore the missing `feather-fdroid` GHCR package.** Follow **Immediate blocker** above. `feather` and `feather-bot` are already anonymously pullable; `feather-fdroid` is the only failing image.
 
 ## Traps
 
@@ -91,6 +129,8 @@ Each of these cost real debugging time. They are the reason this file exists.
 
 **`./data/fdroid` is a separate bind mount.** Moving an uploaded APK into it may raise `EXDEV`; `AndroidRepoManager.add_apk` handles that with a hidden staged copy plus atomic replace.
 
+**A running container does not prove its registry image still exists.** Docker can continue running a cached `feather-fdroid` image after the GHCR package is deleted or made inaccessible. Test recovery with an anonymous pull on a host without that cached image before redeploying. Never delete the running container merely to test registry availability.
+
 ## Verifying a deployment
 
 ```bash
@@ -111,8 +151,12 @@ docker logs --tail 30 ipa-ingest-bot                               # names missi
 # the Android repo
 curl -sI https://feather.example.com/fdroid/repo/index-v1.jar | head -1
 curl -s https://feather.example.com/fdroid/repo/index-v1.json | python3 -c 'import json,sys; print(list(json.load(sys.stdin)["packages"]))'
+curl -s https://feather.example.com/fdroid/repo/index-v2.json | python3 -m json.tool >/dev/null
 docker logs --tail 5 feather-fdroid-index                           # "INFO: Finished"
 cat data/fdroid/last-update.json                                    # "ok": true
+
+# QR: decode with a QR reader; expected scheme and shape
+# fdroidrepos://feather.example.com/fdroid/repo?fingerprint=<64 lowercase hex>
 ```
 
 ## Conventions worth preserving
