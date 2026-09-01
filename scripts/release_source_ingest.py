@@ -146,6 +146,7 @@ class ReleaseCandidate:
     download_url: str
     auth_host: str
     release_body: str = ""
+    platform: str = "ios"  # "ios" | "android", inferred from the asset extension
 
 
 @dataclass
@@ -430,6 +431,37 @@ def _asset_match_state(job, name):
     return {"included": included, "excluded": excluded, "matched": included and not excluded}
 
 
+def _platform_for_asset(name):
+    """ios | android | None, inferred from the asset filename extension.
+
+    The single point where a new artifact type would be added -- keep it
+    the only place that knows about file extensions.
+    """
+    normalized = (name or "").lower()
+    if normalized.endswith(".ipa"):
+        return "ios"
+    if normalized.endswith(".apk"):
+        return "android"
+    return None
+
+
+def _group_matches_by_platform(job, matches, name_of):
+    """Group matched assets/links by platform, dropping those the job has no
+    identity for and any whose extension is neither .ipa nor .apk (so a `*`
+    glob and checksum files coexist without failing selection)."""
+    by_platform = {"ios": [], "android": []}
+    for item in matches:
+        platform = _platform_for_asset(name_of(item))
+        if platform is None:
+            continue
+        if platform == "ios" and job.bundle_identifier is None:
+            continue
+        if platform == "android" and job.package is None:
+            continue
+        by_platform[platform].append(item)
+    return by_platform
+
+
 def _github_eligible_releases(job, releases):
     eligible = [
         r for r in releases
@@ -440,32 +472,42 @@ def _github_eligible_releases(job, releases):
 
 
 def github_select_candidate(job, releases):
+    """Return a list of candidates -- at most one per platform -- for the
+    first eligible release that yields any match. Empty list if none do."""
     for release in _github_eligible_releases(job, releases):
         assets = release.get("assets") or []
         matches = [a for a in assets if _asset_match_state(job, a.get("name"))["matched"]]
-        if not matches:
-            continue
-        if len(matches) > 1:
-            raise ProviderError(
-                f"job {job.id}: release "
-                f"{release.get('tag_name') or release.get('id')} has {len(matches)} "
-                f"assets matching {job.asset_glob!r}, expected exactly one"
-            )
-        asset = matches[0]
-        return ReleaseCandidate(
-            provider="github",
-            project=job.project,
-            release_id=str(release.get("id")),
-            release_tag=release.get("tag_name"),
-            release_time=release.get("published_at") or "",
-            asset_id=str(asset.get("id")),
-            asset_name=asset.get("name") or "",
-            declared_size=asset.get("size"),
-            download_url=asset.get("url"),
-            auth_host="api.github.com",
-            release_body=release.get("body") or "",
-        )
-    return None
+        by_platform = _group_matches_by_platform(job, matches, lambda a: a.get("name"))
+
+        candidates = []
+        for platform in ("ios", "android"):
+            items = by_platform[platform]
+            if not items:
+                continue
+            if len(items) > 1:
+                raise ProviderError(
+                    f"job {job.id}: release "
+                    f"{release.get('tag_name') or release.get('id')} has {len(items)} "
+                    f"{platform} assets matching {job.asset_glob!r}, expected at most one"
+                )
+            asset = items[0]
+            candidates.append(ReleaseCandidate(
+                provider="github",
+                project=job.project,
+                release_id=str(release.get("id")),
+                release_tag=release.get("tag_name"),
+                release_time=release.get("published_at") or "",
+                asset_id=str(asset.get("id")),
+                asset_name=asset.get("name") or "",
+                declared_size=asset.get("size"),
+                download_url=asset.get("url"),
+                auth_host="api.github.com",
+                release_body=release.get("body") or "",
+                platform=platform,
+            ))
+        if candidates:
+            return candidates
+    return []
 
 
 def _parse_iso8601(value):
@@ -513,38 +555,48 @@ def _gitlab_eligible_releases(releases, now=None):
 
 
 def gitlab_select_candidate(job, releases, now=None):
+    """Return a list of candidates -- at most one per platform -- for the
+    first eligible release that yields any match. Empty list if none do."""
     for release in _gitlab_eligible_releases(releases, now=now):
         links = (release.get("assets") or {}).get("links") or []
         matches = [link for link in links if _asset_match_state(job, link.get("name"))["matched"]]
-        if not matches:
-            continue
-        if len(matches) > 1:
-            raise ProviderError(
-                f"job {job.id}: release "
-                f"{release.get('tag_name') or release.get('id')} has {len(matches)} "
-                f"asset links matching {job.asset_glob!r}, expected exactly one"
-            )
-        link = matches[0]
-        url = link.get("url")
-        host = (urlparse(url).hostname or "").lower() if url else ""
-        if not url or not host or host not in job.allowed_download_hosts:
-            raise ProviderError(
-                f"job {job.id}: asset link host {host!r} is not in allowedDownloadHosts"
-            )
-        return ReleaseCandidate(
-            provider="gitlab",
-            project=job.project,
-            release_id=str(release.get("id") or release.get("tag_name") or ""),
-            release_tag=release.get("tag_name"),
-            release_time=release.get("released_at") or "",
-            asset_id=str(link.get("id") or link.get("name")),
-            asset_name=link.get("name") or "",
-            declared_size=None,
-            download_url=url,
-            auth_host=host,
-            release_body=release.get("description") or "",
-        )
-    return None
+        by_platform = _group_matches_by_platform(job, matches, lambda link: link.get("name"))
+
+        candidates = []
+        for platform in ("ios", "android"):
+            items = by_platform[platform]
+            if not items:
+                continue
+            if len(items) > 1:
+                raise ProviderError(
+                    f"job {job.id}: release "
+                    f"{release.get('tag_name') or release.get('id')} has {len(items)} "
+                    f"{platform} asset links matching {job.asset_glob!r}, expected at most one"
+                )
+            link = items[0]
+            url = link.get("url")
+            host = (urlparse(url).hostname or "").lower() if url else ""
+            if not url or not host or host not in job.allowed_download_hosts:
+                raise ProviderError(
+                    f"job {job.id}: asset link host {host!r} is not in allowedDownloadHosts"
+                )
+            candidates.append(ReleaseCandidate(
+                provider="gitlab",
+                project=job.project,
+                release_id=str(release.get("id") or release.get("tag_name") or ""),
+                release_tag=release.get("tag_name"),
+                release_time=release.get("released_at") or "",
+                asset_id=str(link.get("id") or link.get("name")),
+                asset_name=link.get("name") or "",
+                declared_size=None,
+                download_url=url,
+                auth_host=host,
+                release_body=release.get("description") or "",
+                platform=platform,
+            ))
+        if candidates:
+            return candidates
+    return []
 
 
 def inspect_release_assets(job, session, tokens, timeout=30, limit=5):
@@ -601,25 +653,47 @@ def inspect_release_assets(job, session, tokens, timeout=30, limit=5):
 
 
 def select_candidate(job, session, tokens, timeout=30):
+    """Return a list of candidates -- at most one per platform -- selected
+    from the first eligible release with any match. Raises ProviderError
+    when no eligible release yields any match at all."""
     if job.provider == "github":
         releases = github_list_releases(
             session, job.project, tokens.get("github"), timeout=timeout, job_id=job.id
         )
-        candidate = github_select_candidate(job, releases)
+        candidates = github_select_candidate(job, releases)
     elif job.provider == "gitlab":
         releases = gitlab_list_releases(
             session, job.project, tokens.get("gitlab"), timeout=timeout, job_id=job.id
         )
-        candidate = gitlab_select_candidate(job, releases)
+        candidates = gitlab_select_candidate(job, releases)
     else:  # pragma: no cover - parse_manifest_dict already rejects this
         raise ConfigError(f"job {job.id}: unknown provider {job.provider!r}")
 
-    if candidate is None:
+    if not candidates:
         raise ProviderError(
             f"job {job.id}: no eligible release had exactly one asset matching "
             f"{job.asset_glob!r}"
         )
-    return candidate
+    return candidates
+
+
+def select_candidate_single(job, session, tokens, timeout=30):
+    """Back-compat shim over `select_candidate`'s pre-083 single-candidate
+    contract: returns the first (highest-priority) candidate. Existing
+    app.py callers bind to this until plan 084 updates them to consume the
+    full per-platform list.
+
+    Calls `select_candidate` by module-level name (not a captured
+    reference) so a caller's `monkeypatch.setattr(release_ingest,
+    "select_candidate", fake)` -- the existing test convention in
+    tests/test_import_release.py and tests/test_auto_import.py -- is
+    honoured here too. Tolerant of such a fake still returning a bare
+    ReleaseCandidate (the pre-083 shape) rather than a list.
+    """
+    result = select_candidate(job, session, tokens, timeout=timeout)
+    if isinstance(result, list):
+        return result[0]
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1017,7 +1091,9 @@ def process_job(job, session, tokens, feather, state, apply, timeout, max_bytes,
     summary.checked += 1
 
     try:
-        candidate = select_candidate(job, session, tokens, timeout=timeout)
+        # NOTE: still single-candidate (iOS only) here -- Step 6 rewrites this
+        # function to iterate select_candidate's full per-platform list.
+        candidate = select_candidate_single(job, session, tokens, timeout=timeout)
     except (ProviderError, ConfigError) as e:
         _log_job_error(str(e))
         summary.failed += 1

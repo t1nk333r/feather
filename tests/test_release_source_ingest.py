@@ -318,7 +318,10 @@ def test_github_selector_excludes_ambiguous_tvos_asset():
             {"id": 2, "name": "SceneBox-1.0-tvOS.ipa", "size": 11, "url": "https://api.github.com/b"},
         ],
     }]
-    assert ingest.github_select_candidate(job, releases).asset_name == "SceneBox-1.0.ipa"
+    candidates = ingest.github_select_candidate(job, releases)
+    assert len(candidates) == 1
+    assert candidates[0].asset_name == "SceneBox-1.0.ipa"
+    assert candidates[0].platform == "ios"
 
 
 def test_inspect_release_assets_is_sanitized_ordered_and_capped():
@@ -577,7 +580,9 @@ def test_github_selects_latest_published_release_with_one_matching_asset():
         },
     ]
 
-    candidate = ingest.github_select_candidate(job, releases)
+    candidates = ingest.github_select_candidate(job, releases)
+    assert len(candidates) == 1
+    candidate = candidates[0]
 
     assert candidate.release_id == "2"
     assert candidate.release_tag == "v1.0.0"
@@ -585,6 +590,7 @@ def test_github_selects_latest_published_release_with_one_matching_asset():
     assert candidate.asset_name == "App.ipa"
     assert candidate.declared_size == 222
     assert candidate.auth_host == "api.github.com"
+    assert candidate.platform == "ios"
 
 
 # ---------------------------------------------------------------------------
@@ -612,12 +618,12 @@ def test_github_prerelease_requires_opt_in():
     ]
 
     job_default = make_job(include_prereleases=False)
-    assert ingest.github_select_candidate(job_default, prerelease_only) is None
+    assert ingest.github_select_candidate(job_default, prerelease_only) == []
 
     job_opt_in = make_job(include_prereleases=True)
-    candidate = ingest.github_select_candidate(job_opt_in, prerelease_only)
-    assert candidate is not None
-    assert candidate.release_tag == "v1.0.0-beta"
+    candidates = ingest.github_select_candidate(job_opt_in, prerelease_only)
+    assert len(candidates) == 1
+    assert candidates[0].release_tag == "v1.0.0-beta"
 
     # Drafts are excluded regardless of includePrereleases.
     draft_only = [
@@ -637,7 +643,7 @@ def test_github_prerelease_requires_opt_in():
             ],
         }
     ]
-    assert ingest.github_select_candidate(job_opt_in, draft_only) is None
+    assert ingest.github_select_candidate(job_opt_in, draft_only) == []
 
 
 # ---------------------------------------------------------------------------
@@ -702,12 +708,15 @@ def test_gitlab_selects_latest_released_asset_link():
     ]
     now = ingest._parse_iso8601("2026-06-01T00:00:00Z")
 
-    candidate = ingest.gitlab_select_candidate(job, releases, now=now)
+    candidates = ingest.gitlab_select_candidate(job, releases, now=now)
+    assert len(candidates) == 1
+    candidate = candidates[0]
 
     assert candidate.release_id == "2"
     assert candidate.release_tag == "v1.0.0"
     assert candidate.asset_id == "20"
     assert candidate.download_url.endswith("v1.0.0/downloads/App.ipa")
+    assert candidate.platform == "ios"
 
 
 # ---------------------------------------------------------------------------
@@ -734,7 +743,7 @@ def test_provider_rejects_zero_or_ambiguous_matching_assets():
             ],
         }
     ]
-    assert ingest.github_select_candidate(job, no_match_releases) is None
+    assert ingest.github_select_candidate(job, no_match_releases) == []
 
     ambiguous_releases = [
         {
@@ -771,6 +780,88 @@ def test_provider_rejects_zero_or_ambiguous_matching_assets():
     )
     with pytest.raises(ingest.ProviderError):
         ingest.select_candidate(job, session, NO_TOKENS, timeout=30)
+
+
+# ---------------------------------------------------------------------------
+# 7b. Cross-platform selection -- at most one candidate per platform (083)
+# ---------------------------------------------------------------------------
+
+
+def _release_with_assets(asset_specs, release_id=1, tag="v1.0.0"):
+    return {
+        "id": release_id, "tag_name": tag, "draft": False, "prerelease": False,
+        "published_at": "2026-01-01T00:00:00Z",
+        "assets": [
+            {"id": i, "name": name, "size": 1, "url": f"https://api.github.com/a{i}"}
+            for i, name in enumerate(asset_specs, start=1)
+        ],
+    }
+
+
+def test_github_selection_yields_one_candidate_per_platform():
+    job = make_job(asset_glob="App*", package="org.example.app")
+    releases = [_release_with_assets(["App.ipa", "App.apk"])]
+    candidates = ingest.github_select_candidate(job, releases)
+    assert len(candidates) == 2
+    by_platform = {c.platform: c for c in candidates}
+    assert by_platform["ios"].asset_name == "App.ipa"
+    assert by_platform["android"].asset_name == "App.apk"
+
+
+def test_github_selection_rejects_two_apks_for_one_platform():
+    job = make_job(asset_glob="App*", package="org.example.app")
+    releases = [_release_with_assets(["App-arm64.apk", "App-x86.apk"])]
+    with pytest.raises(ingest.ProviderError, match="android"):
+        ingest.github_select_candidate(job, releases)
+
+
+def test_github_selection_ignores_apk_when_job_has_no_package():
+    job = make_job(asset_glob="App*")  # no package configured -- iOS-only job
+    releases = [_release_with_assets(["App.ipa", "App.apk"])]
+    candidates = ingest.github_select_candidate(job, releases)
+    assert len(candidates) == 1
+    assert candidates[0].platform == "ios"
+    assert candidates[0].asset_name == "App.ipa"
+
+
+def test_github_selection_ignores_checksum_file_alongside_ipa_and_apk():
+    job = make_job(asset_glob="*", package="org.example.app")
+    releases = [_release_with_assets(["App.ipa", "App.apk", "App.sha256"])]
+    candidates = ingest.github_select_candidate(job, releases)
+    assert len(candidates) == 2
+    names = {c.asset_name for c in candidates}
+    assert names == {"App.ipa", "App.apk"}
+
+
+def test_gitlab_selection_yields_one_candidate_per_platform():
+    job = make_job(
+        provider="gitlab", asset_glob="App*", package="org.example.app",
+        allowed_download_hosts=frozenset({"gitlab.com"}),
+    )
+    releases = [{
+        "id": 1, "tag_name": "v1.0.0", "released_at": "2026-01-01T00:00:00Z",
+        "assets": {"links": [
+            {"id": 1, "name": "App.ipa", "url": "https://gitlab.com/dl/App.ipa"},
+            {"id": 2, "name": "App.apk", "url": "https://gitlab.com/dl/App.apk"},
+        ]},
+    }]
+    now = ingest._parse_iso8601("2026-06-01T00:00:00Z")
+    candidates = ingest.gitlab_select_candidate(job, releases, now=now)
+    assert len(candidates) == 2
+    assert {c.platform for c in candidates} == {"ios", "android"}
+
+
+def test_select_candidate_single_returns_first_of_list():
+    job = make_job(asset_glob="App*", package="org.example.app")
+    releases = [_release_with_assets(["App.ipa", "App.apk"])]
+    session = FakeSession()
+    session.add_response(
+        "https://api.github.com/repos/owner/repo/releases",
+        FakeResponse(200, json_data=releases),
+    )
+    candidate = ingest.select_candidate_single(job, session, NO_TOKENS, timeout=30)
+    assert candidate.platform == "ios"
+    assert candidate.asset_name == "App.ipa"
 
 
 # ---------------------------------------------------------------------------

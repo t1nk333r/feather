@@ -3225,7 +3225,7 @@ def _run_auto_import_job(job, base_url, session_req, tokens):
             name=job.get('name') or None,
             developer_name=job.get('developerName') or None,
         )
-        candidate = release_ingest.select_candidate(job_obj, session_req, tokens, timeout=30)
+        candidate = release_ingest.select_candidate_single(job_obj, session_req, tokens, timeout=30)
         stage = "download"
         fd, tmp_path = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix=".ipa")
         os.close(fd)
@@ -3552,7 +3552,7 @@ def import_release():
             tokens = {"github": os.environ.get("GITHUB_TOKEN"), "gitlab": os.environ.get("GITLAB_TOKEN")}
             session_req = requests.Session()
             yield event(stage="resolving")
-            candidate = release_ingest.select_candidate(job, session_req, tokens, timeout=30)
+            candidate = release_ingest.select_candidate_single(job, session_req, tokens, timeout=30)
             history_stage = "download"
             yield event(stage="resolved", asset=candidate.asset_name,
                         release=candidate.release_tag or candidate.release_id, size=candidate.declared_size)
