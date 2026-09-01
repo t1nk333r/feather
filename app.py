@@ -3156,9 +3156,12 @@ def _validate_auto_import_job(raw):
     if provider == 'github' and not release_ingest._GITHUB_PROJECT_RE.match(project):
         raise ValueError("GitHub repository must be owner/repo, e.g. RyanYuuki/AnymeX")
 
-    bundle_id = (raw.get('bundleIdentifier') or '').strip()
-    if not bundle_id:
-        raise ValueError("bundleIdentifier is required")
+    bundle_id = (raw.get('bundleIdentifier') or '').strip() or None
+    package = (raw.get('package') or '').strip() or None
+    if package is not None and not ANDROID_PACKAGE_RE.match(package):
+        raise ValueError(f"package {package!r} is not a valid Android package name")
+    if bundle_id is None and package is None:
+        raise ValueError("at least one of bundleIdentifier or package is required")
 
     asset_glob = (raw.get('assetGlob') or '*.ipa').strip()
     if not asset_glob:
@@ -3186,6 +3189,7 @@ def _validate_auto_import_job(raw):
         "provider": provider,
         "project": project,
         "bundleIdentifier": bundle_id,
+        "package": package,
         "assetGlob": asset_glob,
         "assetExcludeGlob": asset_exclude_glob,
         "includePrereleases": bool(raw.get('includePrereleases')),
@@ -3467,6 +3471,11 @@ def _release_job_from_payload(payload, job_id="ui-import"):
     if provider == 'github' and not release_ingest._GITHUB_PROJECT_RE.match(project):
         raise ValueError("GitHub repository must be owner/repo, e.g. RyanYuuki/AnymeX")
 
+    package_raw = payload.get('package')
+    package = (package_raw or '').strip() or None
+    if package is not None and not ANDROID_PACKAGE_RE.match(package):
+        raise ValueError(f"package {package!r} is not a valid Android package name")
+
     asset_glob_raw = payload.get('assetGlob', '*.ipa')
     if not isinstance(asset_glob_raw, str) or not asset_glob_raw.strip():
         raise ValueError("Asset glob is required")
@@ -3487,6 +3496,7 @@ def _release_job_from_payload(payload, job_id="ui-import"):
         provider=provider,
         project=project,
         bundle_identifier=(payload.get('bundleIdentifier') or '').strip(),
+        package=package,
         asset_glob=asset_glob_raw.strip(),
         asset_exclude_glob=(exclude_raw or '').strip() or None,
         include_prereleases=bool(payload.get('includePrereleases')),
