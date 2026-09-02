@@ -3160,8 +3160,12 @@ def _validate_auto_import_job(raw):
     package = (raw.get('package') or '').strip() or None
     if package is not None and not ANDROID_PACKAGE_RE.match(package):
         raise ValueError(f"package {package!r} is not a valid Android package name")
-    if bundle_id is None and package is None:
-        raise ValueError("at least one of bundleIdentifier or package is required")
+    # Neither identity field is required: both are auto-detected from the
+    # artifact. The iOS path reads bundleIdentifier out of the IPA's
+    # Info.plist (_run_auto_import_ios_candidate) and the Android path lets
+    # android_repo.add_apk re-derive the package from the APK's manifest.
+    # When set, they act as assertions -- publish is refused if the artifact
+    # disagrees -- which is why they stay optional rather than required.
 
     asset_glob = (raw.get('assetGlob') or '*.ipa').strip()
     if not asset_glob:

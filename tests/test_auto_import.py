@@ -640,15 +640,30 @@ def test_auto_import_bundle_identifier_only_job_unchanged(authed_client):
     assert jobs[0]["package"] is None
 
 
-def test_auto_import_job_requires_bundle_identifier_or_package(authed_client):
-    bad_job = dict(VALID_GITHUB_JOB, id="neither", bundleIdentifier="", package="")
-    resp = authed_client.post("/api/auto-import/job", json=bad_job)
-    assert resp.status_code == 400
-    error = resp.get_json()["error"].lower()
-    assert "bundleidentifier" in error and "package" in error
+def test_auto_import_job_accepts_neither_identity_field(authed_client):
+    """Both identity fields are optional -- each is auto-detected from the
+    artifact (bundleIdentifier from the IPA's Info.plist, package from the
+    APK's manifest). A job that supplies neither must save and be stored
+    with both as None, not rejected."""
+    job = dict(VALID_GITHUB_JOB, id="neither", bundleIdentifier="", package="")
+    resp = authed_client.post("/api/auto-import/job", json=job)
+    assert resp.status_code == 200, resp.get_json()
 
-    resp = authed_client.get("/api/auto-import")
-    assert resp.get_json()["jobs"] == []
+    stored = authed_client.get("/api/auto-import").get_json()["jobs"]
+    assert len(stored) == 1
+    assert stored[0]["id"] == "neither"
+    assert stored[0]["bundleIdentifier"] is None
+    assert stored[0]["package"] is None
+
+
+def test_auto_import_job_still_rejects_a_malformed_package(authed_client):
+    """Dropping the requirement must not drop the format check: a package
+    that is set but not a valid Android package name is still refused."""
+    bad = dict(VALID_GITHUB_JOB, id="badpkg", bundleIdentifier="", package="not a package!")
+    resp = authed_client.post("/api/auto-import/job", json=bad)
+    assert resp.status_code == 400
+    assert "package" in resp.get_json()["error"].lower()
+    assert authed_client.get("/api/auto-import").get_json()["jobs"] == []
 
 
 def test_auto_import_run_publishes_both_platforms(authed_client, monkeypatch, tmp_path):
