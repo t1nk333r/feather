@@ -757,3 +757,96 @@ def test_auto_import_android_rerun_already_present_is_skip_not_failure(authed_cl
 
     apk_path = tmp_path / "fdroid" / "repo" / "com.cross.app.android_9.apk"
     assert apk_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Regex asset match mode (plan 085)
+# ---------------------------------------------------------------------------
+
+
+def test_asset_match_mode_round_trips_through_save_and_read(authed_client):
+    """assetMatchMode must be in _validate_auto_import_job's returned dict --
+    a field absent there is silently dropped and the setting would not
+    persist. Assert the round trip, not by eye."""
+    job = dict(VALID_GITHUB_JOB, assetGlob=r".*arm64.*\.apk", assetMatchMode="regex")
+    resp = authed_client.post("/api/auto-import/job", json=job)
+    assert resp.status_code == 200, resp.get_json()
+
+    resp = authed_client.get("/api/auto-import")
+    stored = resp.get_json()["jobs"][0]
+    assert stored["assetMatchMode"] == "regex"
+    assert stored["assetGlob"] == r".*arm64.*\.apk"
+
+
+def test_asset_match_mode_defaults_to_glob_when_saved_without_it(authed_client):
+    job = dict(VALID_GITHUB_JOB)
+    assert "assetMatchMode" not in job
+    resp = authed_client.post("/api/auto-import/job", json=job)
+    assert resp.status_code == 200, resp.get_json()
+
+    stored = authed_client.get("/api/auto-import").get_json()["jobs"][0]
+    assert stored["assetMatchMode"] == "glob"
+
+
+def test_invalid_regex_asset_glob_is_refused_at_save_with_readable_message(authed_client):
+    job = dict(VALID_GITHUB_JOB, assetGlob="(unterminated", assetMatchMode="regex")
+    resp = authed_client.post("/api/auto-import/job", json=job)
+    assert resp.status_code == 400
+    error = resp.get_json()["error"]
+    assert "assetGlob" in error
+    assert "not a valid regular expression" in error
+
+    # Never saved -- the bad job must not appear in the store.
+    assert authed_client.get("/api/auto-import").get_json()["jobs"] == []
+
+
+def test_asset_pattern_over_200_chars_refused_at_save(authed_client):
+    job = dict(VALID_GITHUB_JOB, assetGlob="a" * 201, assetMatchMode="regex")
+    resp = authed_client.post("/api/auto-import/job", json=job)
+    assert resp.status_code == 400
+    assert "too long" in resp.get_json()["error"]
+
+
+def test_unknown_asset_match_mode_is_refused_at_save(authed_client):
+    job = dict(VALID_GITHUB_JOB, assetMatchMode="wildcard")
+    resp = authed_client.post("/api/auto-import/job", json=job)
+    assert resp.status_code == 400
+    assert "assetMatchMode" in resp.get_json()["error"]
+
+
+def test_stored_job_with_no_asset_match_mode_behaves_as_glob(authed_client):
+    """The test that protects data/auto-import.json: every job stored there
+    today has no assetMatchMode key at all. Writing directly to the store
+    (bypassing _validate_auto_import_job, which would insert a default)
+    reproduces that exact on-disk shape."""
+    app_module = authed_client.app_module
+    release_ingest = app_module.release_ingest
+
+    # Parentheses are literal in glob (fnmatch has no group syntax) but
+    # meaningful in regex -- a genuine behavioral discriminator between
+    # the two modes, not just a check that a field has some string value.
+    job = dict(VALID_GITHUB_JOB, id="legacy", assetGlob="App(1).ipa")
+    assert "assetMatchMode" not in job
+    app_module.save_auto_import(
+        {"enabled": False, "intervalHours": 6, "lastRunAt": None, "jobs": [job]}
+    )
+
+    captured = {}
+
+    def capture_and_reject(job_obj, *a, **k):
+        captured["job_obj"] = job_obj
+        raise release_ingest.ProviderError("no releases (test stub)")
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(release_ingest, "select_candidate", capture_and_reject)
+    try:
+        resp = authed_client.post("/api/auto-import/run", json={"id": "legacy"})
+    finally:
+        mp.undo()
+
+    assert resp.status_code == 200
+    job_obj = captured.get("job_obj")
+    assert job_obj is not None
+    assert job_obj.asset_match_mode == "glob"
+    state = release_ingest._asset_match_state(job_obj, "App(1).ipa")
+    assert state["matched"] is True

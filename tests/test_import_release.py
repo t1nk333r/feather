@@ -305,6 +305,59 @@ def test_inspect_release_validates_gitlab_hosts(authed_client):
     assert "allowed" in response.get_json()["error"].lower()
 
 
+def test_inspect_release_honours_regex_mode(authed_client, monkeypatch):
+    """/inspect must run the real matcher (_asset_match_state), not a stub --
+    this proves regex mode reaches the preview path end to end, using the
+    real AnymeX multi-ABI asset names (plan 085 Step 5)."""
+    anymex_release = {
+        "id": 1, "tag_name": "v1.0.0", "draft": False, "prerelease": False,
+        "published_at": "2026-01-01T00:00:00Z",
+        "assets": [
+            {"id": 1, "name": "AnymeX-Android-arm64-v8a.apk", "size": 37702413,
+             "url": "https://api.github.com/repos/RyanYuuki/AnymeX/releases/assets/1"},
+            {"id": 2, "name": "AnymeX-Android-armeabi-v7a.apk", "size": 36621609,
+             "url": "https://api.github.com/repos/RyanYuuki/AnymeX/releases/assets/2"},
+            {"id": 3, "name": "AnymeX.ipa", "size": 12345,
+             "url": "https://api.github.com/repos/RyanYuuki/AnymeX/releases/assets/3"},
+        ],
+    }
+    monkeypatch.setattr(
+        authed_client.app_module.release_ingest,
+        "github_list_releases",
+        lambda session, project, token, timeout=30, job_id=None: [anymex_release],
+    )
+
+    glob_response = authed_client.post("/api/import-release/inspect", json={
+        "provider": "github", "project": "RyanYuuki/AnymeX",
+        "assetGlob": "*.apk", "assetMatchMode": "glob",
+    })
+    assert glob_response.status_code == 200
+    glob_release = glob_response.get_json()["releases"][0]
+    assert glob_release["matchCount"] == 2  # both APKs -- ambiguous, as before
+
+    regex_response = authed_client.post("/api/import-release/inspect", json={
+        "provider": "github", "project": "RyanYuuki/AnymeX",
+        "assetGlob": r".*arm64-v8a\.apk", "assetMatchMode": "regex",
+    })
+    assert regex_response.status_code == 200
+    regex_release = regex_response.get_json()["releases"][0]
+    assert regex_release["matchCount"] == 1
+    matched = [a for a in regex_release["assets"] if a["matched"]]
+    assert len(matched) == 1
+    assert matched[0]["name"] == "AnymeX-Android-arm64-v8a.apk"
+
+
+def test_inspect_release_invalid_regex_is_rejected(authed_client):
+    response = authed_client.post("/api/import-release/inspect", json={
+        "provider": "github", "project": "owner/repo",
+        "assetGlob": "(unterminated", "assetMatchMode": "regex",
+    })
+    assert response.status_code == 400
+    error = response.get_json()["error"]
+    assert "assetGlob" in error
+    assert "not a valid regular expression" in error
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------

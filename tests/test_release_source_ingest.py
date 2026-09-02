@@ -1803,3 +1803,147 @@ def test_old_flat_state_migrates_when_android_platform_added(tmp_path, monkeypat
     # No stray top-level flat keys survive the migration -- the entry is
     # cleanly {"ios": ..., "android": ...}, not a hybrid of both shapes.
     assert set(state["jobs"][job.id].keys()) == {"ios", "android"}
+
+
+# ---------------------------------------------------------------------------
+# 23. Regex asset match mode (plan 085)
+# ---------------------------------------------------------------------------
+
+
+def test_glob_mode_is_unchanged_when_match_mode_is_default():
+    """Regression: a Job built with no assetMatchMode (every stored job in
+    data/auto-import.json today) must behave exactly like the pre-085
+    fnmatch-only matcher -- including treating regex metacharacters in the
+    pattern literally, never as regex syntax."""
+    job = make_job(asset_glob="*.ipa")
+    assert job.asset_match_mode == "glob"
+    assert ingest._asset_match_state(job, "App.ipa")["matched"] is True
+    assert ingest._asset_match_state(job, "App.apk")["matched"] is False
+
+    literal_job = make_job(asset_glob="App(1).ipa")
+    assert ingest._asset_match_state(literal_job, "App(1).ipa")["matched"] is True
+
+
+def test_regex_mode_uses_fullmatch_not_search():
+    """A pattern matching only part of the name must NOT match -- re.search
+    would silently change what existing-style patterns mean; fullmatch
+    mirrors fnmatch's whole-name semantics."""
+    partial = make_job(asset_glob="arm64", asset_match_mode="regex")
+    assert ingest._asset_match_state(partial, "App-arm64-v8a.apk")["matched"] is False
+
+    full = make_job(asset_glob=r"App-arm64-v8a\.apk", asset_match_mode="regex")
+    assert ingest._asset_match_state(full, "App-arm64-v8a.apk")["matched"] is True
+
+
+def test_regex_mode_is_case_insensitive():
+    job = make_job(asset_glob=r"APP-ARM64\.APK", asset_match_mode="regex")
+    assert ingest._asset_match_state(job, "app-arm64.apk")["matched"] is True
+
+
+def test_regex_mode_exclude_pattern():
+    job = make_job(
+        asset_glob=r".*\.ipa", asset_exclude_glob=r".*-tvOS\.ipa",
+        asset_match_mode="regex",
+    )
+    included = ingest._asset_match_state(job, "App-1.0.ipa")
+    excluded = ingest._asset_match_state(job, "App-1.0-tvOS.ipa")
+    assert included["included"] is True
+    assert included["excluded"] is False
+    assert included["matched"] is True
+    assert excluded["included"] is True
+    assert excluded["excluded"] is True
+    assert excluded["matched"] is False
+
+
+def test_invalid_regex_asset_glob_raises_config_error_not_re_error():
+    with pytest.raises(ingest.ConfigError, match="assetGlob"):
+        ingest.parse_manifest_dict({
+            "schemaVersion": 1,
+            "jobs": [_valid_github_job(assetGlob="(unterminated", assetMatchMode="regex")],
+        })
+
+
+def test_invalid_regex_asset_exclude_glob_raises_config_error_not_re_error():
+    with pytest.raises(ingest.ConfigError, match="assetExcludeGlob"):
+        ingest.parse_manifest_dict({
+            "schemaVersion": 1,
+            "jobs": [_valid_github_job(
+                assetGlob=r".*\.ipa", assetExcludeGlob="(unterminated",
+                assetMatchMode="regex",
+            )],
+        })
+
+
+def test_asset_pattern_over_200_chars_rejected_in_manifest():
+    with pytest.raises(ingest.ConfigError, match="too long"):
+        ingest.parse_manifest_dict({
+            "schemaVersion": 1,
+            "jobs": [_valid_github_job(assetGlob="a" * 201, assetMatchMode="regex")],
+        })
+
+
+def test_asset_match_mode_rejects_unknown_value():
+    with pytest.raises(ingest.ConfigError, match="assetMatchMode"):
+        ingest.parse_manifest_dict({
+            "schemaVersion": 1,
+            "jobs": [_valid_github_job(assetMatchMode="wildcard")],
+        })
+
+
+def test_asset_match_mode_round_trips_through_manifest():
+    job = ingest.parse_manifest_dict({
+        "schemaVersion": 1,
+        "jobs": [_valid_github_job(assetGlob=r".*arm64.*\.apk", assetMatchMode="regex")],
+    })[0]
+    assert job.asset_match_mode == "regex"
+    assert job.asset_glob == r".*arm64.*\.apk"
+
+
+# ---------------------------------------------------------------------------
+# 24. Real-shape regression: AnymeX multi-ABI release (plan 085 Step 5)
+#
+# Asset names/sizes are the real ones recorded live against
+# RyanYuuki/AnymeX -- not invented fixture names.
+# ---------------------------------------------------------------------------
+
+ANYMEX_ASSETS = [
+    {"id": 1, "name": "AnymeX-Android-arm64-v8a.apk", "size": 37702413,
+     "url": "https://api.github.com/repos/RyanYuuki/AnymeX/releases/assets/1"},
+    {"id": 2, "name": "AnymeX-Android-armeabi-v7a.apk", "size": 36621609,
+     "url": "https://api.github.com/repos/RyanYuuki/AnymeX/releases/assets/2"},
+    {"id": 3, "name": "AnymeX.ipa", "size": 12345,
+     "url": "https://api.github.com/repos/RyanYuuki/AnymeX/releases/assets/3"},
+]
+
+
+def _anymex_release():
+    return [{
+        "id": 1, "tag_name": "v1.0.0", "draft": False, "prerelease": False,
+        "published_at": "2026-01-01T00:00:00Z",
+        "assets": ANYMEX_ASSETS,
+    }]
+
+
+def test_anymex_glob_star_apk_is_ambiguous():
+    """A glob of *.apk cannot express 'the arm64 one and only the arm64
+    one' -- both real per-ABI APKs match, and the one-per-platform guard
+    still fires, exactly as it did before regex mode existed."""
+    job = make_job(
+        id="anymex", project="RyanYuuki/AnymeX",
+        bundle_identifier="com.example.anymex", package="com.example.anymex",
+        asset_glob="*.apk",
+    )
+    with pytest.raises(ingest.ProviderError, match="expected at most one"):
+        ingest.github_select_candidate(job, _anymex_release())
+
+
+def test_anymex_regex_pins_exactly_the_arm64_asset():
+    job = make_job(
+        id="anymex", project="RyanYuuki/AnymeX",
+        bundle_identifier="com.example.anymex", package="com.example.anymex",
+        asset_glob=r".*arm64-v8a\.apk", asset_match_mode="regex",
+    )
+    candidates = ingest.github_select_candidate(job, _anymex_release())
+    android = [c for c in candidates if c.platform == "android"]
+    assert len(android) == 1
+    assert android[0].asset_name == "AnymeX-Android-arm64-v8a.apk"
