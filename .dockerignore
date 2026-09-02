@@ -21,6 +21,11 @@
 # receive it alongside their executable script.
 !scripts/ipa_inspection.py
 
+# Android counterpart of ipa_inspection.py (Plan 083). The main image's
+# release importer needs it; Dockerfile.bot does not COPY it because the
+# bot validates APKs by extension and publishes over HTTP.
+!scripts/apk_inspection.py
+
 # Dockerfile.fdroid needs this one script for the opt-in Android/F-Droid
 # sidecar (Plan 073) -- same rule, do NOT blanket-exclude scripts/
 !scripts/fdroid_index_loop.sh
