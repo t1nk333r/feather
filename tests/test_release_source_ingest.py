@@ -874,13 +874,28 @@ def test_github_selection_rejects_two_apks_for_one_platform():
         ingest.github_select_candidate(job, releases)
 
 
-def test_github_selection_ignores_apk_when_job_has_no_package():
-    job = make_job(asset_glob="App*")  # no package configured -- iOS-only job
+def test_github_selection_does_not_filter_on_configured_identity():
+    """Selection is by pattern alone. Both identity fields are optional and
+    auto-detected from the artifact, so a job with neither must still select
+    both assets -- filtering here previously made a blank field match nothing
+    and surface as a misleading "no ... asset matching <glob>" error."""
+    job = make_job(asset_glob="App*")  # neither bundleIdentifier nor package
     releases = [_release_with_assets(["App.ipa", "App.apk"])]
     candidates = ingest.github_select_candidate(job, releases)
+    assert {c.platform for c in candidates} == {"ios", "android"}
+    assert {c.asset_name for c in candidates} == {"App.ipa", "App.apk"}
+
+
+def test_github_selection_finds_an_apk_with_no_package_configured():
+    """Regression for the reported failure: an APK-only release with the
+    Android Package field left blank selected zero candidates and reported
+    'no eligible release had ... asset matching', pointing at the glob."""
+    job = make_job(asset_glob="tsuzuku-release.apk")
+    releases = [_release_with_assets(["tsuzuku-release.apk"])]
+    candidates = ingest.github_select_candidate(job, releases)
     assert len(candidates) == 1
-    assert candidates[0].platform == "ios"
-    assert candidates[0].asset_name == "App.ipa"
+    assert candidates[0].platform == "android"
+    assert candidates[0].asset_name == "tsuzuku-release.apk"
 
 
 def test_github_selection_ignores_checksum_file_alongside_ipa_and_apk():

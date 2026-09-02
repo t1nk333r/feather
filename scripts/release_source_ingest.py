@@ -455,17 +455,22 @@ def _download_tmp_path(tmp_dir, platform):
 
 
 def _group_matches_by_platform(job, matches, name_of):
-    """Group matched assets/links by platform, dropping those the job has no
-    identity for and any whose extension is neither .ipa nor .apk (so a `*`
-    glob and checksum files coexist without failing selection)."""
+    """Group matched assets/links by platform, dropping any whose extension is
+    neither .ipa nor .apk (so a `*` glob and checksum files coexist without
+    failing selection).
+
+    Selection is by pattern alone. It deliberately does NOT filter on whether
+    the job configured an identity for the platform: both `bundle_identifier`
+    and `package` are optional and auto-detected from the artifact, so
+    filtering here made a blank field silently match nothing and surface as
+    "no eligible release had ... asset matching", pointing the operator at
+    their glob instead of at the real cause. The identity, when set, is an
+    assertion applied after inspection -- see `validate_and_extract_metadata`
+    for iOS and `inspect_apk_metadata` for Android."""
     by_platform = {"ios": [], "android": []}
     for item in matches:
         platform = _platform_for_asset(name_of(item))
         if platform is None:
-            continue
-        if platform == "ios" and job.bundle_identifier is None:
-            continue
-        if platform == "android" and job.package is None:
             continue
         by_platform[platform].append(item)
     return by_platform
@@ -680,7 +685,7 @@ def select_candidate(job, session, tokens, timeout=30):
 
     if not candidates:
         raise ProviderError(
-            f"job {job.id}: no eligible release had exactly one asset matching "
+            f"job {job.id}: no eligible release had an .ipa or .apk asset matching "
             f"{job.asset_glob!r}"
         )
     return candidates
