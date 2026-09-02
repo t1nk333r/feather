@@ -3135,6 +3135,36 @@ def mutate_auto_import(fn):
         return result
 
 
+def _validate_asset_match_mode(mode):
+    """Accept only the exact strings 'glob' and 'regex'. Raises ValueError
+    naming both valid values otherwise."""
+    if mode not in ('glob', 'regex'):
+        raise ValueError(f"assetMatchMode must be 'glob' or 'regex', got {mode!r}")
+    return mode
+
+
+def _validate_asset_pattern(field_name, pattern, mode):
+    """Validate one assetGlob/assetExcludeGlob value at save time, never at
+    run time inside the scheduler. In regex mode: reject patterns over
+    release_ingest.ASSET_PATTERN_MAX_LENGTH characters (a deliberate, cheap
+    guard against catastrophic backtracking -- Python's `re` has no match
+    timeout, so a pathological pattern would block the scheduler thread;
+    these routes are admin-only via @requires_auth, so this is defence in
+    depth rather than a boundary against untrusted input) and surface a bad
+    pattern as ValueError, never a raw re.error."""
+    if mode != 'regex' or not pattern:
+        return
+    if len(pattern) > release_ingest.ASSET_PATTERN_MAX_LENGTH:
+        raise ValueError(
+            f"{field_name} pattern is too long "
+            f"(max {release_ingest.ASSET_PATTERN_MAX_LENGTH} characters)"
+        )
+    try:
+        re.compile(pattern)
+    except re.error as e:
+        raise ValueError(f"{field_name} is not a valid regular expression: {e}")
+
+
 def _validate_auto_import_job(raw):
     """Normalize + validate one job dict from the API. Raises ValueError
     with a user-facing message on any problem; rules mirror the engine's
@@ -3175,6 +3205,10 @@ def _validate_auto_import_job(raw):
         raise ValueError("assetExcludeGlob must be a string")
     asset_exclude_glob = (asset_exclude_raw or '').strip() or None
 
+    asset_match_mode = _validate_asset_match_mode(raw.get('assetMatchMode') or 'glob')
+    _validate_asset_pattern('assetGlob', asset_glob, asset_match_mode)
+    _validate_asset_pattern('assetExcludeGlob', asset_exclude_glob, asset_match_mode)
+
     hosts_in = raw.get('allowedDownloadHosts') or []
     if not isinstance(hosts_in, list):
         raise ValueError("allowedDownloadHosts must be a list of hostnames")
@@ -3196,6 +3230,7 @@ def _validate_auto_import_job(raw):
         "package": package,
         "assetGlob": asset_glob,
         "assetExcludeGlob": asset_exclude_glob,
+        "assetMatchMode": asset_match_mode,
         "includePrereleases": bool(raw.get('includePrereleases')),
         "createIfMissing": create_if_missing,
         "name": name,
@@ -3483,6 +3518,7 @@ def _run_auto_import_job(job, base_url, session_req, tokens):
         package=job.get('package') or None,
         asset_glob=job.get('assetGlob') or "*.ipa",
         asset_exclude_glob=job.get('assetExcludeGlob') or None,
+        asset_match_mode=job.get('assetMatchMode') or "glob",
         include_prereleases=bool(job.get('includePrereleases')),
         create_if_missing=bool(job.get('createIfMissing')),
         allowed_download_hosts=frozenset(
@@ -3692,6 +3728,11 @@ def _release_job_from_payload(payload, job_id="ui-import"):
     exclude_raw = payload.get('assetExcludeGlob')
     if exclude_raw is not None and not isinstance(exclude_raw, str):
         raise ValueError("Asset exclude glob must be a string")
+    asset_match_mode = _validate_asset_match_mode(payload.get('assetMatchMode') or 'glob')
+    _validate_asset_pattern('assetGlob', asset_glob_raw.strip(), asset_match_mode)
+    _validate_asset_pattern(
+        'assetExcludeGlob', (exclude_raw or '').strip() or None, asset_match_mode
+    )
     hosts_in = payload.get('allowedDownloadHosts') or []
     if not isinstance(hosts_in, list) or any(not isinstance(h, str) for h in hosts_in):
         raise ValueError("Allowed download hosts must be a list of hostnames")
@@ -3709,6 +3750,7 @@ def _release_job_from_payload(payload, job_id="ui-import"):
         package=package,
         asset_glob=asset_glob_raw.strip(),
         asset_exclude_glob=(exclude_raw or '').strip() or None,
+        asset_match_mode=asset_match_mode,
         include_prereleases=bool(payload.get('includePrereleases')),
         create_if_missing=bool(payload.get('createIfMissing')),
         allowed_download_hosts=allowed,

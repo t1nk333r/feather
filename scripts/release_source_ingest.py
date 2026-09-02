@@ -98,6 +98,14 @@ DEFAULT_TIMEOUT = 900
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024
 MAX_REDIRECTS = 5
 
+# Deliberate, cheap guard against catastrophic backtracking: Python's `re`
+# has no match timeout, so a pathological regex asset pattern would block
+# the scheduler thread indefinitely. This input is admin-only (every route
+# that accepts it is @requires_auth / a locally-edited manifest file), so
+# this is defence in depth rather than a boundary against untrusted input --
+# not a substitute for a real regex-safety analysis.
+ASSET_PATTERN_MAX_LENGTH = 200
+
 _APP_INFO_PLIST = re.compile(r"^Payload/[^/]+\.app/Info\.plist$")
 
 
@@ -208,6 +216,35 @@ def _require_nonempty_str(raw, key, job_id):
     return value
 
 
+def _validate_asset_match_mode(job_id, mode):
+    """Accept only the exact strings 'glob' and 'regex'. Raises ConfigError
+    naming both valid values otherwise."""
+    if mode not in ("glob", "regex"):
+        raise ConfigError(
+            f"job {job_id}: 'assetMatchMode' must be 'glob' or 'regex', got {mode!r}"
+        )
+    return mode
+
+
+def _validate_asset_pattern(job_id, field_name, pattern, mode):
+    """Validate one assetGlob/assetExcludeGlob value at save (manifest-load)
+    time, never at run time inside the scheduler. In regex mode: reject
+    patterns over ASSET_PATTERN_MAX_LENGTH (cheap guard against
+    catastrophic backtracking -- see the constant's comment) and surface a
+    bad pattern as ConfigError, never a raw re.error."""
+    if mode != "regex" or pattern is None:
+        return
+    if len(pattern) > ASSET_PATTERN_MAX_LENGTH:
+        raise ConfigError(
+            f"job {job_id}: {field_name!r} pattern is too long "
+            f"(max {ASSET_PATTERN_MAX_LENGTH} characters)"
+        )
+    try:
+        re.compile(pattern)
+    except re.error as e:
+        raise ConfigError(f"job {job_id}: {field_name!r} is not a valid regular expression: {e}")
+
+
 def _validate_download_host(job_id, host):
     if not isinstance(host, str) or not host:
         raise ConfigError(
@@ -303,6 +340,12 @@ def parse_manifest_dict(data):
             )
         asset_exclude_glob = (asset_exclude_glob or "").strip() or None
 
+        asset_match_mode = _validate_asset_match_mode(
+            job_id, raw.get("assetMatchMode", "glob")
+        )
+        _validate_asset_pattern(job_id, "assetGlob", asset_glob, asset_match_mode)
+        _validate_asset_pattern(job_id, "assetExcludeGlob", asset_exclude_glob, asset_match_mode)
+
         include_prereleases = bool(raw.get("includePrereleases", False))
         create_if_missing = bool(raw.get("createIfMissing", False))
 
@@ -341,6 +384,7 @@ def parse_manifest_dict(data):
                 package=package,
                 asset_glob=asset_glob,
                 asset_exclude_glob=asset_exclude_glob,
+                asset_match_mode=asset_match_mode,
                 include_prereleases=include_prereleases,
                 create_if_missing=create_if_missing,
                 allowed_download_hosts=allowed_hosts,
