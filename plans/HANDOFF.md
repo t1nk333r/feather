@@ -1,6 +1,6 @@
 # Handoff
 
-Written 2026-08-12 against `1b75e2c`; refreshed 2026-09-02 against `936e1d4` and the live deployment. Read **State** and **Traps** first. The 2026-08-31 "Immediate blocker" (missing `feather-fdroid` GHCR package) is **resolved** — see State.
+Written 2026-08-12 against `1b75e2c`; refreshed 2026-09-02 against `b8be7a2` and the live deployment. Read **State** and **Traps** first. The 2026-08-31 "Immediate blocker" (missing `feather-fdroid` GHCR package) is **resolved** — see State.
 
 ## What this is
 
@@ -15,7 +15,7 @@ A self-hosted iOS AltStore source and third-party Android F-Droid repository. It
 - `Jenkinsfile` — test, build, smoke, then publish pipeline
 - `scripts/migrate_ipas_to_garage.py` — one-shot local-disk → Garage S3 migration
 - `scripts/ipa_inspection.py`, `scripts/apk_inspection.py` — shared artifact inspectors, imported by both `app.py` (via `sys.path` at `app.py:35-36`) and the importers
-- `tests/` — **346 passed, 1 skipped** at `936e1d4`; no real provider calls
+- `tests/` — **365 passed, 1 skipped** at `b8be7a2`; no real provider calls
 - `plans/` — 84 numbered plans; `README.md` is the status index
 
 **Test command** (the `ADMIN_PASSWORD` prefix is mandatory — the app refuses to import without it):
@@ -26,7 +26,7 @@ ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q -p no:cacheprovider
 
 ## State
 
-All plans through 084 are implemented or explicitly rejected; **085 is executed but unreviewed** (see "Not finished"). See `plans/README.md` for historical statuses and deferred findings. `main` is at `936e1d4`, pushed, working tree clean apart from the untracked `run-local.sh`.
+**All plans through 085 are implemented or explicitly rejected — the backlog is empty.** See `plans/README.md` for historical statuses and deferred findings. `main` is at `b8be7a2`, pushed, working tree clean apart from the untracked `run-local.sh`.
 
 Jenkins tests Python 3.11 and 3.14, checks the `requests` pin, builds and smokes all three images, then publishes `ghcr.io/t1nk333r/feather`, `feather-bot`, and `feather-fdroid` only after every smoke stage passes.
 
@@ -34,11 +34,19 @@ The Android QR encodes a standard `fdroidrepos://` deep link while the manual re
 
 ## What changed on 2026-09-02
 
-**Repo-import now handles Android.** Plans 083 and 084 (both merged) taught the release-import path to select, validate and publish APKs alongside IPAs. 085 is written and executed but **not merged**. All three consumers share one engine: the cron `release-import` container, the admin UI's "Import from Repo", and the auto-import watcher.
+**Repo-import now handles Android.** Plans 083, 084 and 085 (all merged) taught the release-import path to select, validate and publish APKs alongside IPAs. All three consumers share one engine: the cron `release-import` container, the admin UI's "Import from Repo", and the auto-import watcher.
 
 - Platform is inferred from the asset's file extension; one job can publish an IPA **and** an APK from the same release.
 - Selection allows **at most one matching asset per platform** — the guard against an ambiguous release publishing the wrong binary.
 - `bundleIdentifier` and `package` are both **optional**. Each is auto-detected from the artifact (Info.plist / AndroidManifest) and acts only as an assertion when set.
+- Asset matching has an opt-in **`assetMatchMode: glob | regex`** (plan 085). Regex uses `re.fullmatch` + `re.IGNORECASE`, mirroring fnmatch's whole-name semantics. Patterns are compiled and length-capped (200 chars) **at save time**, never in the scheduler thread.
+
+**Multi-ABI releases are why regex exists.** `RyanYuuki/AnymeX` ships one APK per ABI. Verified behaviour:
+
+```
+glob  '*.apk'             -> ProviderError: release has 2 android assets matching, expected at most one
+regex '.*arm64-v8a\.apk'  -> 1 candidate: AnymeX-Android-arm64-v8a.apk
+```
 
 **The GHCR blocker is resolved.** All three packages issue anonymous pull tokens and resolve `:latest` (verified 2026-09-02):
 
@@ -54,9 +62,9 @@ The cause was never a deleted package: **the pipeline had never produced a succe
 
 ## Not finished
 
-- **Plan 085 (regex asset matching) is executed but NOT reviewed or merged.** The branch is `advisor/085-regex-asset-matching` in worktree `.claude/worktrees/agent-af940c69214b03182`. It reports 364 passing. It branched from `dba580e`, which **predates** the `936e1d4` fix, and it edits the same file (`scripts/release_source_ingest.py`) — expect to reconcile. Its branch still contains `test_github_selection_ignores_apk_when_job_has_no_package`, a test `936e1d4` deleted because it asserted buggy behaviour. Do not let that test come back.
-- **No APK has been imported end to end for real.** Every test is offline by design. The live `/inspect` call against `RyanYuuki/AnymeX` correctly tagged `AnymeX-Android-arm64-v8a.apk` and `AnymeX-Android-armeabi-v7a.apk` as `platform: android`, but nothing has been downloaded and published yet.
-- **Multi-ABI releases need plan 085.** AnymeX ships one APK per ABI, so a `*.apk` glob trips the one-per-platform rule. 085 adds an opt-in regex mode to pin one. Publishing *every* ABI variant was deliberately rejected pending a decision on F-Droid versionCode collisions.
+- **`b8be7a2` is not deployed.** The running container was built from `936e1d4` (created 2026-09-02T12:44Z) and therefore has **no regex mode**. Trigger a Jenkins build of `main`, confirm SUCCESS, then recreate `altstore-source-manager` (see Deployment).
+- **No APK has been imported end to end for real.** Every test is offline by design. A live `/inspect` against `RyanYuuki/AnymeX` correctly tagged both ABI APKs as `platform: android`, but nothing has been downloaded and published. **This is the highest-value next action** — use a single-APK release, or regex mode for a multi-ABI one.
+- **`parse_manifest_dict` is still over-strict.** `scripts/release_source_ingest.py:330` requires "at least one of `bundleIdentifier` or `package`" for **CLI manifest** jobs — the same rule removed from the UI paths in `fd38864`, because both fields are auto-detected. An Android-only cron job is forced to declare a package it does not need. Pre-existing from plan 083, left deliberately rather than widen an unrelated merge.
 
 ## Deployment
 
@@ -98,7 +106,7 @@ Ordered by urgency. None of these are code.
 7. **Enable and protect Android signing state.** Set `COMPOSE_PROFILES=android`, run `chown -R 999:999 data/fdroid`, and back up both `data/fdroid/keystore.p12` and `FDROID_KEYSTORE_PASSWORD`. Losing either changes the repository fingerprint for every subscriber.
 8. ~~**Restore the missing `feather-fdroid` GHCR package.**~~ **Resolved 2026-09-02** — all three packages pull anonymously. The package was never deleted; the pipeline had simply never produced a successful build.
 9. **Try one real APK import.** Nothing has gone through the Android path end to end. Use a single-APK release first (a multi-ABI project needs plan 085). This is the highest-value next action.
-10. **Review and merge plan 085**, or abandon its branch. Leaving an unreviewed executor branch around is how work gets lost.
+10. ~~**Review and merge plan 085.**~~ **Done 2026-09-02** (`b8be7a2`). Deploy it — see "Not finished".
 
 ## Local development
 
@@ -115,7 +123,7 @@ mkdir -p data/{ipas,icons,uploads,backups,fdroid/metadata}
 
 Docker is not usable from this workstation: the daemon runs, but the user is not in the `docker` group and `/var/run/docker.sock` is `root:docker`. Builds happen on Jenkins, not locally.
 
-**Leftover executor branches.** `advisor/082`, `advisor/083`, `advisor/084` are merged and their worktrees can be pruned (`git worktree remove`, then delete the branch and its `worktree-agent-*` pointer). `advisor/085` is the only one still holding unmerged work. `worktree-agent-ab89652b51670fac4` and `worktree-agent-ade6674b6dbfeba85` are older orphans.
+**Leftover executor branches.** `advisor/082` through `advisor/085` are all merged and their worktrees can be pruned (`git worktree remove`, then delete the branch and its `worktree-agent-*` pointer). No branch now holds unmerged work. `worktree-agent-ab89652b51670fac4` and `worktree-agent-ade6674b6dbfeba85` are older orphans.
 
 ## Traps
 
@@ -158,6 +166,8 @@ Each of these cost real debugging time. They are the reason this file exists.
 **Do not filter selection on a field that is auto-detected.** Plan 083 made `_group_matches_by_platform` skip a platform whose identity field was unset. Since both fields are optional and auto-detected, a blank field silently matched nothing and surfaced as `no eligible release had ... asset matching '<glob>'` — blaming the operator's glob. Fixed in `936e1d4`; the identity is an assertion applied *after* inspection, never a selector.
 
 **A running container does not prove its registry image still exists.** Docker can continue running a cached `feather-fdroid` image after the GHCR package is deleted or made inaccessible. Test recovery with an anonymous pull on a host without that cached image before redeploying. Never delete the running container merely to test registry availability.
+
+**A cherry-picked branch can silently undo a fix made while it was running.** Plan 085's branch was based before `936e1d4` and edited the same file. After cherry-picking, two things had to be re-checked explicitly: that the identity filter had not come back, and that the test `936e1d4` deleted had not been resurrected. Neither had — but `git` would not have complained if they had. After merging any long-running branch, re-verify the fixes that landed while it ran.
 
 ## Verifying a deployment
 
