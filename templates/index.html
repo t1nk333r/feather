@@ -824,12 +824,20 @@
                     <input type="text" name="package" placeholder="leave blank to auto-detect from the APK">
                 </div>
                 <div class="form-group">
-                    <label>Asset Glob:</label>
-                    <input type="text" name="assetGlob" value="*.ipa" placeholder="*.ipa — for both platforms, e.g. *.{ipa,apk}">
+                    <label>Match Mode:</label>
+                    <select name="assetMatchMode">
+                        <option value="glob">Glob</option>
+                        <option value="regex">Regular expression</option>
+                    </select>
                 </div>
                 <div class="form-group">
-                    <label>Exclude Glob (optional):</label>
-                    <input type="text" name="assetExcludeGlob" placeholder="*-tvOS.ipa">
+                    <label>Asset Pattern:</label>
+                    <input type="text" name="assetGlob" value="*.ipa" placeholder="*.ipa — for both platforms, e.g. *.{ipa,apk} — or, in regex mode, .*arm64-v8a\.apk to pin one ABI">
+                    <small style="display: block; margin-top: 5px; color: var(--label-secondary); font-size: 0.85em;">Glob mode: a shell-style pattern like <code>*.apk</code>. Regex mode: a full-match regular expression, e.g. <code>.*arm64-v8a\.apk</code> to pin exactly one asset out of several.</small>
+                </div>
+                <div class="form-group">
+                    <label>Exclude Pattern (optional):</label>
+                    <input type="text" name="assetExcludeGlob" placeholder="*-tvOS.ipa — or, in regex mode, .*-tvOS\.ipa">
                 </div>
                 <div class="form-group">
                     <div style="display: flex; align-items: center; gap: 8px;">
@@ -1484,6 +1492,7 @@
                 package: f.package.value.trim(),
                 assetGlob: f.assetGlob.value.trim() || '*.ipa',
                 assetExcludeGlob: f.assetExcludeGlob.value.trim(),
+                assetMatchMode: f.assetMatchMode.value,
                 includePrereleases: f.includePrereleases.checked,
                 createIfMissing: f.createIfMissing.checked,
                 name: f.name.value.trim(),
@@ -1496,7 +1505,7 @@
         function selectorSignature(body) {
             return JSON.stringify([
                 body.provider, body.project, body.assetGlob, body.assetExcludeGlob,
-                body.includePrereleases, body.allowedDownloadHosts,
+                body.assetMatchMode, body.includePrereleases, body.allowedDownloadHosts,
             ]);
         }
 
@@ -1660,6 +1669,7 @@
                     package: f.package.value.trim(),
                     assetGlob: f.assetGlob.value.trim() || '*.ipa',
                     assetExcludeGlob: f.assetExcludeGlob.value.trim(),
+                    assetMatchMode: f.assetMatchMode.value,
                     includePrereleases: f.includePrereleases.checked,
                     createIfMissing: f.createIfMissing.checked,
                     name: f.name.value.trim(),
@@ -3038,6 +3048,7 @@
             f.package.value = job.package || '';
             f.assetGlob.value = job.assetGlob || '*.ipa';
             f.assetExcludeGlob.value = job.assetExcludeGlob || '';
+            f.assetMatchMode.value = job.assetMatchMode || 'glob';
             f.includePrereleases.checked = !!job.includePrereleases;
             f.createIfMissing.checked = !!job.createIfMissing;
             f.name.value = job.name || '';
