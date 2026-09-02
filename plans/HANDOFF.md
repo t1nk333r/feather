@@ -1,6 +1,6 @@
 # Handoff
 
-Written 2026-08-12 against `1b75e2c`; refreshed 2026-08-31 against `3e0cd8a` and the live deployment. Read **Immediate blocker** and **Traps** first.
+Written 2026-08-12 against `1b75e2c`; refreshed 2026-09-02 against `936e1d4` and the live deployment. Read **State** and **Traps** first. The 2026-08-31 "Immediate blocker" (missing `feather-fdroid` GHCR package) is **resolved** — see State.
 
 ## What this is
 
@@ -14,8 +14,9 @@ A self-hosted iOS AltStore source and third-party Android F-Droid repository. It
 - `Dockerfile.bot`, `Dockerfile.fdroid` — optional service images
 - `Jenkinsfile` — test, build, smoke, then publish pipeline
 - `scripts/migrate_ipas_to_garage.py` — one-shot local-disk → Garage S3 migration
-- `tests/` — latest CI result is 307 passed and 1 skipped on both supported Python versions; no real provider calls
-- `plans/` — 81 numbered plans; `README.md` is the status index
+- `scripts/ipa_inspection.py`, `scripts/apk_inspection.py` — shared artifact inspectors, imported by both `app.py` (via `sys.path` at `app.py:35-36`) and the importers
+- `tests/` — **346 passed, 1 skipped** at `936e1d4`; no real provider calls
+- `plans/` — 84 numbered plans; `README.md` is the status index
 
 **Test command** (the `ADMIN_PASSWORD` prefix is mandatory — the app refuses to import without it):
 
@@ -25,45 +26,37 @@ ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q -p no:cacheprovider
 
 ## State
 
-All currently selected plans through 081 are implemented or explicitly rejected; see `plans/README.md` for historical statuses and deferred findings. The working tree was clean before this handoff-only edit. `main` is at `3e0cd8a` (`fix(android): encode QR as F-Droid deep link`).
+All plans through 084 are implemented or explicitly rejected; **085 is executed but unreviewed** (see "Not finished"). See `plans/README.md` for historical statuses and deferred findings. `main` is at `936e1d4`, pushed, working tree clean apart from the untracked `run-local.sh`.
 
 Jenkins tests Python 3.11 and 3.14, checks the `requests` pin, builds and smokes all three images, then publishes `ghcr.io/t1nk333r/feather`, `feather-bot`, and `feather-fdroid` only after every smoke stage passes.
 
-The latest observed successful Jenkins run for `3e0cd8a` passed 307 tests with 1 skip on each Python version and deployed the refreshed core image. The Android QR now encodes a standard `fdroidrepos://` deep link while the manual repository address remains HTTPS.
+The Android QR encodes a standard `fdroidrepos://` deep link while the manual repository address remains HTTPS.
 
-## Immediate blocker — restore the GHCR F-Droid image
+## What changed on 2026-09-02
 
-The live Android repository is healthy, but a cold pull of its sidecar image is not:
+**Repo-import now handles Android.** Plans 083 and 084 (both merged) taught the release-import path to select, validate and publish APKs alongside IPAs. 085 is written and executed but **not merged**. All three consumers share one engine: the cron `release-import` container, the admin UI's "Import from Repo", and the auto-import watcher.
 
-```text
-docker pull ghcr.io/t1nk333r/feather-fdroid:latest
-Error response from daemon: Head "https://ghcr.io/v2/t1nk333r/feather-fdroid/manifests/latest": unauthorized
-```
+- Platform is inferred from the asset's file extension; one job can publish an IPA **and** an APK from the same release.
+- Selection allows **at most one matching asset per platform** — the guard against an ambiguous release publishing the wrong binary.
+- `bundleIdentifier` and `package` are both **optional**. Each is auto-detected from the artifact (Info.plist / AndroidManifest) and acts only as an assertion when set.
 
-Verified on 2026-08-31:
+**The GHCR blocker is resolved.** All three packages issue anonymous pull tokens and resolve `:latest` (verified 2026-09-02):
 
-- `feather` and `feather-bot` issue anonymous GHCR pull tokens (`HTTP 200`).
-- `feather-fdroid` does not (`HTTP 401`), its public package page returns 404, and it is absent from the public package list.
-- The operator reports that `feather-fdroid` is also absent while signed into the owning GitHub account. Treat the package as deleted, not merely private, unless the authenticated GitHub package view proves otherwise.
-- Jenkins successfully pushed `feather-fdroid` tags in an earlier run. The live `feather-fdroid-index` container is therefore running a cached local image; this does **not** prove that the registry package still exists.
-- The local GitHub CLI credential has repository/workflow scopes but no package scope, so it cannot inspect or repair this package. Do not print, copy, or replace any credential value.
+| package | `:latest` digest |
+|---|---|
+| `feather` | `sha256:84367cd2…` |
+| `feather-bot` | `sha256:5b7da003…` |
+| `feather-fdroid` | `sha256:81fcf533…` |
 
-Recovery sequence:
+The cause was never a deleted package: **the pipeline had never produced a successful build**, so nothing was being pushed. `d7eeem/feather/main` had `lastSuccessfulBuild: None` until build #4 on 2026-09-02. Fixing the build (see the `.dockerignore` trap) fixed the registry.
 
-1. Run a Jenkins build of current `main`. The `Push images` stage at `Jenkinsfile:170-190` must push `feather-fdroid:main`, `:latest`, and `:sha-3e0cd8a` using the existing `ghcr-pat` Jenkins credential.
-2. Confirm the Jenkins log contains a successful digest line for all three `feather-fdroid` tags and ends in `Finished: SUCCESS`. If the push reports `denied`, stop and repair the Jenkins credential's GHCR package-write permission; do not work around it with an untracked local image.
-3. While signed into GitHub as `t1nk333r`, confirm the recreated package appears under the account's Packages tab. Make it public if anonymous deployment pulls are desired. GitHub treats public visibility as irreversible, so this remains an operator decision.
-4. Verify anonymously from a Docker host that has no cached copy:
+**Jenkins is green and repeatable** — builds #4–#9 all SUCCESS, 90–122 s each.
 
-   ```bash
-   docker pull ghcr.io/t1nk333r/feather-fdroid:latest
-   ```
+## Not finished
 
-   Expected: pull succeeds without `docker login`. A cached-host `docker image inspect` is not sufficient verification.
-5. In Dockhand, pull the stack images and redeploy the Feather stack without changing or regenerating `data/fdroid/keystore.p12` or `FDROID_KEYSTORE_PASSWORD`.
-6. Run every Android check in **Verifying a deployment** below. The repository fingerprint before and after redeploy must be identical.
-
-STOP and report instead of improvising if Jenkins succeeds but no authenticated package appears, the package owner is not `t1nk333r`, the signing fingerprint changes, or recovery appears to require deleting/recreating `data/fdroid`.
+- **Plan 085 (regex asset matching) is executed but NOT reviewed or merged.** The branch is `advisor/085-regex-asset-matching` in worktree `.claude/worktrees/agent-af940c69214b03182`. It reports 364 passing. It branched from `dba580e`, which **predates** the `936e1d4` fix, and it edits the same file (`scripts/release_source_ingest.py`) — expect to reconcile. Its branch still contains `test_github_selection_ignores_apk_when_job_has_no_package`, a test `936e1d4` deleted because it asserted buggy behaviour. Do not let that test come back.
+- **No APK has been imported end to end for real.** Every test is offline by design. The live `/inspect` call against `RyanYuuki/AnymeX` correctly tagged `AnymeX-Android-arm64-v8a.apk` and `AnymeX-Android-armeabi-v7a.apk` as `platform: android`, but nothing has been downloaded and published yet.
+- **Multi-ABI releases need plan 085.** AnymeX ships one APK per ABI, so a `*.apk` glob trips the one-per-platform rule. 085 adds an opt-in regex mode to pin one. Publishing *every* ABI variant was deliberately rejected pending a decision on F-Droid versionCode collisions.
 
 ## Deployment
 
@@ -86,6 +79,12 @@ docker compose pull && docker compose up -d      # NOT --build
 ```
 `--build` gives you a locally built image instead of the CI-verified one — same source, different artifact, silently bypassing what CI checked.
 
+**Deploying without shell access to the box.** Both a `dockhand` and a `jenkins` MCP server are configured for Claude Code globally in `~/.claude.json` (HTTP transport, bearer in `headers`). If a session does not load them as tools, they can still be driven directly over HTTP: `initialize` → `notifications/initialized` → `tools/call`, carrying the returned `Mcp-Session-Id`. Read the header out of `~/.claude.json` into a variable; **never echo it**.
+
+Useful calls: `getJob`/`getBuild`/`getBuildLog`/`triggerBuild` (Jenkins, job `d7eeem/feather/main`); `list_containers`/`get_container`/`batch_update_containers` (Dockhand, `environmentId: 1`, name `truenas`). Note the argument names are `environmentId`, `containerId`, `jobFullName` — not `env`/`id`/`job` — and container IDs are the full 64 characters.
+
+**Deploy the app container alone, not the whole stack.** `batch_update_containers` with just `altstore-source-manager` re-pulls and recreates only the app. A whole-stack recreate would also try to re-pull `feather-fdroid`; when that package was unavailable, that would have taken the Android sidecar down. Prefer the narrow operation unless the sidecar image itself changed.
+
 ## Outstanding — operator tasks
 
 Ordered by urgency. None of these are code.
@@ -97,7 +96,26 @@ Ordered by urgency. None of these are code.
 5. **Garage is configured but not in use.** `STORAGE_BACKEND` defaults to `local`. To switch: fill the Garage keys, run the migration **dry-run first** (expect 8 uploadable / 3 corrupt-skipped / 2 orphans), then `--apply`, *then* set `STORAGE_BACKEND=garage`. Doing it in the other order makes every existing app un-installable on restart.
 6. **`developerName` is `"Unknown"`** on anything the bot created (Plan 023's default), and `localizedDescription` is empty. Cosmetic; fix in the web UI.
 7. **Enable and protect Android signing state.** Set `COMPOSE_PROFILES=android`, run `chown -R 999:999 data/fdroid`, and back up both `data/fdroid/keystore.p12` and `FDROID_KEYSTORE_PASSWORD`. Losing either changes the repository fingerprint for every subscriber.
-8. **Restore the missing `feather-fdroid` GHCR package.** Follow **Immediate blocker** above. `feather` and `feather-bot` are already anonymously pullable; `feather-fdroid` is the only failing image.
+8. ~~**Restore the missing `feather-fdroid` GHCR package.**~~ **Resolved 2026-09-02** — all three packages pull anonymously. The package was never deleted; the pipeline had simply never produced a successful build.
+9. **Try one real APK import.** Nothing has gone through the Android path end to end. Use a single-APK release first (a multi-ABI project needs plan 085). This is the highest-value next action.
+10. **Review and merge plan 085**, or abandon its branch. Leaving an unreviewed executor branch around is how work gets lost.
+
+## Local development
+
+No `.env` or `data/` exists in a fresh clone, and the app has **no dotenv support** — the caller must export the environment. `run-local.sh` (untracked, created 2026-09-02) sources `.env` and starts waitress on port 5000:
+
+```bash
+python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+mkdir -p data/{ipas,icons,uploads,backups,fdroid/metadata}
+# .env needs at minimum: ADMIN_PASSWORD, SECRET_KEY, DATA_DIR=./data, PORT, PUBLIC_BASE_URL
+./run-local.sh
+```
+
+`DATA_DIR` defaults to the container path `/app/data`, so a local run **must** override it.
+
+Docker is not usable from this workstation: the daemon runs, but the user is not in the `docker` group and `/var/run/docker.sock` is `root:docker`. Builds happen on Jenkins, not locally.
+
+**Leftover executor branches.** `advisor/082`, `advisor/083`, `advisor/084` are merged and their worktrees can be pruned (`git worktree remove`, then delete the branch and its `worktree-agent-*` pointer). `advisor/085` is the only one still holding unmerged work. `worktree-agent-ab89652b51670fac4` and `worktree-agent-ade6674b6dbfeba85` are older orphans.
 
 ## Traps
 
@@ -128,6 +146,16 @@ Each of these cost real debugging time. They are the reason this file exists.
 **The F-Droid sidecar must run as root.** Adding `user:` to that service breaks `fdroidserver` because its upstream image requires root-owned paths and setup.
 
 **`./data/fdroid` is a separate bind mount.** Moving an uploaded APK into it may raise `EXDEV`; `AndroidRepoManager.add_apk` handles that with a hidden staged copy plus atomic replace.
+
+**A missing GHCR package may mean the build never succeeded.** `feather-fdroid` looked deleted for days — 401 on the anon token, 404 on the package page. It was neither deleted nor private: `d7eeem/feather/main` had `lastSuccessfulBuild: None`, so the push stage had never run. Check `getJob`'s `lastSuccessfulBuild` before theorising about the registry.
+
+**A new file a Dockerfile COPYs must also be re-admitted in `.dockerignore`.** This is the deny-by-default trap below, and it bit for real on 2026-09-02: plan 083 added `COPY scripts/apk_inspection.py` without the matching `!` line, and every build failed with `failed to compute cache key: ... "/scripts/apk_inspection.py": not found`. **No test can catch this** — nothing in `tests/` builds an image. When a plan adds a file the image needs, the `.dockerignore` line is part of that change.
+
+**Editing a plan file moves `main` under an in-flight executor.** Refreshing plan 084's line numbers mid-flight meant its branch no longer fast-forwarded, forcing a cherry-pick. Dispatch from a stable base, or accept the cherry-pick and verify `main` is byte-identical to the reviewed branch afterwards.
+
+**Line numbers in a plan go stale the moment another plan lands.** Plan 083 shifted `app.py` by 12 lines, invalidating every citation in the then-unstarted plan 084. A stale excerpt is a STOP condition for an executor. Re-verify a plan's citations right before dispatching it.
+
+**Do not filter selection on a field that is auto-detected.** Plan 083 made `_group_matches_by_platform` skip a platform whose identity field was unset. Since both fields are optional and auto-detected, a blank field silently matched nothing and surfaced as `no eligible release had ... asset matching '<glob>'` — blaming the operator's glob. Fixed in `936e1d4`; the identity is an assertion applied *after* inspection, never a selector.
 
 **A running container does not prove its registry image still exists.** Docker can continue running a cached `feather-fdroid` image after the GHCR package is deleted or made inaccessible. Test recovery with an anonymous pull on a host without that cached image before redeploying. Never delete the running container merely to test registry availability.
 

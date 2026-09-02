@@ -545,6 +545,20 @@ Sixteen commits landed since the 2026-08-26 reconcile at `764bd16` (plan 073's n
 - **`plans/HANDOFF.md` has uncommitted changes** in the working tree (a substantial refresh: new "Immediate blocker" section on the missing `feather-fdroid` GHCR package, Dockhand replacing Dockge as the control plane, and a new trap about cached images). Left uncommitted — committing is the operator's call. Its plan count was corrected from 80 to 81 as part of this reconcile.
 - **Not verified**: the Docker image builds, the live Garage endpoints, the production Telegram worker, the GHCR package state described in HANDOFF's "Immediate blocker", and any on-device behaviour.
 
+## Reconcile log (2026-09-02, HEAD `936e1d4`)
+
+Same-day follow-on to the 2026-08-31 reconcile. Plans 082–084 executed and merged; 085 written and executed but **not** merged.
+
+- **Suite** 307 → **346 passed, 1 skipped**. Plans 083 (engine) and 084 (watcher + UI) landed APK support across all three import paths.
+- **Three defects found after the fact, all traceable to plan 083's own text, all fixed**:
+  - `082b12a` — 083 added `COPY scripts/apk_inspection.py` to the `Dockerfile` but not the `!` line in the deny-by-default `.dockerignore`. Every Jenkins build failed. No test could catch it; nothing in `tests/` builds an image.
+  - `fd38864` — the "at least one of bundleIdentifier or package" rule was unnecessary: both fields are auto-detected from the artifact, and the watcher's iOS path already reads the id out of the IPA before touching the catalog.
+  - `936e1d4` — `_group_matches_by_platform` dropped every asset for a platform whose identity field was blank, surfacing as `no eligible release had ... asset matching '<glob>'` and blaming the operator's glob. No such filter existed before 083 (`dc43400` has zero occurrences). Selection is by pattern alone; identity is an assertion after inspection.
+- **CI was never green before today.** `d7eeem/feather/main` had `lastSuccessfulBuild: None`; build #4 was the first success, and #4–#9 have all passed. This also explains the "missing" `feather-fdroid` GHCR package — nothing had ever been pushed. All three packages now pull anonymously.
+- **Deployed and verified live** at each step via the Dockhand MCP bridge, recreating only `altstore-source-manager` so the `feather-fdroid` sidecar was never at risk.
+- **Real-world evidence, first time**: a live `/inspect` against `RyanYuuki/AnymeX` tagged `AnymeX-Android-arm64-v8a.apk` and `AnymeX-Android-armeabi-v7a.apk` as `platform: android` — confirming 084 works and that multi-ABI releases need 085.
+- **Not verified**: no APK has been imported end to end. Every test is offline by design.
+
 ## Findings considered and rejected
 
 Recorded so nobody re-audits them:
