@@ -124,6 +124,7 @@ class Job:
     bundle_identifier: str = None
     package: str = None
     asset_exclude_glob: str = None
+    asset_match_mode: str = "glob"
     include_prereleases: bool = False
     create_if_missing: bool = False
     allowed_download_hosts: frozenset = field(default_factory=frozenset)
@@ -421,13 +422,31 @@ def github_list_releases(session, project, token, timeout=30, job_id=None):
 
 
 def _asset_match_state(job, name):
-    """Return provider-neutral include/exclude selector state for one asset."""
-    normalized = (name or "").lower()
-    included = fnmatch.fnmatch(normalized, job.asset_glob.lower())
-    excluded = bool(
-        job.asset_exclude_glob
-        and fnmatch.fnmatch(normalized, job.asset_exclude_glob.lower())
-    )
+    """Return provider-neutral include/exclude selector state for one asset.
+
+    Two modes, selected by `job.asset_match_mode`:
+    - "glob" (default): fnmatch against the whole (lower-cased) name --
+      unchanged from before regex mode existed.
+    - "regex": re.fullmatch against the *original* name with
+      re.IGNORECASE, so character classes behave predictably instead of
+      being matched against a pre-lowercased string. fullmatch (not
+      search) mirrors fnmatch's whole-name semantics -- search would
+      silently change what existing-style patterns mean.
+    """
+    name = name or ""
+    if job.asset_match_mode == "regex":
+        included = bool(re.fullmatch(job.asset_glob, name, re.IGNORECASE))
+        excluded = bool(
+            job.asset_exclude_glob
+            and re.fullmatch(job.asset_exclude_glob, name, re.IGNORECASE)
+        )
+    else:
+        normalized = name.lower()
+        included = fnmatch.fnmatch(normalized, job.asset_glob.lower())
+        excluded = bool(
+            job.asset_exclude_glob
+            and fnmatch.fnmatch(normalized, job.asset_exclude_glob.lower())
+        )
     return {"included": included, "excluded": excluded, "matched": included and not excluded}
 
 
