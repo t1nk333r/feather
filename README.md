@@ -98,6 +98,7 @@ Summary:
 | `GET /api/health`; `GET /api/health-monitor`; `POST /api/health-monitor/config` | session | health scan, history, and scheduling |
 | `GET /api/catalog-backups`; `GET /api/catalog-backups/<filename>/download`; `POST /api/catalog-backups/preview`; `/api/catalog-backups/restore` | session | catalog-only recovery |
 | `POST /api/reconcile-icons`; `/api/storage-selftest`; `GET /api/diagnostics` | session | storage operations and diagnostics |
+| `POST /api/certificate/inspect` | session | inspect a `.p12` + `.mobileprovision` pair; signs and stores nothing |
 | `GET /api/android/status`; `GET /api/android/apps` | session | Android status and app inventory |
 | `POST /api/android/add-apk`; `/api/android/update-app`; `/api/android/delete-version`; `/api/android/delete-app`; `/api/android/repo-config`; `/api/android/request-update` | session | Android/F-Droid mutations |
 

@@ -1,6 +1,6 @@
 # Handoff
 
-Written 2026-08-12 against `1b75e2c`; refreshed 2026-09-02 against `b8be7a2` and the live deployment. Read **State** and **Traps** first. The 2026-08-31 "Immediate blocker" (missing `feather-fdroid` GHCR package) is **resolved** — see State.
+Written 2026-08-12 against `1b75e2c`; refreshed 2026-09-18 against the certificate-inspection work (plans 086–087). Read **State** and **Traps** first. The 2026-08-31 "Immediate blocker" (missing `feather-fdroid` GHCR package) is **resolved** — see State.
 
 ## What this is
 
@@ -15,8 +15,9 @@ A self-hosted iOS AltStore source and third-party Android F-Droid repository. It
 - `Jenkinsfile` — test, build, smoke, then publish pipeline
 - `scripts/migrate_ipas_to_garage.py` — one-shot local-disk → Garage S3 migration
 - `scripts/ipa_inspection.py`, `scripts/apk_inspection.py` — shared artifact inspectors, imported by both `app.py` (via `sys.path` at `app.py:35-36`) and the importers
-- `tests/` — **365 passed, 1 skipped** at `b8be7a2`; no real provider calls
-- `plans/` — 84 numbered plans; `README.md` is the status index
+- `scripts/certificate_inspection.py` — p12 + `.mobileprovision` inspector (plan 087); stdlib for the profile, `cryptography` for the p12
+- `tests/` — **381 passed, 1 skipped**; no real provider calls
+- `plans/` — 86 numbered plans; `README.md` is the status index
 
 **Test command** (the `ADMIN_PASSWORD` prefix is mandatory — the app refuses to import without it):
 
@@ -26,11 +27,42 @@ ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q -p no:cacheprovider
 
 ## State
 
-**All plans through 085 are implemented or explicitly rejected — the backlog is empty.** See `plans/README.md` for historical statuses and deferred findings. `main` is at `b8be7a2`, pushed, working tree clean apart from the untracked `run-local.sh`.
+**All plans through 087 are implemented or explicitly rejected — the backlog is empty.** See `plans/README.md` for historical statuses and deferred findings. Working tree is clean apart from the untracked `run-local.sh` and `resume.txt`.
 
 Jenkins tests Python 3.11 and 3.14, checks the `requests` pin, builds and smokes all three images, then publishes `ghcr.io/t1nk333r/feather`, `feather-bot`, and `feather-fdroid` only after every smoke stage passes.
 
 The Android QR encodes a standard `fdroidrepos://` deep link while the manual repository address remains HTTPS.
+
+## What changed on 2026-09-18
+
+**Certificate inspection, and a deliberate refusal to sign.** Plan 086 researched
+what it would take to hold a signing certificate and sign uploaded IPAs
+server-side, and rejected it from primary sources: `codesign` is macOS-only by
+Apple's own words, AltStore *and* SideStore both strip the incoming signature
+and re-sign with the **subscriber's** identity (so a signed upload is
+behaviourally identical to an unsigned one), a Development/Ad-Hoc identity is
+UDID-bound to at most 100 devices, and the only non-UDID-bound iOS profile type
+is Enterprise, licensed to employees only.
+
+Plan 087 implements what was actually being asked underneath that request:
+`POST /api/certificate/inspect` plus a Certificate panel that takes a `.p12` and
+a `.mobileprovision` and reports whether the pair is usable, and on which
+devices. Nothing is signed, nothing is stored, the passphrase is never
+persisted or logged.
+
+- The **headline is the pair match**: whether the p12's leaf appears in the
+  profile's `DeveloperCertificates`. The iOS Feather app never performs this
+  check, and it is what decides whether the pair can sign at all.
+- **Two independent expiries** (the certificate's `notAfter`, the profile's
+  `ExpirationDate`) and **three device-binding states** (UDID-bound with the
+  count, all-devices, App Store with no device list) are each reported
+  explicitly, because a boolean loses the useful answer.
+- **Wrong passphrase is distinguished from an unusable file.** pyca raises
+  `ValueError` for both; a handler that collapses them reports a typo as a
+  corrupt certificate.
+- Storing the pair was rejected on custody grounds: it would put a reusable
+  code-signing identity behind the single shared admin password, with nothing
+  here to encrypt it under (`SECRET_KEY` is regenerated per boot when unset).
 
 ## What changed on 2026-09-02
 
@@ -65,6 +97,7 @@ The cause was never a deleted package: **the pipeline had never produced a succe
 - **`b8be7a2` is not deployed.** The running container was built from `936e1d4` (created 2026-09-02T12:44Z) and therefore has **no regex mode**. Trigger a Jenkins build of `main`, confirm SUCCESS, then recreate `altstore-source-manager` (see Deployment).
 - **No APK has been imported end to end for real.** Every test is offline by design. A live `/inspect` against `RyanYuuki/AnymeX` correctly tagged both ABI APKs as `platform: android`, but nothing has been downloaded and published. **This is the highest-value next action** — use a single-APK release, or regex mode for a multi-ABI one.
 - **`parse_manifest_dict` is still over-strict.** `scripts/release_source_ingest.py:330` requires "at least one of `bundleIdentifier` or `package`" for **CLI manifest** jobs — the same rule removed from the UI paths in `fd38864`, because both fields are auto-detected. An Android-only cron job is forced to declare a package it does not need. Pre-existing from plan 083, left deliberately rather than widen an unrelated merge.
+- **The certificate panel is not deployed either.** Plan 087 adds the first cryptographic dependency (`cryptography==50.0.1`), so the image must actually rebuild before `/api/certificate/inspect` exists in the running container; a stale image will 404 the route rather than fail loudly.
 
 ## Deployment
 
