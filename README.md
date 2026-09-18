@@ -108,6 +108,12 @@ The six public catalog delivery routes—`/source.json`, `/ipas/...`, `/icons/..
 `/qr`, `/fdroid/repo/...`, and `/fdroid/qr`—must never require authentication.
 iOS and F-Droid clients fetch them without credentials.
 
+The write API's multipart field names are `ipaFile` and `apkFile`, not `file`;
+a wrong one fails as a validation error that reads like a missing artifact. For
+unattended clients — the login/session flow, the per-endpoint field contract,
+how to confirm a publish actually landed, and the credential-free
+release-import alternative — see [`UPLOADING.md`](./UPLOADING.md).
+
 ## Updating a deployment
 
 ```bash
