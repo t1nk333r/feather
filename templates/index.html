@@ -1043,6 +1043,31 @@
                 <p style="color: var(--label-secondary); text-align: center; padding: 40px;">Loading...</p>
             </div>
         </div>
+
+        <div id="certificate" class="tab-content">
+            <h2 style="margin-bottom: 20px;">Certificate</h2>
+            <p style="color: var(--label-secondary); margin-bottom: 20px;">
+                Inspects a signing certificate (.p12) together with a provisioning profile
+                (.mobileprovision) and reports what they are. Nothing is signed and nothing
+                is stored: the files are parsed in memory for this one response.
+            </p>
+            <form id="certificateInspectForm" autocomplete="off">
+                <div class="form-group">
+                    <label>Signing Certificate (.p12):</label>
+                    <input type="file" id="p12File" name="p12File" accept=".p12" style="width: 100%;">
+                </div>
+                <div class="form-group">
+                    <label>Provisioning Profile (.mobileprovision):</label>
+                    <input type="file" id="provisionFile" name="provisionFile" accept=".mobileprovision" style="width: 100%;">
+                </div>
+                <div class="form-group">
+                    <label>P12 Passphrase (leave blank if the .p12 has no passphrase):</label>
+                    <input type="password" id="p12Password" name="p12Password" autocomplete="new-password" placeholder="Optional">
+                </div>
+                <button type="submit" class="btn" id="certificateInspectBtn" disabled>Inspect</button>
+            </form>
+            <div id="certificateResults" style="margin-top: 20px;"></div>
+        </div>
         </main>
 
         <nav class="tabbar">
@@ -1066,6 +1091,9 @@
             </button>
             <button class="tab" onclick="switchTab('android', this)" aria-label="Android" title="Android">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3.5 6.5 5.5M16 3.5 17.5 5.5"/><rect x="5" y="7" width="14" height="11" rx="4"/><path d="M9 11v2M15 11v2"/><path d="M3 10v4M21 10v4"/></svg>
+            </button>
+            <button class="tab" onclick="switchTab('certificate', this)" aria-label="Certificate" title="Certificate">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 5 6.5v5c0 4.2 2.9 7.4 7 9 4.1-1.6 7-4.8 7-9v-5z"/><path d="M9.2 11.8l2 2 3.6-4"/></svg>
             </button>
         </nav>
 
@@ -1479,6 +1507,223 @@
                 showToast('Error adding APK: ' + error.message, 'error');
             } finally {
                 setButtonLoading(submitBtn, false);
+            }
+        });
+
+        // Certificate pair inspection (validate-and-display only). The .p12 and the
+        // .mobileprovision are posted to the server, parsed there, and forgotten:
+        // nothing is signed, nothing is stored, and nothing is kept client-side.
+        const CERT_PLACEHOLDER = '\u2014';
+
+        // These helpers return already-escaped HTML so every value that reaches
+        // innerHTML in this panel is escaped exactly once, nulls included.
+        function certValue(value) {
+            if (value === null || value === undefined) return CERT_PLACEHOLDER;
+            const text = String(value).trim();
+            return text === '' ? CERT_PLACEHOLDER : escapeHtml(text);
+        }
+
+        function certDateValue(value) {
+            if (value === null || value === undefined) return CERT_PLACEHOLDER;
+            const text = String(value).trim();
+            if (text === '') return CERT_PLACEHOLDER;
+            const parsed = new Date(text);
+            return escapeHtml(isNaN(parsed.getTime()) ? text : parsed.toLocaleString());
+        }
+
+        function certList(values) {
+            const shown = (Array.isArray(values) ? values : [])
+                .filter(item => item !== null && item !== undefined && String(item).trim() !== '')
+                .map(item => escapeHtml(String(item)));
+            return shown.length ? shown.join(', ') : CERT_PLACEHOLDER;
+        }
+
+        function certRow(label, valueHtml) {
+            return `<li style="margin-bottom: 6px;"><strong>${escapeHtml(label)}:</strong> ${valueHtml}</li>`;
+        }
+
+        function certExpiryMark(expired) {
+            return expired === true
+                ? ' <span style="color: var(--danger); font-weight: 600;">EXPIRED</span>'
+                : '';
+        }
+
+        function certDeviceBinding(profile) {
+            const binding = profile.deviceBinding;
+            if (binding === 'udid-bound') {
+                const count = certValue(profile.provisionedDeviceCount);
+                const noun = String(profile.provisionedDeviceCount) === '1' ? 'device' : 'devices';
+                return `UDID-bound: installs only on the ${count} ${noun} listed in this profile.`;
+            }
+            if (binding === 'all-devices') {
+                return 'All devices: installs on any device (Enterprise or Developer ID profile, no device list).';
+            }
+            if (binding === 'app-store') {
+                return 'App Store profile: no device list, so it installs only through the App Store.';
+            }
+            if (binding === null || binding === undefined || binding === '') return CERT_PLACEHOLDER;
+            return `Unrecognised device binding: ${escapeHtml(String(binding))}`;
+        }
+
+        function certEntitlements(keys) {
+            const shown = (Array.isArray(keys) ? keys : [])
+                .filter(key => key !== null && key !== undefined && String(key).trim() !== '');
+            if (!shown.length) {
+                return `<span style="color: var(--label-secondary);">${CERT_PLACEHOLDER} no entitlements reported</span>`;
+            }
+            return shown.map(key => '<code style="display: inline-block; max-width: 100%; overflow-wrap: anywhere; font-family: var(--mono); font-size: 0.85em; background: var(--surface-2); ' +
+                `border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 2px 6px; margin: 0 4px 4px 0;">${escapeHtml(String(key))}</code>`).join('');
+        }
+
+        function renderCertificateResult(data) {
+            const results = document.getElementById('certificateResults');
+            const certificate = data.certificate || {};
+            const profile = data.profile || {};
+            const pair = data.pair || {};
+
+            const matched = pair.match === true;
+            const certExpired = certificate.expired === true;
+            const profileExpired = profile.expired === true;
+
+            let html = matched
+                ? '<div class="alert alert-success"><strong>Matched.</strong> This .p12 is one of the signing identities listed in the profile, so it can legitimately sign against it.</div>'
+                : '<div class="alert alert-error"><strong>Not matched.</strong> This .p12 is not one of the profile\'s authorised signers, so it cannot legitimately sign against it.</div>';
+
+            if (certExpired || profileExpired) {
+                const problems = [];
+                if (certExpired) problems.push('the signing certificate is expired');
+                if (profileExpired) problems.push('the provisioning profile is expired');
+                html += `<div class="alert alert-error"><strong>Problem:</strong> ${escapeHtml(problems.join(' and '))}. An expired certificate or profile cannot produce a working install.</div>`;
+            }
+
+            if (matched) {
+                const method = pair.method === 'der'
+                    ? 'the DER-encoded leaf certificate is listed in the profile'
+                    : (pair.method === 'sha256'
+                        ? 'the SHA-256 fingerprint matches a certificate in the profile'
+                        : 'the server did not report how the match was made');
+                html += `<p style="color: var(--label-secondary); margin-bottom: 12px;">Match method: ${escapeHtml(method)} &middot; certificates in profile: ${certValue(pair.certificateCount)}</p>`;
+            }
+
+            html += '<div class="app-card">';
+            html += '<h3>Certificate</h3>';
+            html += '<ul style="margin-top: 8px; list-style: none; padding-left: 0;">';
+            html += certRow('Common name', certValue(certificate.commonName || certificate.subject));
+            html += certRow('Subject', certValue(certificate.subject));
+            html += certRow('Issuer', certValue(certificate.issuer));
+            html += certRow('Team ID', certValue(certificate.teamId));
+            html += certRow('Valid from', certDateValue(certificate.notBefore));
+            html += certRow('Valid until', certDateValue(certificate.notAfter) + certExpiryMark(certExpired));
+            html += certRow('Code signing EKU', certificate.codeSigningEku === true
+                ? 'Present: the certificate carries the Code Signing extended key usage'
+                : (certificate.codeSigningEku === false
+                    ? 'Absent: the certificate does not carry the Code Signing extended key usage'
+                    : CERT_PLACEHOLDER));
+            html += certRow('Chain length', certValue(certificate.chainLength));
+            html += '</ul>';
+
+            html += '<h3 style="margin-top: 20px;">Profile</h3>';
+            html += '<ul style="margin-top: 8px; list-style: none; padding-left: 0;">';
+            html += certRow('Name', certValue(profile.name));
+            html += certRow('App ID name', certValue(profile.appIdName));
+            html += certRow('Team name', certValue(profile.teamName));
+            html += certRow('Team identifiers', certList(profile.teamIdentifier));
+            html += certRow('Application identifier', certValue(profile.applicationIdentifier));
+            html += certRow('UUID', certValue(profile.uuid));
+            html += certRow('Created', certDateValue(profile.creationDate));
+            html += certRow('Expires', certDateValue(profile.expirationDate) + certExpiryMark(profileExpired));
+            html += certRow('Platforms', certList(profile.platforms));
+            html += certRow('Xcode-managed', profile.isXcodeManaged === true
+                ? 'Yes: this profile is managed by Xcode'
+                : (profile.isXcodeManaged === false ? 'No' : CERT_PLACEHOLDER));
+            html += certRow('Device binding', certDeviceBinding(profile));
+            html += '</ul>';
+
+            html += '<h3 style="margin-top: 20px;">Entitlements</h3>';
+            html += `<p style="margin-top: 8px; line-height: 2.2;">${certEntitlements(profile.entitlementKeys)}</p>`;
+            html += '</div>';
+
+            const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+            if (warnings.length) {
+                html += '<div class="alert alert-error" style="margin-top: 20px;">' +
+                    `<strong>Warnings (${warnings.length})</strong>` +
+                    '<ul style="margin: 8px 0 0 18px;">' +
+                    warnings.map(warning => `<li>${escapeHtml(String(warning))}</li>`).join('') +
+                    '</ul></div>';
+            }
+
+            results.innerHTML = html;
+        }
+
+        function updateCertificateInspectButton() {
+            const p12Selected = document.getElementById('p12File').files.length > 0;
+            const profileSelected = document.getElementById('provisionFile').files.length > 0;
+            document.getElementById('certificateInspectBtn').disabled = !(p12Selected && profileSelected);
+        }
+
+        document.getElementById('p12File').addEventListener('change', updateCertificateInspectButton);
+        document.getElementById('provisionFile').addEventListener('change', updateCertificateInspectButton);
+
+        document.getElementById('certificateInspectForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('certificateInspectBtn');
+            const results = document.getElementById('certificateResults');
+            const p12File = document.getElementById('p12File').files[0];
+            const provisionFile = document.getElementById('provisionFile').files[0];
+
+            if (!p12File || !provisionFile) {
+                results.innerHTML = '<div class="alert alert-error"><strong>Inspection failed.</strong> Choose both a .p12 and a .mobileprovision first.</div>';
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('p12File', p12File);
+            formData.append('provisionFile', provisionFile);
+            formData.append('p12Password', document.getElementById('p12Password').value);
+
+            setButtonLoading(btn, true);
+            results.innerHTML = '<p style="color: var(--label-secondary);">Inspecting certificate pair...</p>';
+
+            try {
+                const response = await fetch('/api/certificate/inspect', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                let data = null;
+                try {
+                    data = await response.json();
+                } catch (parseError) {
+                    data = null;
+                }
+
+                if (!response.ok) {
+                    // Validation failure reported by the server (400 and friends):
+                    // show its message verbatim, escaped, plus the machine reason.
+                    const message = (data && data.error)
+                        ? data.error
+                        : `Inspection failed (HTTP ${response.status})`;
+                    const reason = (data && data.reason)
+                        ? ` <span style="color: var(--label-secondary);">(${escapeHtml(String(data.reason))})</span>`
+                        : '';
+                    results.innerHTML = `<div class="alert alert-error"><strong>Inspection failed.</strong> ${escapeHtml(String(message))}${reason}</div>`;
+                    return;
+                }
+
+                if (!data || data.ok !== true) {
+                    results.innerHTML = '<div class="alert alert-error"><strong>Inspection failed.</strong> The server returned an unexpected response.</div>';
+                    return;
+                }
+
+                // The passphrase is never kept: clear it as soon as the pair is accepted.
+                document.getElementById('p12Password').value = '';
+                renderCertificateResult(data);
+            } catch (error) {
+                // Transport failure, distinct from a validation failure: no response existed.
+                console.error('Error inspecting certificate pair:', error);
+                results.innerHTML = `<div class="alert alert-error"><strong>Could not reach the server.</strong> ${escapeHtml(String(error.message || 'Network error'))} No response was produced, so nothing was validated.</div>`;
+            } finally {
+                setButtonLoading(btn, false);
             }
         });
 
