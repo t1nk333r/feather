@@ -36,6 +36,7 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 import release_source_ingest as release_ingest
 from apk_inspection import inspect_apk, ApkInspectionError
+import certificate_inspection
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -4988,6 +4989,52 @@ def storage_selftest():
 def diagnostics():
     # newest first, capped
     return jsonify({"entries": list(_DIAG_BUFFER)[::-1]})
+
+
+# ---------------------------------------------------------------------------
+# Certificate inspection (plans/086 section 8e).
+#
+# Validate-and-display only: the operator uploads a .p12 + .mobileprovision
+# pair and gets back what it is, when it expires (twice -- the certificate and
+# the profile expire independently), which devices it covers, and whether the
+# two files actually belong together. Nothing is signed, nothing is written,
+# and the passphrase is never persisted or logged. Signing server-side was
+# rejected in plans/086 section 7; this route answers the question that was
+# actually being asked, which is whether a certificate is usable.
+# ---------------------------------------------------------------------------
+
+@app.route('/api/certificate/inspect', methods=['POST'])
+@requires_auth
+def inspect_certificate():
+    p12_file = request.files.get('p12File')
+    provision_file = request.files.get('provisionFile')
+    if not p12_file or not p12_file.filename or not provision_file or not provision_file.filename:
+        return jsonify({
+            "ok": False,
+            "reason": "MISSING_FILE",
+            "error": "Both a .p12 and a .mobileprovision file are required.",
+        }), 400
+
+    # Read into memory: both files are small by definition, and a temp file
+    # would leave key material on disk for no gain.
+    p12_data = p12_file.read(certificate_inspection.MAX_P12_BYTES + 1)
+    provision_data = provision_file.read(certificate_inspection.MAX_PROFILE_BYTES + 1)
+    passphrase = request.form.get('p12Password') or ''
+    try:
+        inspection = certificate_inspection.inspect_pair(p12_data, provision_data, passphrase)
+    except certificate_inspection.CertificateInspectionError as e:
+        # The reason, never the exception chain: a crypto error message can
+        # carry file structure the operator did not ask us to publish.
+        return jsonify({"ok": False, "reason": e.reason, "error": e.message}), 400
+    except Exception:
+        logging.error("Certificate inspection failed", exc_info=False)
+        return jsonify({
+            "ok": False,
+            "reason": "NOT_A_PKCS12",
+            "error": "That certificate pair could not be inspected.",
+        }), 400
+
+    return jsonify(certificate_inspection.as_payload(inspection))
 
 
 # ---------------------------------------------------------------------------
