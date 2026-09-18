@@ -1,12 +1,12 @@
 # Handoff
 
-Written 2026-08-12 against `1b75e2c`; refreshed 2026-09-18 against the certificate-inspection work (plans 086–087). Read **State** and **Traps** first. The 2026-08-31 "Immediate blocker" (missing `feather-fdroid` GHCR package) is **resolved** — see State.
+Written 2026-08-12 against `1b75e2c`; refreshed 2026-09-18 against `f9ffc25` (certificate inspection, plans 086–087, plus the write-API contract). Read **State** and **Traps** first. The 2026-08-31 "Immediate blocker" (missing `feather-fdroid` GHCR package) is **resolved** — see State.
 
 ## What this is
 
 A self-hosted iOS AltStore source and third-party Android F-Droid repository. It serves iOS and Android artifacts, provides an authenticated admin UI, and supports Telegram and repository-release ingestion.
 
-- `app.py` — the Flask app (about 4,930 lines)
+- `app.py` — the Flask app (about 5,340 lines)
 - `templates/index.html` — the frontend, extracted in Plan 009
 - `scripts/telegram_bot_ingest.py` — the Telegram ingest worker
 - `scripts/release_source_ingest.py` — GitHub/GitLab release importer
@@ -18,6 +18,7 @@ A self-hosted iOS AltStore source and third-party Android F-Droid repository. It
 - `scripts/certificate_inspection.py` — p12 + `.mobileprovision` inspector (plan 087); stdlib for the profile, `cryptography` for the p12
 - `tests/` — **381 passed, 1 skipped**; no real provider calls
 - `plans/` — 86 numbered plans; `README.md` is the status index
+- `UPLOADING.md` — the write API's contract for unattended clients; the multipart field names live nowhere else
 
 **Test command** (the `ADMIN_PASSWORD` prefix is mandatory — the app refuses to import without it):
 
@@ -27,7 +28,7 @@ ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q -p no:cacheprovider
 
 ## State
 
-**All plans through 087 are implemented or explicitly rejected — the backlog is empty.** See `plans/README.md` for historical statuses and deferred findings. Working tree is clean apart from the untracked `run-local.sh` and `resume.txt`.
+**All plans through 087 are implemented or explicitly rejected — the backlog is empty.** See `plans/README.md` for historical statuses and deferred findings. `main` is at `f9ffc25`, pushed; the working tree is clean apart from the untracked `run-local.sh` and `resume.txt`.
 
 Jenkins tests Python 3.11 and 3.14, checks the `requests` pin, builds and smokes all three images, then publishes `ghcr.io/t1nk333r/feather`, `feather-bot`, and `feather-fdroid` only after every smoke stage passes.
 
@@ -63,6 +64,16 @@ persisted or logged.
 - Storing the pair was rejected on custody grounds: it would put a reusable
   code-signing identity behind the single shared admin password, with nothing
   here to encrypt it under (`SECRET_KEY` is regenerated per boot when unset).
+
+**The write API's upload contract is now written down** (`UPLOADING.md`), because
+it was not documented anywhere and the field names are not guessable. Verified
+live against a real 3,381,621-byte APK and a real 6,125,156-byte IPA:
+`/api/android/add-apk` reads `apkFile`, `/api/add-version` and `/api/add-app`
+read `ipaFile`. `add-version` answers `400 {"error":"App not found"}` for a
+bundle identifier the catalogue has never seen, and drops the
+`name`/`developerName` a caller sends it. A repeat APK upload is idempotent
+(`{"added": false, "Already present: … versionCode 63"}`), and a mutating call
+with no session is `401 {"error":"Authentication required"}`.
 
 ## What changed on 2026-09-02
 
@@ -161,6 +172,8 @@ Docker is not usable from this workstation: the daemon runs, but the user is not
 ## Traps
 
 Each of these cost real debugging time. They are the reason this file exists.
+
+**An upload route blames the artefact when you misname the field.** `-F "file=@x.apk"` answers `400 "Either an APK file or downloadFromUrl is required"`, and the IPA routes answer `400 "Either IPA file or download URL is required"` — the message names the *concept*, not the field, so a misnamed field reads as a missing artefact and sends you looking at the file. The fields are `apkFile` (`app.py:5184`) and `ipaFile` (`app.py:2438`, `:2578`, `:4240`). A downstream publish script carried `file=` precisely because its upload calls had never been executed; contract in `UPLOADING.md`.
 
 **`command:` in compose does nothing for `aiogram/telegram-bot-api`.** Its entrypoint ends in `exec $COMMAND` and never forwards `"$@"`. Every option must come from a `TELEGRAM_*` env var — local mode is `TELEGRAM_LOCAL=true`, not `--local`. The `--http-port=8081` you see in the process list comes from the entrypoint's own default, which is exactly why the override *looks* like it works. **Verify against the command line the container logs at startup**, not against `compose.yml`.
 
