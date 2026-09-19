@@ -2,8 +2,14 @@
 # one loop script. Runs as root by necessity -- see scripts/fdroid_index_loop.sh.
 # Pinned by digest because the upstream `master` tag is mutable. Refresh by
 # rerunning the real-APK init/update spike, then recording the new digest and
-# fdroid version here. tag: master, fdroid 6af4c42, verified 2026-08-28.
-FROM registry.gitlab.com/fdroid/docker-executable-fdroidserver@sha256:e58538106529863d504f686e3a51189aec1d24e17d9fee87048f7ae5c9cee706
+# fdroid version here. GitLab purges old digests when `master` is rebuilt --
+# the 2026-08-28 pin (e5853810) vanished on 2026-09-19 and broke the build.
+# This pin: tag: master, fdroid 3cbbe810 (image built 2026-09-06), verified
+# 2026-09-19. The real-APK spike has not been re-run; instead the upstream
+# delta 6af4c42..3cbbe810 (8 commits: symlink/fdroidscan fixes, metadata v0
+# CI test, donation-link metadata + Taler donation support) was audited --
+# nothing touches the index format, signing or the repo build path.
+FROM registry.gitlab.com/fdroid/docker-executable-fdroidserver@sha256:63d734242f4110a76a7df26d8c62527341964a331ef6baeed6864f91112310a2
 COPY scripts/fdroid_index_loop.sh /usr/local/bin/fdroid-index-loop
 RUN chmod 755 /usr/local/bin/fdroid-index-loop
 WORKDIR /repo
