@@ -26,6 +26,10 @@
 # bot validates APKs by extension and publishes over HTTP.
 !scripts/apk_inspection.py
 
+# app.py imports certificate_inspection at import time (Plan 087), so the
+# main image must ship it or the smoke stage fails on `python -c import app`.
+!scripts/certificate_inspection.py
+
 # Dockerfile.fdroid needs this one script for the opt-in Android/F-Droid
 # sidecar (Plan 073) -- same rule, do NOT blanket-exclude scripts/
 !scripts/fdroid_index_loop.sh
