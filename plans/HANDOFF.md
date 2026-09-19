@@ -1,6 +1,6 @@
 # Handoff
 
-Written 2026-08-12 against `1b75e2c`; refreshed 2026-09-18 against `f9ffc25` (certificate inspection, plans 086–087, plus the write-API contract). Read **State** and **Traps** first. The 2026-08-31 "Immediate blocker" (missing `feather-fdroid` GHCR package) is **resolved** — see State.
+Written 2026-08-12 against `1b75e2c`; refreshed 2026-09-19 against `95ffa50` (the two pipeline fixes below + the deploy). Read **State** and **Traps** first. The 2026-08-31 "Immediate blocker" (missing `feather-fdroid` GHCR package) is **resolved** — see State.
 
 ## What this is
 
@@ -28,11 +28,22 @@ ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q -p no:cacheprovider
 
 ## State
 
-**All plans through 087 are implemented or explicitly rejected — the backlog is empty.** See `plans/README.md` for historical statuses and deferred findings. `main` is at `f9ffc25`, pushed; the working tree is clean apart from the untracked `run-local.sh` and `resume.txt`.
+**All plans through 087 are implemented or explicitly rejected — the backlog is empty.** See `plans/README.md` for historical statuses and deferred findings. `main` is at `95ffa50`, pushed **and deployed** — the running `altstore-source-manager` was rebuilt from it on 2026-09-19, so regex asset matching (085) and the certificate panel (087) are live. The working tree is clean apart from the untracked `run-local.sh` and `resume.txt`.
 
 Jenkins tests Python 3.11 and 3.14, checks the `requests` pin, builds and smokes all three images, then publishes `ghcr.io/t1nk333r/feather`, `feather-bot`, and `feather-fdroid` only after every smoke stage passes.
 
 The Android QR encodes a standard `fdroidrepos://` deep link while the manual repository address remains HTTPS.
+
+## What changed on 2026-09-19
+
+**`main` is deployed again — after two pipeline fixes that are both instances of traps below.**
+
+- **Plan 087 never shipped `scripts/certificate_inspection.py` into the image.** `app.py:39` imports it at import time, but neither `.dockerignore` (deny-by-default) nor `Dockerfile` had been taught about it. The app-image smoke failed with `ModuleNotFoundError: No module named 'certificate_inspection'` while all 381 tests passed — nothing in `tests/` builds an image. Fixed in `c755e6d`.
+- **GitLab purged the fdroidserver base digest.** `Dockerfile.fdroid` pinned `master@sha256:e5853810…` (verified 2026-08-28 by the real-APK spike); upstream rebuilt `master` on 2026-09-06 and GitLab garbage-collected the old digest, so `Build fdroid image` died at `failed to resolve source metadata … not found`. Re-pinned to `master@sha256:63d73424…` (fdroidserver `3cbbe810`, image built 2026-09-06) in `95ffa50`. The spike was **not** re-run: the upstream delta `6af4c42..3cbbe810` (8 commits — symlink/fdroidscan fixes, metadata-v0 CI test, donation-link metadata, Taler donations) was audited instead, and nothing touches the index format or signing. Run the spike before the Android sidecar is next updated.
+
+**Deployed 2026-09-19** (build #7, SUCCESS): `feather:latest` = `sha256:40b252bd…`, `feather-bot:latest` = `sha256:89c08c9b…`, `feather-fdroid:latest` = `sha256:bce9f20f…`. Narrow recreate of `altstore-source-manager` only. Verified live: `/source.json` 200, `/qr` 200, and `POST /api/certificate/inspect` answers `401 Authentication required` — that route exists only in the new image, so 401 (rather than 404) is the freshness probe.
+
+**The Jenkins agent was given real resources.** Build #7 took 34.8 minutes instead of ~2 because the `docker-host` WebSocket kept dropping, costing a 5-minute queue wait per flap. The agent is a container capped at 4 CPUs / 4 GiB while sharing a 24-core host with 40+ containers; during the 1.5 GB fdroid base pull the JVM starved, missed its WS pings and the channel tore down mid-write (`hudson.remoting.Engine$1AgentEndpoint$Transport.write` → `InterruptedException` in the agent's own log). Raised to 8 CPU / 8 GiB — in `/path/to/jenkins/compose.yaml` and in place on the running container via Dockhand `update_container_runtime` (no recreate, so the running build was not disturbed).
 
 ## What changed on 2026-09-18
 
@@ -105,10 +116,9 @@ The cause was never a deleted package: **the pipeline had never produced a succe
 
 ## Not finished
 
-- **`b8be7a2` is not deployed.** The running container was built from `936e1d4` (created 2026-09-02T12:44Z) and therefore has **no regex mode**. Trigger a Jenkins build of `main`, confirm SUCCESS, then recreate `altstore-source-manager` (see Deployment).
-- **No APK has been imported end to end for real.** Every test is offline by design. A live `/inspect` against `RyanYuuki/AnymeX` correctly tagged both ABI APKs as `platform: android`, but nothing has been downloaded and published. **This is the highest-value next action** — use a single-APK release, or regex mode for a multi-ABI one.
+- **No APK has been imported end to end for real.** Every test is offline by design. A live `/inspect` against `RyanYuuki/AnymeX` correctly tagged both ABI APKs as `platform: android`, but nothing has been downloaded and published. **This is the highest-value next action** — and it is now fully unblocked: regex mode is live in production, so a multi-ABI release works.
 - **`parse_manifest_dict` is still over-strict.** `scripts/release_source_ingest.py:330` requires "at least one of `bundleIdentifier` or `package`" for **CLI manifest** jobs — the same rule removed from the UI paths in `fd38864`, because both fields are auto-detected. An Android-only cron job is forced to declare a package it does not need. Pre-existing from plan 083, left deliberately rather than widen an unrelated merge.
-- **The certificate panel is not deployed either.** Plan 087 adds the first cryptographic dependency (`cryptography==50.0.1`), so the image must actually rebuild before `/api/certificate/inspect` exists in the running container; a stale image will 404 the route rather than fail loudly.
+- **The fdroid re-pin skipped the real-APK spike** (see 2026-09-19). The image builds and its smoke passes, but before the Android sidecar is next updated, run the spike against the new fdroidserver and record the result in the `Dockerfile.fdroid` comment.
 
 ## Deployment
 
@@ -122,6 +132,8 @@ TrueNAS, managed through **Dockhand** at the Tailscale address `http://<tailnet-
 | `feather-fdroid-index` | `ghcr.io/t1nk333r/feather-fdroid:latest` | profile `android`; root by necessity; mounts only `./data/fdroid` |
 
 Public at `https://feather.example.com` (openresty on `<proxy-ip>`). Garage S3 at `https://s3.example.com`, bucket `feather-repo` served at `https://feather-repo.web.example.com`.
+
+**Jenkins infrastructure.** Controller at `http://<lan-ip>:8080` (an LXC), published as `https://jenkins.example.com` through `<lan-ip>`. The `docker-host` build agent is a container (`jenkins-agent`, image `jenkins-agent:local`, loaded by `docker load`) **on TrueNAS** (`<nas-ip>`), connecting outbound over WebSocket; its compose file is `/path/to/jenkins/compose.yaml`. It mounts the host docker socket, so image builds execute on the TrueNAS daemon — and its container limits are what starved the JVM on 2026-09-19.
 
 The custom Dockhand MCP bridge is installed locally under `~/.local/share/mcp-dockhand`, configured in `~/.codex/config.toml`, and run by `~/.config/systemd/user/mcp-dockhand.service`. Its environment file is `~/.config/mcp-dockhand/env` (mode 0600). The MCP bridge is bound to `127.0.0.1:8080` and separately bearer-protected. Never copy its bearer credential into this repository or a handoff.
 
@@ -150,7 +162,7 @@ Ordered by urgency. None of these are code.
 7. **Enable and protect Android signing state.** Set `COMPOSE_PROFILES=android`, run `chown -R 999:999 data/fdroid`, and back up both `data/fdroid/keystore.p12` and `FDROID_KEYSTORE_PASSWORD`. Losing either changes the repository fingerprint for every subscriber.
 8. ~~**Restore the missing `feather-fdroid` GHCR package.**~~ **Resolved 2026-09-02** — all three packages pull anonymously. The package was never deleted; the pipeline had simply never produced a successful build.
 9. **Try one real APK import.** Nothing has gone through the Android path end to end. Use a single-APK release first (a multi-ABI project needs plan 085). This is the highest-value next action.
-10. ~~**Review and merge plan 085.**~~ **Done 2026-09-02** (`b8be7a2`). Deploy it — see "Not finished".
+10. ~~**Review and merge plan 085.**~~ **Done 2026-09-02** (`b8be7a2`). Deployed 2026-09-19 as part of `95ffa50` — regex mode is live.
 
 ## Local development
 
@@ -185,6 +197,10 @@ Each of these cost real debugging time. They are the reason this file exists.
 
 **Every pin in `requirements.txt` needs wheels for both cp311 (the container) and cp314 (the test host).** This is not hypothetical — `pillow==10.1.0` publishes no cp314 wheel and stalled Plan 004. Check with `pip download --no-deps --only-binary=:all: --python-version 311` and again with `314`. The host's system `python3` has no `pip`; use a venv's.
 
+**A digest pin can vanish when upstream rebuilds the tag it was pinned from.** `Dockerfile.fdroid` pinned `registry.gitlab.com/fdroid/docker-executable-fdroidserver@sha256:e5853810…` (verified 2026-08-28). Upstream rebuilt `master` on 2026-09-06 and GitLab garbage-collected the old digest, so every build failed `failed to resolve source metadata … not found` — a pin that protects against a moving tag is itself mortal. Symptoms look like a registry outage; check the current tag digest with the registry API (`https://gitlab.com/jwt/auth?service=container_registry&scope=repository:<path>:pull`, then `GET /v2/<path>/manifests/master`) and re-pin with the fdroidserver revision from the image config's `org.opencontainers.image.revision` label. `latest` on that repo is years stale (built 2024-10-21) — pin `master`.
+
+**The Jenkins agent is a container with a hard CPU cap — starvation shows up as WebSocket flaps.** With 4 CPUs / 4 GiB on a 24-core host running 40+ containers, a GB-scale image pull starved the agent JVM long enough to miss its remoting pings: the controller logged `docker-host seems to be removed or offline … will wait for 5 min`, the build froze mid-stage, and each flap cost a 5-minute queue wait. The agent's own log shows the mechanism — `hudson.remoting.Engine$1AgentEndpoint$Transport.write` throwing `InterruptedException` from the Tyrus WebSocket future. Fix without a recreate: Dockhand `update_container_runtime` with `NanoCpus`/`Memory` (Docker's in-place update), and sync the compose file at `/path/to/jenkins/compose.yaml` so a recreate keeps it. Note the Jenkins system log (`/log/all`) is drowned in `io.modelcontextprotocol` keep-alive warnings; it is not useful for node history.
+
 **`getFile` is synchronous over the download in `--local` mode.** It blocks for the whole transfer, so the timeout must be sized to the file, not to an API call. It is configurable (`BOT_API_GETFILE_TIMEOUT`, default 900 s).
 
 **Filenames lie about versions.** `YT_20.49.5_KP.ipa` declares `CFBundleShortVersionString = 20.47.3`. Never parse a version from a filename; read `Info.plist`.
@@ -203,7 +219,7 @@ Each of these cost real debugging time. They are the reason this file exists.
 
 **A missing GHCR package may mean the build never succeeded.** `feather-fdroid` looked deleted for days — 401 on the anon token, 404 on the package page. It was neither deleted nor private: `d7eeem/feather/main` had `lastSuccessfulBuild: None`, so the push stage had never run. Check `getJob`'s `lastSuccessfulBuild` before theorising about the registry.
 
-**A new file a Dockerfile COPYs must also be re-admitted in `.dockerignore`.** This is the deny-by-default trap below, and it bit for real on 2026-09-02: plan 083 added `COPY scripts/apk_inspection.py` without the matching `!` line, and every build failed with `failed to compute cache key: ... "/scripts/apk_inspection.py": not found`. **No test can catch this** — nothing in `tests/` builds an image. When a plan adds a file the image needs, the `.dockerignore` line is part of that change.
+**A new file a Dockerfile COPYs must also be re-admitted in `.dockerignore`.** This is the deny-by-default trap below, and it bit for real on 2026-09-02: plan 083 added `COPY scripts/apk_inspection.py` without the matching `!` line, and every build failed with `failed to compute cache key: ... "/scripts/apk_inspection.py": not found`. **No test can catch this** — nothing in `tests/` builds an image. When a plan adds a file the image needs, the `.dockerignore` line is part of that change. **It bit a second time on 2026-09-19**: plan 087 added `scripts/certificate_inspection.py`, imported by `app.py:39` at import time, with neither the `!` line nor the `COPY` — the app-image smoke failed `ModuleNotFoundError: No module named 'certificate_inspection'` in build #4 while 381 tests stayed green. The failure surfaces in the smoke stage's `python -c import app`, never in the test suites.
 
 **Editing a plan file moves `main` under an in-flight executor.** Refreshing plan 084's line numbers mid-flight meant its branch no longer fast-forwarded, forcing a cherry-pick. Dispatch from a stable base, or accept the cherry-pick and verify `main` is byte-identical to the reviewed branch afterwards.
 
@@ -221,6 +237,9 @@ Each of these cost real debugging time. They are the reason this file exists.
 # the app
 curl -sI https://feather.example.com/source.json | head -1        # 200
 curl -s https://feather.example.com/source.json | python3 -m json.tool | head -5
+
+# that the running image is actually fresh (404 = stale image, 401 = new route present)
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://feather.example.com/api/certificate/inspect
 
 # local mode really enabled (the single most common regression)
 docker logs telegram-bot-api 2>&1 | head -2                        # must end with --local
