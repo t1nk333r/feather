@@ -288,7 +288,10 @@
         }
         .app-info {
             flex: 1;
+            min-width: 0;                 /* let long names wrap instead of widening the card */
+            overflow-wrap: anywhere;
         }
+        .app-card { overflow-wrap: anywhere; }
         .app-info h3 {
             color: var(--label);
             margin-bottom: 5px;
@@ -465,6 +468,7 @@
         .app-header-with-icon {
             display: flex;
             align-items: start;
+            min-width: 0;
         }
         .search-filter-bar {
             display: flex;

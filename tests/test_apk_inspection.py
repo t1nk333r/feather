@@ -121,3 +121,42 @@ def test_error_message_carries_label(tmp_path, monkeypatch):
     _patch_apk(monkeypatch, valid=False)
     with pytest.raises(ApkInspectionError, match=r"^job 42: Not a valid APK"):
         inspect_apk(path, "job 42")
+
+
+def _zip_with(path, members):
+    import zipfile
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, size in members.items():
+            with zf.open(name, "w", force_zip64=True) as handle:
+                remaining = size
+                while remaining:
+                    step = min(remaining, 1 << 20)
+                    handle.write(b"\0" * step)
+                    remaining -= step
+
+
+def test_rejects_oversized_manifest_before_parsing(tmp_path, monkeypatch):
+    import scripts.apk_inspection as mod
+    path = tmp_path / "bomb.apk"
+    _zip_with(path, {"AndroidManifest.xml": mod.MAX_MANIFEST_BYTES + 1})
+
+    def never(*_a, **_k):
+        raise AssertionError("pyaxmlparser must not be reached")
+    import pyaxmlparser
+    monkeypatch.setattr(pyaxmlparser, "APK", never)
+    with pytest.raises(ApkInspectionError, match="implausibly large"):
+        inspect_apk(path, "bomb.apk")
+
+
+def test_oversized_resources_skips_label_instead_of_inflating(tmp_path, monkeypatch):
+    import scripts.apk_inspection as mod
+    path = tmp_path / "big.apk"
+    _zip_with(path, {"AndroidManifest.xml": 10, "resources.arsc": mod.MAX_RESOURCES_BYTES + 1})
+
+    class NoLabel(_FakeApk):
+        def get_app_name(self):
+            raise AssertionError("resources.arsc must not be read")
+    import pyaxmlparser
+    monkeypatch.setattr(pyaxmlparser, "APK", lambda _p: NoLabel())
+    result = inspect_apk(path, "big.apk")
+    assert result.app_name == "com.example.app"

@@ -2334,6 +2334,71 @@ else:
     icon_storage = LocalIconStorage()
 
 
+_FDROID_REPO_CSP = (
+    "sandbox; default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
+)
+
+
+@app.after_request
+def _security_headers(response):
+    """Baseline headers. /fdroid/repo/ holds pages fdroidserver generates
+    (index.html interpolates the repo name and description unescaped); a
+    sandboxing CSP gives them an opaque origin so nothing there can reach
+    the admin session or API, whatever fdroidserver writes."""
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    if request.path.startswith("/fdroid/repo/"):
+        response.headers["Content-Security-Policy"] = _FDROID_REPO_CSP
+    else:
+        response.headers.setdefault("X-Frame-Options", "DENY")
+    return response
+
+
+@app.before_request
+def _reject_malformed_json():
+    """Every JSON API here takes an object. Reject anything else up front
+    with a 400 instead of letting a list/str/None or pathological nesting
+    surface as an AttributeError/RecursionError 500 deep in a handler."""
+    if request.method != "POST" or not request.is_json:
+        return None
+    raw = request.get_data(cache=True)
+    if not raw.strip():
+        return None
+    try:
+        body = json.loads(raw)
+    except (ValueError, RecursionError):
+        return jsonify({"success": False, "error": "Request body is not valid JSON"}), 400
+    if not isinstance(body, dict):
+        return jsonify({"success": False, "error": "Request body must be a JSON object"}), 400
+    return None
+
+
+# Failed-login throttle: per client address, sliding window, in-process
+# (the app is single-process by design). Behind a reverse proxy every
+# client shares the proxy's address, so this becomes a global limit --
+# still bounded to LOGIN_MAX_FAILURES per window, and a success clears it.
+LOGIN_MAX_FAILURES = 5
+LOGIN_WINDOW_SECONDS = 60
+_login_failures = {}
+_login_failures_lock = threading.Lock()
+
+
+def _login_retry_after(addr, now):
+    with _login_failures_lock:
+        recent = [t for t in _login_failures.get(addr, []) if now - t < LOGIN_WINDOW_SECONDS]
+        _login_failures[addr] = recent
+        if len(recent) >= LOGIN_MAX_FAILURES:
+            return max(1, int(LOGIN_WINDOW_SECONDS - (now - recent[0])) + 1)
+        return 0
+
+
+def _record_login_failure(addr, now):
+    with _login_failures_lock:
+        _login_failures.setdefault(addr, []).append(now)
+        if len(_login_failures) > 10000:           # bound memory under address spraying
+            _login_failures.clear()
+
+
 def requires_auth(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
@@ -2357,12 +2422,24 @@ def store_preview():
 
 @app.route('/api/login', methods=['POST'])
 def login():
+    addr = request.remote_addr or "unknown"
+    now = time.monotonic()
+    retry_after = _login_retry_after(addr, now)
+    if retry_after:
+        resp = jsonify({"success": False, "error": f"Too many failed attempts; try again in {retry_after}s"})
+        resp.headers["Retry-After"] = str(retry_after)
+        return resp, 429
     data = request.get_json(silent=True) or {}
     supplied = data.get('password', '')
-    if hmac.compare_digest(supplied, ADMIN_PASSWORD):
+    if not isinstance(supplied, str):
+        supplied = ''
+    if hmac.compare_digest(supplied.encode(), ADMIN_PASSWORD.encode()):
+        with _login_failures_lock:
+            _login_failures.pop(addr, None)
         session['authed'] = True
         session.permanent = True
         return jsonify({"success": True})
+    _record_login_failure(addr, now)
     logging.warning("Failed login attempt from %s", request.remote_addr)
     return jsonify({"success": False, "error": "Invalid password"}), 401
 
@@ -3866,16 +3943,23 @@ def inspect_import_release():
 @requires_auth
 def import_release():
     payload = request.get_json(silent=True) or {}
-    provider = (payload.get('provider') or '').strip().lower()
-    project = _normalize_repo_project(payload.get('project') or '')
-    bundle_id_in = (payload.get('bundleIdentifier') or '').strip()
-    asset_glob = (payload.get('assetGlob') or '*.ipa').strip()
+
+    def text(key, default=''):
+        # A non-string (list, number, object) is treated as absent so the
+        # validation below rejects it, instead of .strip() raising a 500.
+        value = payload.get(key)
+        return value.strip() if isinstance(value, str) else default
+
+    provider = text('provider').lower()
+    project = _normalize_repo_project(text('project'))
+    bundle_id_in = text('bundleIdentifier')
+    asset_glob = text('assetGlob') or '*.ipa'
     asset_exclude_glob = payload.get('assetExcludeGlob')
     include_pre = bool(payload.get('includePrereleases'))
     create_if_missing = bool(payload.get('createIfMissing'))
-    name_in = (payload.get('name') or '').strip()
-    developer_in = (payload.get('developerName') or '').strip()
-    icon_url_in = (payload.get('iconURL') or '').strip()
+    name_in = text('name')
+    developer_in = text('developerName')
+    icon_url_in = text('iconURL')
     hosts_in = payload.get('allowedDownloadHosts') or []
     base_url = resolve_base_url()
     started = time.monotonic()

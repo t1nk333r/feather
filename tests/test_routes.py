@@ -2499,3 +2499,68 @@ def test_update_source_normalises_tint_and_accepts_valid_urls(authed_client):
     source = authed_client.get("/source.json").get_json()
     assert source["tintColor"] == "#4185A9"
     assert source["iconURL"] == "https://example.com/i.png"
+
+
+# ---------------------------------------------------------------------------
+# Adversarial hardening
+# ---------------------------------------------------------------------------
+
+
+def test_ipa_with_oversized_plist_is_rejected_before_inflating(authed_client):
+    import io, zipfile
+    import scripts.ipa_inspection as ipa_mod
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        with zf.open("Payload/B.app/Info.plist", "w", force_zip64=True) as handle:
+            handle.write(b"\0" * (ipa_mod.MAX_INFO_PLIST_BYTES + 1))
+    resp = _upload_version(authed_client, buf.getvalue())
+    assert resp.status_code == 400
+    assert "implausibly large" in resp.get_json()["error"]
+
+
+def test_fdroid_repo_pages_are_sandboxed(client, tmp_path):
+    repo = tmp_path / "fdroid" / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / "index.html").write_text("<title>x</title><script>1</script>")
+    resp = client.get("/fdroid/repo/index.html")
+    assert resp.status_code == 200
+    assert "sandbox" in resp.headers["Content-Security-Policy"]
+
+
+def test_admin_page_security_headers(client):
+    resp = client.get("/")
+    assert resp.headers["X-Frame-Options"] == "DENY"
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
+
+
+@pytest.mark.parametrize("body", [b"[1,2]", b'"x"', b"null", b"{{{", b"[" * 50000 + b"]" * 50000])
+def test_non_object_json_is_a_400_not_a_500(client, body):
+    resp = client.post("/api/login", data=body, content_type="application/json")
+    assert resp.status_code == 400
+
+
+def test_non_ascii_password_guess_is_a_401(client):
+    resp = client.post("/api/login", json={"password": "pässwörd"})
+    assert resp.status_code == 401
+
+
+def test_login_is_throttled_after_repeated_failures(client):
+    app_module = client.app_module
+    app_module._login_failures.clear()
+    codes = [client.post("/api/login", json={"password": f"wrong-{i}"}).status_code
+             for i in range(app_module.LOGIN_MAX_FAILURES + 2)]
+    assert codes[:app_module.LOGIN_MAX_FAILURES] == [401] * app_module.LOGIN_MAX_FAILURES
+    blocked = client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD})
+    assert blocked.status_code == 429
+    assert int(blocked.headers["Retry-After"]) >= 1
+    app_module._login_failures.clear()
+    assert client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+
+
+def test_import_release_wrong_field_types_is_an_error_event_not_a_500(authed_client):
+    resp = authed_client.post("/api/import-release", json={
+        "provider": ["github"], "project": {"a": 1}, "bundleIdentifier": 5, "assetGlob": None,
+    })
+    # The route streams NDJSON progress; a validation failure is an error event, never a 500.
+    assert resp.status_code == 200
+    assert '"stage": "error"' in resp.get_data(as_text=True)

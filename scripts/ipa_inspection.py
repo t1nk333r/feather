@@ -7,6 +7,10 @@ from dataclasses import dataclass
 
 
 _APP_INFO_PLIST = re.compile(r"^Payload/[^/]+\.app/Info\.plist$")
+# Real Info.plists are a few KB. Checked before inflating, and again on the
+# bytes actually read (the central directory's size is attacker-controlled):
+# a 1.5 MB IPA whose plist inflates to 1.5 GB otherwise costs ~3 GB of RAM.
+MAX_INFO_PLIST_BYTES = 4 * 1024 * 1024
 
 
 class InspectionError(RuntimeError):
@@ -61,8 +65,15 @@ def inspect_ipa(path, label="IPA"):
                     f"{safe_label}: expected exactly one top-level app Info.plist, "
                     f"found {len(plist_names)}"
                 )
+            info = archive.getinfo(plist_names[0])
+            if info.file_size > MAX_INFO_PLIST_BYTES:
+                raise InspectionError(f"{safe_label}: top-level Info.plist is implausibly large")
+            with archive.open(info) as handle:
+                raw = handle.read(MAX_INFO_PLIST_BYTES + 1)
+            if len(raw) > MAX_INFO_PLIST_BYTES:
+                raise InspectionError(f"{safe_label}: top-level Info.plist is implausibly large")
             try:
-                plist = plistlib.loads(archive.read(plist_names[0]))
+                plist = plistlib.loads(raw)
             except Exception:
                 raise InspectionError(f"{safe_label}: top-level Info.plist is malformed")
     except InspectionError:
