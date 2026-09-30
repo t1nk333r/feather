@@ -575,6 +575,30 @@ def test_index_page_ok(client):
     assert b"qrImage" in resp.data
 
 
+def test_store_preview_is_public(client):
+    """The storefront preview needs no session: it only shows what the
+    public source/index already publish."""
+    resp = client.get("/store")
+    assert resp.status_code == 200
+    assert resp.mimetype == "text/html"
+
+
+def test_store_preview_reads_only_public_documents(client):
+    body = client.get("/store").data.decode("utf-8")
+    assert "fetch" in body
+    assert "'/source.json'" in body
+    assert "'/fdroid/repo/index-v1.json'" in body
+    # Never an authenticated endpoint, and never raw HTML from catalog data.
+    assert "/api/" not in body
+    assert "innerHTML" not in body
+    # Optional children are null; raw replaceChildren() renders them as "null".
+    assert body.count(".replaceChildren(") == 1
+
+
+def test_admin_links_to_store_preview(client):
+    assert b'href="/store"' in client.get("/").data
+
+
 def test_static_icon_is_served(client):
     resp = client.get("/static/icon.svg")
     assert resp.status_code == 200

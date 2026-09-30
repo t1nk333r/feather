@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Store Preview</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Read-only preview of this source's iOS and Android catalog, as subscribers see it.">
+    <link rel="icon" type="image/svg+xml" href="/static/icon.svg" media="(prefers-color-scheme: light)">
+    <link rel="icon" type="image/svg+xml" href="/static/icon-dark.svg" media="(prefers-color-scheme: dark)">
+    <link rel="alternate icon" href="/static/favicon.png">
+    <!--
+      Public, read-only storefront. It reads ONLY what phones already read:
+      /source.json (AltStore/Feather) and /fdroid/repo/index-v1.json (F-Droid),
+      plus the public /qr and /fdroid/qr images, and no authenticated endpoint.
+      Catalog text is untrusted (APK labels come from uploaded binaries), so
+      every string is inserted with textContent and every URL goes through
+      safeUrl(), which only allows http(s).
+    -->
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            color-scheme: light dark;
+            --canvas: #f8f8f6;
+            --surface: #ffffff;
+            --fill: rgba(25,25,27,0.05);
+            --fill-hover: rgba(25,25,27,0.09);
+            --label: #19191b;
+            --label-secondary: #65656a;
+            --label-tertiary: #6d6d74;
+            --separator: #cdcdca;
+            --border: #dededb;
+            --accent: #c6371c;
+            --accent-contrast: #ffffff;
+            --accent-press: #a82c15;
+            --accent-tint: rgba(198,55,28,0.10);
+            --radius-lg: 14px;
+            --radius-md: 10px;
+            --radius-sm: 8px;
+            --focus-ring: 0 0 0 3px rgba(198,55,28,0.25);
+            --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+            --sans: -apple-system, BlinkMacSystemFont, Inter, "Segoe UI", Roboto, sans-serif;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --canvas: #000000;
+                --surface: #0b0b0d;
+                --fill: rgba(215,215,217,0.06);
+                --fill-hover: rgba(215,215,217,0.10);
+                --label: #d7d7d9;
+                --label-secondary: #aaaab0;
+                --label-tertiary: #7d7d84;
+                --separator: #28282c;
+                --border: #1c1c20;
+                --accent: #ff5a36;
+                --accent-contrast: #111111;
+                --accent-press: #e64a2b;
+                --accent-tint: rgba(255,90,54,0.14);
+                --focus-ring: 0 0 0 3px rgba(255,90,54,0.35);
+            }
+        }
+        body { font-family: var(--sans); background: var(--canvas); color: var(--label); line-height: 1.45; }
+        a { color: var(--accent); }
+        button, .btn { font: inherit; }
+        :focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--radius-sm); }
+
+        .wrap { max-width: 1120px; margin: 0 auto; padding: 24px 16px 64px; }
+        .preview-banner {
+            font-size: 13px; color: var(--label-secondary); background: var(--fill);
+            border-radius: var(--radius-md); padding: 8px 12px; margin-bottom: 20px;
+            display: flex; gap: 8px; justify-content: space-between; flex-wrap: wrap;
+        }
+        .hero { display: flex; gap: 16px; align-items: center; margin-bottom: 20px; }
+        .hero img { width: 72px; height: 72px; border-radius: 16px; background: var(--fill); flex: none; object-fit: cover; }
+        .hero h1 { font-size: 26px; line-height: 1.2; }
+        .hero p { color: var(--label-secondary); }
+        .actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 24px; }
+        .btn {
+            display: inline-flex; align-items: center; gap: 6px; border: 0; cursor: pointer;
+            padding: 8px 14px; border-radius: var(--radius-md); text-decoration: none;
+            background: var(--fill); color: var(--label); font-size: 14px; font-weight: 500;
+        }
+        .btn:hover { background: var(--fill-hover); }
+        .btn.primary { background: var(--accent); color: var(--accent-contrast); }
+        .btn.primary:hover { background: var(--accent-press); }
+
+        .toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; }
+        .tabs { display: inline-flex; background: var(--fill); border-radius: var(--radius-md); padding: 3px; }
+        .tabs button {
+            border: 0; background: transparent; color: var(--label-secondary); cursor: pointer;
+            padding: 6px 14px; border-radius: var(--radius-sm); font-size: 14px; font-weight: 500;
+        }
+        .tabs button[aria-selected="true"] { background: var(--surface); color: var(--label); box-shadow: 0 0 0 1px var(--border); }
+        .search {
+            flex: 1; min-width: 180px; padding: 8px 12px; border-radius: var(--radius-md);
+            border: 1px solid var(--border); background: var(--surface); color: var(--label); font: inherit;
+        }
+
+        h2.section { font-size: 17px; margin: 24px 0 12px; }
+        .news { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(240px, 320px); gap: 12px; overflow-x: auto; padding-bottom: 4px; }
+        .news-item { background: var(--surface); border-radius: var(--radius-lg); box-shadow: 0 0 0 1px var(--border); overflow: hidden; }
+        .news-item img { width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; background: var(--fill); }
+        .news-item div { padding: 12px; }
+        .news-item h3 { font-size: 15px; }
+        .news-item p { font-size: 13px; color: var(--label-secondary); }
+
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+        .card {
+            display: flex; gap: 12px; align-items: center; text-align: left; width: 100%;
+            background: var(--surface); border: 0; border-radius: var(--radius-lg); padding: 12px;
+            box-shadow: 0 0 0 1px var(--border); cursor: pointer; color: inherit; font: inherit;
+        }
+        .card:hover { box-shadow: 0 0 0 1px var(--separator); background: var(--fill); }
+        .card img, .detail-head img { width: 56px; height: 56px; border-radius: 13px; background: var(--fill); flex: none; object-fit: cover; }
+        .card .meta { min-width: 0; }
+        .card .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .card .sub { font-size: 13px; color: var(--label-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .card .ver { font-size: 12px; color: var(--label-tertiary); font-family: var(--mono); }
+        .badge { font-size: 11px; font-weight: 600; color: var(--accent); background: var(--accent-tint); border-radius: 6px; padding: 1px 6px; margin-left: 6px; }
+        .empty { color: var(--label-secondary); padding: 32px 0; text-align: center; }
+
+        dialog {
+            border: 0; border-radius: var(--radius-lg); background: var(--surface); color: var(--label);
+            width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 0; margin: auto;
+            box-shadow: 0 0 0 1px var(--separator), 0 20px 60px rgba(0,0,0,0.3);
+        }
+        dialog::backdrop { background: rgba(0,0,0,0.45); }
+        .dialog-body { padding: 20px; overflow-y: auto; max-height: calc(100vh - 48px); }
+        .detail-head { display: flex; gap: 14px; align-items: center; margin-bottom: 16px; }
+        .detail-head img { width: 72px; height: 72px; border-radius: 16px; }
+        .detail-head h3 { font-size: 20px; }
+        .detail-head p { color: var(--label-secondary); font-size: 14px; }
+        .close { margin-left: auto; align-self: flex-start; }
+        .desc { white-space: pre-wrap; font-size: 14px; margin-bottom: 16px; }
+        .shots { display: flex; gap: 10px; overflow-x: auto; margin-bottom: 16px; }
+        .shots img { height: 360px; max-width: 80vw; border-radius: var(--radius-md); background: var(--fill); flex: none; }
+        .facts { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--label-secondary); margin-bottom: 16px; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { text-align: left; padding: 8px 6px; border-top: 1px solid var(--border); vertical-align: top; }
+        th { color: var(--label-secondary); font-weight: 500; }
+        td.notes { white-space: pre-wrap; color: var(--label-secondary); max-width: 280px; }
+        .mono { font-family: var(--mono); }
+        .table-scroll { overflow-x: auto; }
+        .qr { display: block; width: 240px; max-width: 100%; margin: 12px auto; border-radius: var(--radius-md); background: #fff; }
+        .muted { color: var(--label-secondary); font-size: 13px; }
+        @media (max-width: 560px) {
+            .hero h1 { font-size: 21px; }
+            .shots img { height: 260px; }
+        }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <div class="preview-banner">
+        <span>Store preview: the same catalog subscribers get from <span class="mono">/source.json</span> and the F-Droid index.</span>
+        <a href="/">Admin</a>
+    </div>
+
+    <header class="hero">
+        <img id="sourceIcon" alt="" src="/static/icon.svg">
+        <div>
+            <h1 id="sourceName">Loading…</h1>
+            <p id="sourceSubtitle"></p>
+        </div>
+    </header>
+
+    <div class="actions" id="actions"></div>
+
+    <div class="toolbar">
+        <div class="tabs" role="tablist" aria-label="Platform">
+            <button role="tab" id="tab-ios" aria-selected="true" data-platform="ios">iOS <span id="count-ios"></span></button>
+            <button role="tab" id="tab-android" aria-selected="false" data-platform="android">Android <span id="count-android"></span></button>
+        </div>
+        <input class="search" id="search" type="search" placeholder="Search apps" aria-label="Search apps">
+    </div>
+
+    <section id="newsSection" hidden>
+        <h2 class="section">News</h2>
+        <div class="news" id="news"></div>
+    </section>
+
+    <h2 class="section" id="listTitle">Apps</h2>
+    <div class="grid" id="grid"></div>
+    <p class="empty" id="empty" hidden></p>
+</div>
+
+<dialog id="detail" aria-labelledby="detailName"><div class="dialog-body" id="detailBody"></div></dialog>
+
+<script>
+(() => {
+    const state = { platform: 'ios', query: '', ios: null, android: null, iosError: null, androidError: null };
+    const $ = (id) => document.getElementById(id);
+
+    // --- safe DOM helpers -----------------------------------------------
+    function el(tag, props, ...children) {
+        const node = document.createElement(tag);
+        if (props) {
+            for (const [k, v] of Object.entries(props)) {
+                if (v === null || v === undefined || v === false) continue;
+                if (k === 'text') node.textContent = String(v);
+                else if (k === 'class') node.className = v;
+                else if (k === 'on') for (const [ev, fn] of Object.entries(v)) node.addEventListener(ev, fn);
+                else node.setAttribute(k, v);
+            }
+        }
+        for (const c of children.flat()) if (c) node.append(c);
+        return node;
+    }
+    function safeUrl(u) {
+        if (typeof u !== 'string' || !u.trim()) return null;
+        try {
+            const x = new URL(u, location.href);
+            return (x.protocol === 'http:' || x.protocol === 'https:') ? x.href : null;
+        } catch { return null; }
+    }
+    function img(src, alt, cls) {
+        const node = el('img', { alt: alt || '', class: cls, loading: 'lazy', decoding: 'async' });
+        const url = safeUrl(src);
+        node.src = url || '/static/icon.svg';
+        node.addEventListener('error', () => { node.src = '/static/icon.svg'; }, { once: true });
+        return node;
+    }
+    function fmtSize(n) {
+        n = Number(n);
+        if (!Number.isFinite(n) || n <= 0) return '';
+        const u = ['B', 'KB', 'MB', 'GB'];
+        let i = 0;
+        while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+        return `${n.toFixed(i ? 1 : 0)} ${u[i]}`;
+    }
+    function fmtDate(d) {
+        if (d === null || d === undefined || d === '') return '';
+        const t = typeof d === 'number' ? new Date(d) : new Date(String(d));
+        return isNaN(t) ? String(d) : t.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    }
+    // replaceChildren() stringifies null ("null"); optional children are null.
+    function fill(parent, ...children) { parent.replaceChildren(...children.flat().filter(Boolean)); }
+    function str(v) { return typeof v === 'string' ? v : (v === null || v === undefined ? '' : String(v)); }
+
+    // --- data -------------------------------------------------------------
+    function iosApps(src) {
+        return (Array.isArray(src && src.apps) ? src.apps : []).filter(a => a && typeof a === 'object').map(a => {
+            const versions = Array.isArray(a.versions) ? a.versions.filter(v => v && typeof v === 'object') : [];
+            return {
+                platform: 'ios',
+                id: str(a.bundleIdentifier),
+                name: str(a.name) || str(a.bundleIdentifier),
+                developer: str(a.developerName),
+                subtitle: str(a.subtitle),
+                description: str(a.localizedDescription),
+                icon: a.iconURL,
+                category: str(a.category),
+                screenshots: screenshotsOf(a),
+                versions: versions.map(v => ({
+                    version: str(v.version) + (v.buildVersion && str(v.buildVersion) !== str(v.version) ? ` (${str(v.buildVersion)})` : ''),
+                    date: v.date,
+                    size: v.size,
+                    min: v.minOSVersion ? `iOS ${str(v.minOSVersion)}+` : '',
+                    notes: str(v.localizedDescription),
+                    url: v.downloadURL,
+                })),
+            };
+        });
+    }
+    function screenshotsOf(a) {
+        let s = a.screenshots;
+        if (s && !Array.isArray(s) && typeof s === 'object') s = [].concat(s.iphone || [], s.ipad || []);
+        if (!Array.isArray(s) || !s.length) s = Array.isArray(a.screenshotURLs) ? a.screenshotURLs : [];
+        return s.map(x => typeof x === 'string' ? x : (x && x.imageURL)).filter(Boolean).slice(0, 12);
+    }
+    function androidApps(index) {
+        if (!index || !Array.isArray(index.apps)) return [];
+        const pkgs = (index.packages && typeof index.packages === 'object') ? index.packages : {};
+        return index.apps.filter(a => a && typeof a === 'object' && a.packageName).map(a => {
+            const loc = (a.localized && (a.localized['en-US'] || a.localized.en || Object.values(a.localized)[0])) || {};
+            const pkg = str(a.packageName);
+            let icon = null;
+            if (a.icon) icon = `/fdroid/repo/icons-640/${encodeURIComponent(a.icon)}`;
+            else if (loc.icon) icon = `/fdroid/repo/${encodeURIComponent(pkg)}/en-US/${encodeURIComponent(loc.icon)}`;
+            const versions = (Array.isArray(pkgs[pkg]) ? pkgs[pkg] : []).slice().sort((x, y) => (y.versionCode || 0) - (x.versionCode || 0));
+            return {
+                platform: 'android',
+                id: pkg,
+                name: str(a.name || loc.name) || pkg,
+                developer: str(a.authorName),
+                subtitle: str(a.summary || loc.summary),
+                description: str(a.description || loc.description),
+                icon,
+                category: Array.isArray(a.categories) ? a.categories.map(str).join(', ') : '',
+                screenshots: [],
+                versions: versions.map(v => ({
+                    version: `${str(v.versionName)} (${str(v.versionCode)})`,
+                    date: v.added,
+                    size: v.size,
+                    min: v.minSdkVersion ? `Android SDK ${str(v.minSdkVersion)}+` : '',
+                    notes: v.signer ? `signer ${str(v.signer).slice(0, 16)}…` : '',
+                    url: v.apkName ? `/fdroid/repo/${encodeURIComponent(v.apkName)}` : null,
+                })),
+            };
+        });
+    }
+
+    // --- rendering ----------------------------------------------------------
+    function renderHeader() {
+        const src = state.ios || {};
+        const name = str(src.name) || (state.android && state.android.repo && str(state.android.repo.name)) || 'Store';
+        $('sourceName').textContent = name;
+        $('sourceSubtitle').textContent = str(src.subtitle || src.description);
+        document.title = `${name} · Store Preview`;
+        const icon = safeUrl(src.iconURL);
+        if (icon) $('sourceIcon').src = icon;
+        if (/^#?[0-9a-f]{6}$/i.test(str(src.tintColor))) {
+            document.documentElement.style.setProperty('--accent', '#' + str(src.tintColor).replace('#', ''));
+        }
+
+        const sourceUrl = new URL('/source.json', location.href).href;
+        const featherUrl = sourceUrl.replace(/^https?:\/\//, 'feather://');
+        const altstoreUrl = 'altstore://source?url=' + encodeURIComponent(sourceUrl);
+        const actions = $('actions');
+        fill(actions,
+            el('a', { class: 'btn primary', href: featherUrl, text: 'Open in Feather' }),
+            el('a', { class: 'btn', href: altstoreUrl, text: 'Open in AltStore' }),
+            el('button', { class: 'btn', type: 'button', text: 'Copy source URL', on: { click: (e) => copy(sourceUrl, e.currentTarget) } }),
+            el('button', { class: 'btn', type: 'button', text: 'iOS QR', on: { click: () => showQr('Scan with the iPhone camera to add this source to Feather.', '/qr') } }),
+            state.android ? el('button', { class: 'btn', type: 'button', text: 'Android QR', on: { click: () => showQr('Scan with the F-Droid app (or the phone camera) to add this repository.', '/fdroid/qr') } }) : null,
+        );
+    }
+    function copy(text, btn) {
+        const done = () => { const t = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = t; }, 1200); };
+        if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, () => prompt('Source URL', text));
+        else prompt('Source URL', text);
+    }
+
+    function renderNews() {
+        const news = state.platform === 'ios' && state.ios && Array.isArray(state.ios.news) ? state.ios.news.filter(n => n && typeof n === 'object') : [];
+        $('newsSection').hidden = !news.length;
+        fill($('news'),...news.slice(0, 10).map(n => {
+            const link = safeUrl(n.url);
+            const body = el('div', null,
+                el('h3', { text: str(n.title) }),
+                el('p', { text: str(n.caption) }),
+                el('p', { text: fmtDate(n.date) }),
+                link ? el('a', { href: link, target: '_blank', rel: 'noopener noreferrer', text: 'Open link' }) : null);
+            return el('article', { class: 'news-item' }, n.imageURL ? img(n.imageURL, '') : null, body);
+        }));
+    }
+
+    function renderList() {
+        const ios = iosApps(state.ios), android = androidApps(state.android);
+        $('count-ios').textContent = state.ios ? `(${ios.length})` : '';
+        $('count-android').textContent = state.android ? `(${android.length})` : '';
+        $('tab-android').hidden = !state.android && !state.androidError;
+
+        const featured = new Set(state.ios && Array.isArray(state.ios.featuredApps) ? state.ios.featuredApps.map(str) : []);
+        let apps = state.platform === 'ios' ? ios : android;
+        const q = state.query.trim().toLowerCase();
+        if (q) apps = apps.filter(a => [a.name, a.id, a.developer, a.subtitle].some(s => s.toLowerCase().includes(q)));
+        if (state.platform === 'ios') apps = apps.slice().sort((a, b) => (featured.has(b.id) - featured.has(a.id)));
+
+        $('listTitle').textContent = state.platform === 'ios' ? 'iOS apps' : 'Android apps';
+        fill($('grid'),...apps.map(a => {
+            const latest = a.versions[0];
+            return el('button', { class: 'card', type: 'button', on: { click: () => openDetail(a) } },
+                img(a.icon, ''),
+                el('div', { class: 'meta' },
+                    el('div', { class: 'name' }, a.name, featured.has(a.id) && a.platform === 'ios' ? el('span', { class: 'badge', text: 'Featured' }) : null),
+                    el('div', { class: 'sub', text: a.subtitle || a.developer || a.id }),
+                    latest ? el('div', { class: 'ver', text: [latest.version, fmtDate(latest.date)].filter(Boolean).join(' · ') }) : null));
+        }));
+
+        const err = state.platform === 'ios' ? state.iosError : state.androidError;
+        const empty = $('empty');
+        empty.hidden = apps.length > 0;
+        empty.textContent = err ? err : (q ? 'No apps match your search.' : 'No apps published yet.');
+    }
+
+    function openDetail(a) {
+        const rows = a.versions.map(v => {
+            const url = safeUrl(v.url);
+            return el('tr', null,
+                el('td', { class: 'mono', text: v.version }),
+                el('td', { text: fmtDate(v.date) }),
+                el('td', { text: fmtSize(v.size) }),
+                el('td', { text: v.min }),
+                el('td', { class: 'notes', text: v.notes }),
+                el('td', null, url ? el('a', { href: url, rel: 'noopener', text: a.platform === 'ios' ? 'IPA' : 'APK' }) : null));
+        });
+        const dlg = $('detail');
+        fill($('detailBody'),
+            el('div', { class: 'detail-head' },
+                img(a.icon, ''),
+                el('div', null, el('h3', { id: 'detailName', text: a.name }), el('p', { text: a.developer || a.id })),
+                el('button', { class: 'btn close', type: 'button', text: 'Close', on: { click: () => dlg.close() } })),
+            el('div', { class: 'facts' },
+                el('span', { class: 'mono', text: a.id }),
+                a.category ? el('span', { text: a.category }) : null,
+                a.versions.length ? el('span', { text: `${a.versions.length} version${a.versions.length === 1 ? '' : 's'}` }) : null),
+            a.subtitle ? el('p', { class: 'desc', text: a.subtitle }) : null,
+            a.screenshots.length ? el('div', { class: 'shots' }, a.screenshots.map(s => img(s, 'Screenshot'))) : null,
+            a.description ? el('p', { class: 'desc', text: a.description }) : null,
+            rows.length
+                ? el('div', { class: 'table-scroll' }, el('table', null,
+                    el('thead', null, el('tr', null, ...['Version', 'Date', 'Size', 'Requires', 'Notes', ''].map(h => el('th', { text: h })))),
+                    el('tbody', null, rows)))
+                : el('p', { class: 'muted', text: 'No published versions.' }),
+            el('p', { class: 'muted', text: a.platform === 'ios'
+                ? 'Downloading an IPA here does not install it; subscribers install through Feather or AltStore.'
+                : 'F-Droid verifies each APK against the repository signature; a direct download skips that check.' }));
+        dlg.showModal();
+    }
+
+    function showQr(caption, src) {
+        const dlg = $('detail');
+        fill($('detailBody'),
+            el('div', { class: 'detail-head' },
+                el('div', null, el('h3', { id: 'detailName', text: 'Add this source' }), el('p', { text: caption })),
+                el('button', { class: 'btn close', type: 'button', text: 'Close', on: { click: () => dlg.close() } })),
+            el('img', { class: 'qr', alt: 'QR code', src: `${src}?_=${Date.now()}` }));
+        dlg.showModal();
+    }
+
+    // --- wiring ------------------------------------------------------------
+    for (const btn of document.querySelectorAll('.tabs button')) {
+        btn.addEventListener('click', () => {
+            state.platform = btn.dataset.platform;
+            for (const b of document.querySelectorAll('.tabs button')) b.setAttribute('aria-selected', String(b === btn));
+            renderNews(); renderList();
+        });
+    }
+    $('search').addEventListener('input', (e) => { state.query = e.target.value; renderList(); });
+    $('detail').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
+
+    async function getJson(url) {
+        const res = await fetch(url, { cache: 'no-store', credentials: 'omit' });
+        if (!res.ok) throw new Error(`${url} answered ${res.status}`);
+        return res.json();
+    }
+    Promise.allSettled([getJson('/source.json'), getJson('/fdroid/repo/index-v1.json')]).then(([ios, android]) => {
+        if (ios.status === 'fulfilled') state.ios = ios.value;
+        else state.iosError = 'The iOS source could not be loaded.';
+        if (android.status === 'fulfilled') state.android = android.value;
+        else state.androidError = null;   // no Android repo configured: hide the tab
+        if (!state.ios && state.android) {
+            state.platform = 'android';
+            $('tab-ios').setAttribute('aria-selected', 'false');
+            $('tab-android').setAttribute('aria-selected', 'true');
+        }
+        renderHeader(); renderNews(); renderList();
+    });
+})();
+</script>
+</body>
+</html>
