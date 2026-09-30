@@ -193,6 +193,13 @@
         .form-group {
             margin-bottom: 20px;
         }
+        .field-hint { display: block; margin-top: 6px; font-size: 12px; color: var(--label-secondary); }
+        label .optional { font-weight: 400; font-size: 12px; color: var(--label-tertiary); margin-left: 4px; }
+        .checkbox-label { display: flex; align-items: center; gap: 8px; margin-bottom: 0; }
+        .news-row { display: grid; grid-template-columns: 1fr auto; gap: 12px; }
+        @media (max-width: 560px) { .news-row { grid-template-columns: 1fr; } }
+        .color-field { display: flex; align-items: center; gap: 10px; }
+        .color-field input[type="color"] { width: 56px; height: 44px; padding: 4px; cursor: pointer; flex: none; }
         label {
             display: block;
             margin-bottom: 8px;
@@ -787,17 +794,49 @@
             <h2 style="margin-top:40px;">News</h2>
             <div id="newsItems"></div>
             <form id="newsForm">
-                <input name="identifier" placeholder="Identifier" required maxlength="128">
-                <input name="title" placeholder="Title" required maxlength="200">
-                <textarea name="caption" placeholder="Caption" required maxlength="1000"></textarea>
-                <input name="date" type="datetime-local" required>
-                <input name="tintColor" type="color" value="#4185a9">
-                <input name="imageURL" type="url" placeholder="Image URL (optional)">
-                <input name="url" type="url" placeholder="Article URL (optional)">
-                <select name="appID"><option value="">No linked app</option></select>
-                <label><input name="notify" type="checkbox" style="width:auto;"> Client notify metadata (does not send a server notification)</label>
-                <button type="submit" class="btn">Save News Item</button>
-                <button type="button" class="btn btn-secondary" onclick="resetNewsForm()">New item</button>
+                <input type="hidden" name="identifier">
+                <p class="field-hint" id="newsEditing" hidden></p>
+                <div class="form-group">
+                    <label for="newsTitle">Title</label>
+                    <input id="newsTitle" name="title" required maxlength="200" placeholder="Version 2.0 is out">
+                </div>
+                <div class="form-group">
+                    <label for="newsCaption">Caption</label>
+                    <textarea id="newsCaption" name="caption" required maxlength="1000" placeholder="One or two sentences about what changed."></textarea>
+                    <small class="field-hint">Shown under the title on the news card in Feather and AltStore.</small>
+                </div>
+                <div class="news-row">
+                    <div class="form-group">
+                        <label for="newsDate">Date</label>
+                        <input id="newsDate" name="date" type="datetime-local" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="newsTint">Card colour</label>
+                        <div class="color-field">
+                            <input id="newsTint" name="tintColor" type="color" value="#4185a9">
+                            <span id="newsTintValue" style="font-family: var(--mono); font-size: 13px;">#4185A9</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="newsImage">Image URL <span class="optional">optional</span></label>
+                    <input id="newsImage" name="imageURL" type="url" placeholder="https://…/banner.png">
+                </div>
+                <div class="form-group">
+                    <label for="newsUrl">Link <span class="optional">optional</span></label>
+                    <input id="newsUrl" name="url" type="url" placeholder="https://… (opened when the card is tapped)">
+                </div>
+                <div class="form-group">
+                    <label for="newsApp">Linked app <span class="optional">optional</span></label>
+                    <select id="newsApp" name="appID"><option value="">No linked app</option></select>
+                    <small class="field-hint">Tapping the card opens this app's page instead of the link.</small>
+                </div>
+                <div class="form-group">
+                    <label class="checkbox-label"><input name="notify" type="checkbox" style="width:auto;"> Show as a notification on devices</label>
+                    <small class="field-hint">Only tells Feather/AltStore it may notify; this server sends nothing.</small>
+                </div>
+                <button type="submit" class="btn" id="newsSubmit">Publish news item</button>
+                <button type="button" class="btn btn-secondary" onclick="resetNewsForm()">Clear form</button>
             </form>
 
         </div>
@@ -3051,7 +3090,7 @@
                 `<option value="${escapeHtml(app.bundleIdentifier || '')}">${escapeHtml(app.name || app.bundleIdentifier || '')}</option>`
             ).join('');
             document.getElementById('newsItems').innerHTML = (data.news || []).map(item =>
-                `<div class="app-card"><strong>${escapeHtml(item.title || '')}</strong> — ${escapeHtml(item.date || '')}<p>${escapeHtml(item.caption || '')}</p>` +
+                `<div class="app-card"><strong>${escapeHtml(item.title || '')}</strong> — ${escapeHtml(item.date ? new Date(item.date).toLocaleString() : '')}<p>${escapeHtml(item.caption || '')}</p>` +
                 `<button type="button" class="btn btn-secondary" data-id="${escapeHtml(item.identifier || '')}" onclick="editNewsItem(this.dataset.id)">Edit</button> ` +
                 `<button type="button" class="btn btn-danger" data-id="${escapeHtml(item.identifier || '')}" onclick="deleteNewsItem(this.dataset.id)">Delete</button></div>`
             ).join('') || '<p>No news items.</p>';
@@ -3068,10 +3107,39 @@
             if (response.ok) loadEditorial();
         }
 
+        // <input type="datetime-local"> is local time; news dates are stored in UTC.
+        function toLocalDateInput(value) {
+            const d = value ? new Date(value) : new Date();
+            if (isNaN(d)) return '';
+            return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+        }
+
+        // The server keys news items by an identifier ([A-Za-z0-9._-]); derive one
+        // from the title and date instead of asking for it, never reusing a taken one.
+        function newsIdentifierFor(title, dateValue) {
+            const slug = title.normalize('NFKD').toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'news';
+            const base = `${slug}-${dateValue.replace(/[^0-9]/g, '').slice(0, 12)}`;
+            const taken = new Set((editorialCache.news || []).map(item => item.identifier));
+            let id = base, n = 2;
+            while (taken.has(id)) id = `${base}-${n++}`;
+            return id;
+        }
+
+        function syncNewsTint() {
+            const form = document.getElementById('newsForm');
+            document.getElementById('newsTintValue').textContent = form.tintColor.value.toUpperCase();
+        }
+
         function resetNewsForm() {
             const form = document.getElementById('newsForm');
             form.reset();
+            form.identifier.value = '';
             form.tintColor.value = '#4185a9';
+            form.date.value = toLocalDateInput();
+            syncNewsTint();
+            document.getElementById('newsEditing').hidden = true;
+            document.getElementById('newsSubmit').textContent = 'Publish news item';
         }
 
         function editNewsItem(identifier) {
@@ -3081,19 +3149,23 @@
             for (const field of ['identifier', 'title', 'caption', 'tintColor', 'imageURL', 'url', 'appID']) {
                 form.elements[field].value = item[field] || (field === 'tintColor' ? '#4185a9' : '');
             }
-            form.date.value = (item.date || '').slice(0, 16);
+            form.date.value = toLocalDateInput(item.date);
             form.notify.checked = item.notify === true;
-            form.identifier.readOnly = true;
+            syncNewsTint();
+            const editing = document.getElementById('newsEditing');
+            editing.textContent = `Editing "${item.title || item.identifier}". Clear the form to write a new item instead.`;
+            editing.hidden = false;
+            document.getElementById('newsSubmit').textContent = 'Save changes';
             form.scrollIntoView({behavior: 'smooth'});
         }
 
-        document.getElementById('newsForm').addEventListener('reset', event => {
-            event.target.identifier.readOnly = false;
-        });
+        document.getElementById('newsForm').tintColor.addEventListener('input', syncNewsTint);
+        resetNewsForm();
 
         document.getElementById('newsForm').addEventListener('submit', async event => {
             event.preventDefault();
             const form = event.target;
+            if (!form.identifier.value) form.identifier.value = newsIdentifierFor(form.title.value, form.date.value);
             const body = {
                 identifier: form.identifier.value, title: form.title.value,
                 caption: form.caption.value, date: new Date(form.date.value).toISOString(),
@@ -3106,6 +3178,7 @@
             const data = await response.json();
             showToast(response.ok ? 'News item saved' : (data.error || 'Save failed'), response.ok ? 'success' : 'error');
             if (response.ok) { resetNewsForm(); loadEditorial(); }
+            else if (document.getElementById('newsEditing').hidden) form.identifier.value = '';
         });
 
         async function deleteNewsItem(identifier) {
