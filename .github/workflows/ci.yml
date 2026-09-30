@@ -1,0 +1,196 @@
+# Tests, image build + smoke, and GHCR publish. Replaces the Jenkinsfile.
+# 3.11 is what the container ships (Dockerfile: python:3.11-slim); 3.14 is the
+# development host. Every pin in requirements.txt has to install on both.
+#
+# Images are built and smoke-tested on every push and PR -- nothing in tests/
+# builds an image, so a broken .dockerignore line or a purged base digest is
+# only caught here. Only main pushes, and only after all three smokes pass.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/t1nk333r/feather
+  BOT_IMAGE: ghcr.io/t1nk333r/feather-bot
+  FDROID_IMAGE: ghcr.io/t1nk333r/feather-fdroid
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: python -m pytest tests/ -q -p no:cacheprovider
+        env:
+          ADMIN_PASSWORD: ci-test-not-a-real-password
+
+  pin-drift:
+    name: requests pin drift check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          set -eu
+          REQ="$(grep -oP '^requests==\K[0-9.]+' requirements.txt)"
+          BOT="$(grep -oP 'requests==\K[0-9.]+' Dockerfile.bot)"
+          echo "requirements.txt: $REQ   Dockerfile.bot: $BOT"
+          [ "$REQ" = "$BOT" ] || { echo "FAIL: requests pins have drifted"; exit 1; }
+
+  images:
+    name: Images (build, smoke, publish on main)
+    needs: [test, pin-drift]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      PUBLISH: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Compute tags
+        run: |
+          echo "SHORT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "SOURCE_LABEL=org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" >> "$GITHUB_ENV"
+
+      - name: Build image
+        run: |
+          docker build --label "$SOURCE_LABEL" \
+            -t "$IMAGE:main" -t "$IMAGE:latest" -t "$IMAGE:sha-$SHORT" .
+
+      - name: Smoke-test image
+        # The release importer must run, the app must refuse to boot without
+        # ADMIN_PASSWORD, and the three endpoints must answer.
+        run: |
+          set -eu
+          OUT="$(docker run --rm "$IMAGE:main" python scripts/release_source_ingest.py --help)"
+          echo "$OUT" | grep -q -- "--apply" \
+            || { echo "FAIL: release importer --help did not mention --apply"; exit 1; }
+          echo "ok: release importer --help works and mentions --apply"
+          OUT="$(docker run --rm -e DATA_DIR=/tmp/feather-data "$IMAGE:main" python -c "import app" 2>&1 || true)"
+          echo "$OUT" | grep -q "ADMIN_PASSWORD" \
+            || { echo "FAIL: import without ADMIN_PASSWORD did not name ADMIN_PASSWORD (got: $OUT)"; exit 1; }
+          if docker run --rm -e DATA_DIR=/tmp/feather-data "$IMAGE:main" python -c "import app" >/dev/null 2>&1; then
+            echo "FAIL: image booted without ADMIN_PASSWORD"; exit 1
+          fi
+          echo "ok: refuses to boot without ADMIN_PASSWORD, and names it"
+          docker run --rm -e ADMIN_PASSWORD=ci-smoke-test-not-a-real-password \
+            -e DATA_DIR=/tmp/feather-data "$IMAGE:main" \
+            python -c "import app, pyaxmlparser, yaml, boto3, waitress; print('imports ok')" \
+            | grep -q "imports ok"
+          echo "ok: runtime dependencies import"
+          docker run -d --rm --name feather-smoke \
+            -e DATA_DIR=/tmp/feather-data \
+            -e ADMIN_PASSWORD=ci-smoke-test-not-a-real-password "$IMAGE:main"
+          for i in $(seq 1 30); do
+            if docker exec feather-smoke curl -fsS -o /dev/null http://localhost:5000/source.json; then break; fi
+            sleep 1
+          done
+          docker exec feather-smoke curl -fsS -o /dev/null -w 'source.json  %{http_code} %{content_type}\n' \
+            http://localhost:5000/source.json
+          docker exec feather-smoke curl -fsS -o /dev/null -w 'qr           %{http_code} %{content_type}\n' \
+            http://localhost:5000/qr
+          docker exec feather-smoke curl -fsS -o /dev/null -w 'index        %{http_code}\n' \
+            http://localhost:5000/
+          docker logs feather-smoke
+          docker stop feather-smoke
+
+      - name: Build bot image
+        run: |
+          docker build -f Dockerfile.bot --label "$SOURCE_LABEL" \
+            -t "$BOT_IMAGE:main" -t "$BOT_IMAGE:latest" -t "$BOT_IMAGE:sha-$SHORT" .
+
+      - name: Smoke-test bot image
+        # The worker must refuse to run unconfigured, naming what is missing.
+        run: |
+          set -eu
+          OUT="$(docker run --rm "$BOT_IMAGE:main" 2>&1 || true)"
+          echo "$OUT"
+          echo "$OUT" | grep -q "TELEGRAM_BOT_TOKEN" \
+            || { echo "FAIL: did not name the missing variables"; exit 1; }
+          if docker run --rm "$BOT_IMAGE:main" >/dev/null 2>&1; then
+            echo "FAIL: bot started with no configuration"; exit 1
+          fi
+          echo "ok: refuses to run unconfigured, names the missing variables"
+
+      - name: Build fdroid image
+        run: |
+          docker build -f Dockerfile.fdroid --label "$SOURCE_LABEL" \
+            -t "$FDROID_IMAGE:main" -t "$FDROID_IMAGE:latest" -t "$FDROID_IMAGE:sha-$SHORT" .
+
+      - name: Smoke-test fdroid image
+        # Must refuse to run without the keystore password, and reject
+        # non-numeric interval/timeout values, naming the variable each time.
+        run: |
+          set -eu
+          OUT="$(docker run --rm "$FDROID_IMAGE:main" 2>&1 || true)"
+          echo "$OUT" | grep -q "FDROID_KEYSTORE_PASSWORD" \
+            || { echo "FAIL: did not name FDROID_KEYSTORE_PASSWORD"; exit 1; }
+          echo "ok: refuses to run unconfigured"
+          OUT="$(docker run --rm -e FDROID_KEYSTORE_PASSWORD=ci-not-real \
+            -e FDROID_UPDATE_INTERVAL=abc "$FDROID_IMAGE:main" 2>&1 || true)"
+          echo "$OUT" | grep -q "FDROID_UPDATE_INTERVAL" \
+            || { echo "FAIL: did not reject a non-numeric update interval"; exit 1; }
+          echo "ok: rejects a non-numeric update interval"
+          OUT="$(docker run --rm -e FDROID_KEYSTORE_PASSWORD=ci-not-real \
+            -e FDROID_UPDATE_TIMEOUT=abc "$FDROID_IMAGE:main" 2>&1 || true)"
+          echo "$OUT" | grep -q "FDROID_UPDATE_TIMEOUT" \
+            || { echo "FAIL: did not reject a non-numeric update timeout"; exit 1; }
+          echo "ok: rejects a non-numeric update timeout"
+          docker run --rm --entrypoint sh "$FDROID_IMAGE:main" -c 'command -v timeout' \
+            || { echo "FAIL: timeout(1) missing from the fdroid image"; exit 1; }
+          echo "ok: timeout(1) available for FDROID_UPDATE_TIMEOUT"
+
+      - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
+        # GHCR_PAT (write:packages) if set; otherwise GITHUB_TOKEN, which works
+        # once each package grants this repo write access (package settings ->
+        # Manage Actions access) -- the packages were first pushed by a PAT.
+        run: |
+          if [ -n "${GHCR_PAT:-}" ]; then
+            echo "$GHCR_PAT" | docker login "$REGISTRY" -u "${GHCR_USER:-${{ github.repository_owner }}}" --password-stdin
+          else
+            echo "$GITHUB_TOKEN" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+          fi
+        env:
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+          GHCR_USER: ${{ secrets.GHCR_USER }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push images
+        if: env.PUBLISH == 'true'
+        run: |
+          set -eu
+          for img in "$IMAGE" "$BOT_IMAGE" "$FDROID_IMAGE"; do
+            for tag in main latest "sha-$SHORT"; do
+              docker push "$img:$tag"
+            done
+          done
+
+      - name: Log out of GHCR
+        if: always() && env.PUBLISH == 'true'
+        run: docker logout "$REGISTRY" || true

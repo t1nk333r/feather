@@ -12,7 +12,7 @@ A self-hosted iOS AltStore source and third-party Android F-Droid repository. It
 - `scripts/release_source_ingest.py` — GitHub/GitLab release importer
 - `scripts/fdroid_index_loop.sh` — F-Droid signing/index loop
 - `Dockerfile.bot`, `Dockerfile.fdroid` — optional service images
-- `Jenkinsfile` — test, build, smoke, then publish pipeline
+- `.github/workflows/ci.yml` — test, build, smoke, then publish pipeline (GitHub Actions; replaced the Jenkinsfile on 2026-09-30)
 - `scripts/migrate_ipas_to_garage.py` — one-shot local-disk → Garage S3 migration
 - `scripts/ipa_inspection.py`, `scripts/apk_inspection.py` — shared artifact inspectors, imported by both `app.py` (via `sys.path` at `app.py:35-36`) and the importers
 - `scripts/certificate_inspection.py` — p12 + `.mobileprovision` inspector (plan 087); stdlib for the profile, `cryptography` for the p12
@@ -30,7 +30,7 @@ ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q -p no:cacheprovider
 
 **All plans through 087 are implemented or explicitly rejected — the backlog is empty.** See `plans/README.md` for historical statuses and deferred findings. `main` is at `95ffa50`, pushed **and deployed** — the running `altstore-source-manager` was rebuilt from it on 2026-09-19, so regex asset matching (085) and the certificate panel (087) are live. The working tree is clean apart from the untracked `run-local.sh` and `resume.txt`.
 
-Jenkins tests Python 3.11 and 3.14, checks the `requests` pin, builds and smokes all three images, then publishes `ghcr.io/t1nk333r/feather`, `feather-bot`, and `feather-fdroid` only after every smoke stage passes.
+CI is GitHub Actions (`.github/workflows/ci.yml`; the Jenkinsfile was removed 2026-09-30). It tests Python 3.11 and 3.14, checks the `requests` pin, and builds and smokes all three images on **every** push and PR; only `main` then publishes `ghcr.io/t1nk333r/feather`, `feather-bot`, and `feather-fdroid`, after every smoke passes. Publishing uses the `GHCR_PAT` secret if set, else `GITHUB_TOKEN` (which needs each package's *Manage Actions access* to grant this repo write). The Jenkins sections below are historical.
 
 The Android QR encodes a standard `fdroidrepos://` deep link while the manual repository address remains HTTPS.
 

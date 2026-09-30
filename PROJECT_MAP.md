@@ -7,7 +7,7 @@
 - Local or Garage S3 storage for iOS artifacts; local F-Droid repository plus an official `fdroidserver` sidecar for Android.
 - `cryptography` 50.0.1 for PKCS#12 parsing; the only cryptographic dependency, added for certificate inspection.
 - Pytest verification: `ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q -p no:cacheprovider`.
-- Docker Compose deployment and Jenkins build/smoke/publish pipeline.
+- Docker Compose deployment and GitHub Actions build/smoke/publish pipeline (`.github/workflows/ci.yml`).
 
 [SYSTEM_FLOW]
 
