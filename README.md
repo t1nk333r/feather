@@ -1,36 +1,52 @@
 # Feather
 
-A self-hosted app store backend for iOS and Android.
+A self-hosted app store for iOS and Android: one server, one admin page, two kinds of subscribers.
 
-- **iOS:** serves an [AltStore](https://altstore.io)/Feather-compatible `source.json` and the `.ipa` files it points to.
-- **Android:** serves a signed [F-Droid](https://f-droid.org) repository, built by the official `fdroidserver` in a sidecar container.
-- **Admin UI** at `/` to publish, edit and delete apps on both platforms, curate featured apps and news, and watch catalog health.
-- **Store preview** at `/store`: a public, read-only storefront showing exactly what subscribers see.
-- **Hands-off publishing:** import from GitHub/GitLab releases (one-off, scheduled, or cron), or forward files to a Telegram bot.
+- **iOS** — an [AltStore](https://altstore.io) / Feather-compatible source (`/source.json`) plus the `.ipa` files it points to.
+- **Android** — a signed [F-Droid](https://f-droid.org) repository (`/fdroid/repo`), built by the official `fdroidserver` in a sidecar container.
+- **Admin page** (`/`) — publish, edit and delete apps on both platforms, curate featured apps and news, check catalog health.
+- **Store preview** (`/store`) — a public, read-only storefront showing exactly what subscribers see; works in any browser.
+- **Hands-off publishing** — import from GitHub/GitLab releases (one-off, scheduled in-app, or from cron), or forward files to a Telegram bot.
 
-Everything runs from Docker Compose; the Android, Telegram and cron pieces are opt-in profiles.
+Everything runs with Docker Compose. Android, Telegram and the cron importer are opt-in profiles.
+
+---
 
 ## How it fits together
 
 ```
-                ┌──────────────────────────── ./data ────────────────────────────┐
- iPhone ──────► │ altstore-manager (app.py)   source.json, ipas/, icons/          │
-  /source.json  │   admin UI, API, /store  ── fdroid/  ◄── fdroid-index sidecar   │ ◄── Android
-  /ipas/...     │                                repo/, metadata/   (signs index)  │   /fdroid/repo
-                └─────────────────────────────────────────────────────────────────┘
-      optional:  ipa-ingest-bot + telegram-bot-api (profile telegram)
-                 release-import (profile release-import, run from cron)
+                  ┌───────────────────────────── ./data ─────────────────────────────┐
+ iPhone ────────► │ altstore-manager (app.py)        source.json  ipas/  icons/        │
+   /source.json   │   admin page · API · /store ──►  fdroid/repo  fdroid/metadata    │ ◄──── Android
+   /ipas/...      │                                        ▲                          │   /fdroid/repo
+                  │                  fdroid-index sidecar ─┘ builds + signs the index │
+                  └──────────────────────────────────────────────────────────────────┘
+        optional: Garage/S3 bucket serves IPA, icon and APK downloads (302 redirects)
+                  release-import (cron) · ipa-ingest-bot + telegram-bot-api (Telegram)
 ```
 
-- `altstore-manager` is the product: a single Flask process served by Waitress.
-- `fdroid-index` only turns APKs + metadata into a signed F-Droid index. The app drops APKs into `data/fdroid/repo/` and touches a marker file; the sidecar rebuilds within `FDROID_UPDATE_INTERVAL` seconds.
-- Nothing talks to a database. `data/` **is** the state — back it up.
+- `altstore-manager` is the product: one Flask process served by Waitress. There is no database — **`data/` is the state**.
+- `fdroid-index` only turns APKs + metadata into a signed F-Droid index. The app drops files into `data/fdroid/` and touches a marker; the sidecar rebuilds within `FDROID_UPDATE_INTERVAL` seconds.
+
+### Where your data lives
+
+| What | On the host (stack folder) | Served at | With Garage enabled |
+|---|---|---|---|
+| iOS catalog | `data/source.json` (+ 20 snapshots in `data/backups/`) | `/source.json` | stays local |
+| IPAs | `data/ipas/<bundle>/<version>.ipa` | `/ipas/<bundle>/<version>.ipa` | moved to the bucket (`STORAGE_BACKEND=garage`) |
+| App icons | `data/icons/<bundle>/icon.<ext>` | `/icons/<bundle>/icon.<ext>` | moved to the bucket (`ICON_STORAGE_BACKEND`) |
+| APKs | `data/fdroid/repo/<package>_<versionCode>.apk` | `/fdroid/repo/<file>.apk` | **copied** to `<bucket>/apks/`, downloads redirected; the local copy stays because the sidecar signs from it |
+| Android metadata + icons | `data/fdroid/metadata/<package>.yml`, `metadata/<package>/en-US/icon.png` | inside the signed index | stays local |
+| F-Droid signing key | `data/fdroid/keystore.p12` | — | stays local — **back it up** |
+| Importer config/state | `data/release-import/` | — | stays local |
+
+---
 
 ## Quick start
 
 ```bash
 cp .env.example .env
-# set at least ADMIN_PASSWORD, SECRET_KEY and PUBLIC_BASE_URL
+# set at least ADMIN_PASSWORD, SECRET_KEY and PUBLIC_BASE_URL (e.g. https://apps.example.com)
 
 mkdir -p data
 sudo chown -R 999:999 data      # the container runs as uid 999; a fresh bind mount is root-owned
@@ -39,37 +55,46 @@ docker compose pull
 docker compose up -d
 ```
 
-Open `http://<host>:7000`, sign in with `ADMIN_PASSWORD`, and add an app. Put a TLS reverse proxy in front before exposing it.
+Open `http://<host>:7000`, sign in with `ADMIN_PASSWORD`, and add an app. Put a TLS reverse proxy in front before exposing it to the internet.
 
-Skipping the `chown` is the most common first-run failure: the app starts but every write fails with `PermissionError`.
+> Skipping the `chown` is the most common first-run failure: the app starts, but every write fails with `PermissionError`.
 
 ## Subscribing devices
 
-| | How |
+| Device | How |
 |---|---|
-| **iOS (Feather)** | Scan the QR on the admin page or `/store`, or open `feather://<host>/source.json` |
-| **iOS (AltStore)** | Add source `https://<host>/source.json` |
-| **Android (F-Droid, Droid-ify)** | Scan the Android QR (`fdroidrepos://<host>/fdroid/repo?fingerprint=…`), or add `https://<host>/fdroid/repo` and enter the fingerprint shown in the Android tab |
-| **Any browser** | `https://<host>/store` — search, app details, version history, download links, and all of the above buttons/QRs |
+| **iPhone — Feather** | Scan the QR on the admin page or `/store`, or open `feather://<host>/source.json` |
+| **iPhone — AltStore** | Add source `https://<host>/source.json` |
+| **Android — F-Droid, Droid-ify** | Scan the Android QR (`fdroidrepos://<host>/fdroid/repo?fingerprint=…`), or add `https://<host>/fdroid/repo` and enter the fingerprint from the Android tab |
+| **Any browser** | `https://<host>/store` — search, details, version history, downloads, and the buttons/QRs above |
 
-`/store` reads only `/source.json` and `/fdroid/repo/index-v1.json`, the same public documents devices fetch, so it never shows anything a subscriber could not already see.
+`/store` only reads `/source.json` and the F-Droid index — the same public documents devices fetch — so it never shows anything a subscriber couldn't already see.
+
+---
 
 ## Publishing apps
 
 | Method | iOS | Android | Where |
 |---|---|---|---|
-| Admin UI upload or URL | ✓ | ✓ | "Add app" / "Android" tabs |
-| HTTP API (scripts, CI) | ✓ | ✓ | see [`UPLOADING.md`](./UPLOADING.md) |
-| Import a GitHub/GitLab release | ✓ | ✓ | "Import from Repo" tab |
-| Scheduled auto-import (in-app) | ✓ | ✓ | "Save & auto-import" on the same tab |
-| Cron importer (separate container) | ✓ | ✓ | [below](#cron-release-importer) |
-| Telegram bot (forward a file, `/add`) | ✓ | ✓ | [below](#telegram-ingest-and-notifications) |
+| Upload a file or paste a URL | ✓ | ✓ | admin page → **Add** / **Android** |
+| HTTP API (scripts, CI) | ✓ | ✓ | [`UPLOADING.md`](./UPLOADING.md) |
+| Import a GitHub/GitLab release | ✓ | ✓ | **Import** tab |
+| Scheduled auto-import (inside the app) | ✓ | ✓ | **Import** → *Save & auto-import* |
+| Cron importer (separate container) | ✓ | ✓ | [Cron importer](#cron-release-importer) |
+| Telegram bot (forward a file, `/add`) | ✓ | ✓ | [Telegram](#telegram-ingest-and-notifications) |
 
-Every path inspects the binary itself: the bundle ID/package and version come from `Info.plist` or `AndroidManifest.xml`, never from the filename. Re-publishing the same version is an idempotent no-op.
+What every path has in common:
 
-**API field names** are `ipaFile` and `apkFile`, not `file`. A wrong name fails with an error that reads like a missing artifact. [`UPLOADING.md`](./UPLOADING.md) documents the login flow, each endpoint's fields, and how to confirm a publish landed.
+- **The binary is the truth.** Bundle ID / package and version are read from `Info.plist` or `AndroidManifest.xml`, never from the filename. Publishing a version that already exists is a no-op.
+- **Bad files are refused up front.** A file that isn't a real IPA (e.g. an HTML error page) is rejected with the reason. Unsigned APKs are rejected, because F-Droid would silently never publish them.
+- **Icons come from the binary.** If you don't supply an icon, the IPA's own icon files or the APK's launcher icon are used. A supplied icon, or a real icon the app already has, is never replaced. For apps added before this existed, click **Fill missing icons** on the Apps tab (Android: **Rebuild Index** does it too). Limits: iOS icons that exist only inside `Assets.car`, and Android icons that are vector-only, can't be extracted — the default icon is shown.
+- **A different bundle ID is allowed, with a warning.** Renamed/patched builds are often catalogued under their own ID on purpose; devices still install and update them by the IPA's real identifier, so the response tells you.
 
-**Release assets** are matched per job with a glob (`*.apk`) or a full-match regex (`.*arm64-v8a\.apk`). Regex exists for projects that ship one APK per ABI; a match must select at most one asset per platform.
+**API field names** are `ipaFile` and `apkFile`, not `file` — a wrong name fails with an error that reads like a missing file. [`UPLOADING.md`](./UPLOADING.md) documents the login flow, each endpoint, and how to confirm a publish landed.
+
+**Release assets** are matched per job with a glob (`*.apk`) or a full-match regex (`.*arm64-v8a\.apk`). Regex exists for projects that ship one APK per CPU architecture; a job must match at most one asset per platform.
+
+---
 
 ## Android / F-Droid
 
@@ -83,62 +108,56 @@ mkdir -p data/fdroid && sudo chown -R 999:999 data/fdroid
 docker compose up -d
 ```
 
-The first start generates `data/fdroid/keystore.p12`. **Back up that file and `FDROID_KEYSTORE_PASSWORD` together.** Losing either creates a new signing key and a new fingerprint, and every subscribed device has to re-add the repo.
+The first start creates `data/fdroid/keystore.p12`. **Back up that file and `FDROID_KEYSTORE_PASSWORD` together.** Losing either means a new signing key and fingerprint, and every subscribed phone has to re-add the repo.
 
 What to expect:
 
-- **Unsigned APKs are rejected at upload.** F-Droid never publishes them, so accepting one would show "Added" for a version that never appears.
-- **Anything F-Droid still drops is reported.** A signed APK can still be skipped or archived by `fdroid update` (for example, a corrupt signature); the Android tab lists these under *Not published by F-Droid*, and `data/fdroid/last-update.json` records them in `rejected`.
-- **A stuck rebuild is killed** after `FDROID_UPDATE_TIMEOUT` seconds (default 1800) so one bad run can't freeze the index.
-- **Signer changes are flagged.** A new version signed with a different key publishes, but phones won't offer it as an update to the installed app; the Android tab warns about mixed signers.
+- **Rejected APKs are reported, never silent.** If `fdroid update` skips or archives an APK (e.g. a corrupt signature), the Android tab lists it under *Not published by F-Droid* and `data/fdroid/last-update.json` records it under `rejected`.
+- **A stuck rebuild is killed** after `FDROID_UPDATE_TIMEOUT` seconds (default 1800), so one bad run can't freeze the index.
+- **Signer changes are flagged.** A new version signed with a different key is published, but phones won't offer it as an update; the Android tab warns about mixed signers.
+- **Rebuild Index** re-signs the index, fills missing icons, and (with Garage) uploads any APKs the bucket is missing.
 
 Troubleshooting:
 
 ```bash
-docker logs --tail 20 feather-fdroid-index        # should end with "INFO: Finished"
-cat data/fdroid/last-update.json                  # "ok": true, plus any "rejected" entries
+docker logs --tail 20 feather-fdroid-index      # should end with "INFO: Finished"
+cat data/fdroid/last-update.json                # "ok": true, plus any "rejected" entries
 curl -s https://<host>/fdroid/repo/index-v1.json | python3 -c 'import json,sys; print(list(json.load(sys.stdin)["packages"]))'
 ```
 
-To rotate only the keystore password (the key and fingerprint stay the same), run `keytool -storepasswd -keystore /repo/keystore.p12 -storepass:env FDROID_KEYSTORE_PASSWORD -new:env NEW_PASSWORD` inside the sidecar, then update `.env` and restart it.
+To rotate only the keystore password (key and fingerprint unchanged), run `keytool -storepasswd -keystore /repo/keystore.p12 -storepass:env FDROID_KEYSTORE_PASSWORD -new:env NEW_PASSWORD` inside the sidecar, update `.env`, and restart it.
 
-The sidecar's `fdroidserver` base image is pinned by digest in `Dockerfile.fdroid`. GitLab deletes old digests when upstream rebuilds `master`, so a build failing with `manifest unknown` means the pin needs refreshing — resolve the current `master` digest, run a real-APK index build, then update the digest and the note above it.
+The sidecar's `fdroidserver` base image is pinned by digest in `Dockerfile.fdroid`. GitLab deletes old digests when upstream rebuilds `master`, so a build failing with `manifest unknown` means the pin needs refreshing: resolve the current `master` digest, run a real-APK index build, then update the digest and the note above it.
 
-## Configuration
+---
 
-Everything is set in `.env`; [`.env.example`](./.env.example) lists and explains every variable. The ones that matter most:
+## Storage: local disk or Garage/S3
 
-| Variable | Default | Notes |
+By default everything is on local disk. With Garage (or any S3-compatible store), downloads are served from the bucket via 302 redirects; catalog URLs never change.
+
+| Setting | Moves | Before switching |
 |---|---|---|
-| `ADMIN_PASSWORD` | — | **Required.** The app refuses to start without it. |
-| `SECRET_KEY` | random per boot | Set it, or every restart signs everyone out. |
-| `PUBLIC_BASE_URL` | request `Host` | Canonical origin baked into catalog URLs, e.g. `https://apps.example.com`. Unset falls back to the client's `Host` header and logs a warning. |
-| `DATA_DIR` | `/app/data` | Override for local runs. |
-| `PORT` / `WAITRESS_THREADS` | `5000` / `8` | One process only — see [Operating notes](#operating-notes). |
-| `MAX_CONTENT_LENGTH` | 2 GiB | Upload size cap. |
-| `STORAGE_BACKEND` / `ICON_STORAGE_BACKEND` | `local` | `garage` stores IPAs/icons in S3-compatible storage; needs the `GARAGE_*` variables. |
-| `APK_STORAGE_BACKEND` | `STORAGE_BACKEND` | `garage` uploads every APK to `<bucket>/apks/` and redirects downloads there. A local copy always stays in `data/fdroid/repo` — the F-Droid sidecar signs the index from it. **Rebuild Index** uploads APKs added before you switched. |
-| `FDROID_KEYSTORE_PASSWORD` | — | Required for the `android` profile. |
-| `FDROID_UPDATE_INTERVAL` / `FDROID_UPDATE_TIMEOUT` | `15` / `1800` | Seconds between rebuild checks / max length of one rebuild. |
-| `TELEGRAM_*`, `BOT_API_*` | off | Telegram ingest worker and notifications. |
-| `RELEASE_IMPORT_*`, `GITHUB_TOKEN`, `GITLAB_TOKEN` | off | Cron importer; tokens only raise API rate limits / reach private repos. |
-| `COMPOSE_PROFILES` | — | `android`, `telegram`, `release-import`, comma-separated. |
+| `STORAGE_BACKEND=garage` | IPAs (and icons, unless `ICON_STORAGE_BACKEND` says otherwise) | Run `scripts/migrate_ipas_to_garage.py` and `scripts/migrate_icons_to_garage.py` — dry run, then `--apply`. **Switching first makes existing apps uninstallable.** |
+| `ICON_STORAGE_BACKEND=garage` | icons only | `scripts/migrate_icons_to_garage.py` |
+| `APK_STORAGE_BACKEND=garage` | APK **downloads** (defaults to `STORAGE_BACKEND`) | Nothing — then click **Rebuild Index** once to upload existing APKs. A failed upload keeps the APK published from local disk. |
 
-`RATE_LIMIT` is accepted but currently does nothing (see below).
+All three need the `GARAGE_*` variables, and the bucket must be **publicly readable** at `GARAGE_PUBLIC_BASE_URL` (Garage website access) — otherwise devices get 403s. To offload only APK traffic, set `APK_STORAGE_BACKEND=garage` and leave `STORAGE_BACKEND` alone.
 
-## Optional features
+---
+
+## Automation
 
 ### Cron release importer
 
-A one-shot container that polls configured GitHub/GitLab releases and publishes new IPAs and APKs through the same HTTP API as the UI.
+A one-shot container that checks configured GitHub/GitLab releases and publishes new IPAs and APKs through the same API as the admin page.
 
 ```bash
 mkdir -p data/release-import
 cp release-sources.example.json data/release-import/release-sources.json   # edit the jobs
 sudo chown -R 999:999 data/release-import
 
-docker compose run --rm -T release-import           # dry run: never downloads or publishes
-docker compose run --rm -T release-import --apply   # publish; a second run reports "skipped"
+docker compose run --rm --no-deps -T release-import           # dry run: never downloads or publishes
+docker compose run --rm --no-deps -T release-import --apply   # publish; a second run reports "skipped"
 ```
 
 Schedule it from the host's crontab:
@@ -147,28 +166,57 @@ Schedule it from the host's crontab:
 17 */6 * * * cd /path/to/feather && docker compose run --rm --no-deps -T release-import --apply >> /var/log/feather-release-import.log 2>&1
 ```
 
-- `--no-deps` keeps cron from starting or recreating the app container; the importer only needs it reachable. Set `FEATHER_BASE_URL=http://altstore-manager:5000` in `.env` so it talks to the app inside Compose, not through your proxy.
-- A job's `bundleIdentifier` / `package` are optional and read from the artifact; when set they must match. Unchanged Android assets are skipped without re-downloading.
-- Exit code `0` means every job succeeded or had nothing new, `1` means at least one job failed (including a wrong password or unreachable app — reported once, before any download), `2` means the manifest or environment is invalid.
+- **Set `FEATHER_BASE_URL=http://altstore-manager:5000`** in `.env`, so the importer talks to the app inside Compose rather than through your proxy.
+- **`--no-deps`** stops cron from starting or recreating the app container; the importer only needs it reachable.
+- **`bundleIdentifier` / `package` are optional** per job — they're read from the downloaded file, and act as a check when set.
+- **Nothing is re-downloaded needlessly:** an unchanged release is skipped; an APK deleted from the repo is imported again.
+- **Exit codes:** `0` every job succeeded or had nothing new · `1` at least one job failed (a wrong password or unreachable app is reported once, before any download) · `2` invalid manifest or environment.
 
-Supports `owner/repo` on github.com and `namespace/project` on gitlab.com; not self-hosted forges, branch builds or CI artifacts. For in-app scheduling instead, use auto-import in the admin UI.
+Supports `owner/repo` on github.com and `namespace/project` on gitlab.com — not self-hosted forges, branch builds or CI artifacts. `GITHUB_TOKEN` / `GITLAB_TOKEN` are only needed for private repos or higher rate limits.
+
+### Auto-import inside the app
+
+**Import** → *Save & auto-import* stores the same kind of job in the app, and a background scheduler runs enabled jobs every `intervalHours`. Use this or cron, not both for the same repo.
 
 ### Telegram ingest and notifications
 
-Forward an IPA or APK to your bot and confirm with `/add`. The bot runs against a self-hosted Bot API server (`telegram-bot-api`) because the cloud API caps downloads at 20 MB. Enable with `COMPOSE_PROFILES=telegram` once the `TELEGRAM_*` variables are set — the worker refuses to start without them.
+Forward an IPA or APK to your bot and confirm with `/add`. It runs against a self-hosted Bot API server (`telegram-bot-api`) because the cloud API caps downloads at 20 MB. Enable with `COMPOSE_PROFILES=telegram` once the `TELEGRAM_*` variables are set — the worker refuses to start without them.
 
-Notifications post catalog events to a chat: `add_app`, `add_version`, `delete_app`, `delete_version`, `android_add_apk`, `health_transition` (all but the last two on by default).
+Notifications post catalog events to a chat: `add_app`, `add_version`, `delete_app`, `delete_version`, `android_add_apk`, `health_transition` (all except the last two are on by default).
 
-### Garage / S3 storage
+---
 
-Store IPAs and icons in an S3-compatible bucket instead of on disk. Migrate **before** switching: run `scripts/migrate_ipas_to_garage.py` and `scripts/migrate_icons_to_garage.py` as a dry run, then with `--apply`, and only then set `STORAGE_BACKEND=garage`. Switching first makes existing apps uninstallable. Catalog URLs stay the same; the app redirects downloads to the bucket.
+## More admin tools
 
-### Health, recovery and editorial
+- **Health** — scans the iOS catalog for missing IPAs and icons, corrupt IPA files, zero sizes, duplicate versions and non-public download URLs; keeps 30 snapshots and can alert on healthy ↔ degraded changes.
+- **Catalog recovery** — the last 20 `source.json` snapshots with preview and typed-confirmation restore. They sit next to the catalog in `data/`, so they are not off-site backups and don't include the binaries.
+- **Featured apps and news** — up to five featured apps and AltStore-format news items.
+- **Certificate check** — upload a `.p12` + `.mobileprovision` to see whether they pair, when each expires and which devices they cover. Nothing is signed or stored.
+- **Storage tools** — storage self-test, icon reconcile, and recent server errors (secrets redacted).
 
-- **Health:** scans the iOS catalog for missing IPAs and icons, corrupt IPA files, zero sizes, duplicate versions and non-public download URLs; keeps 30 snapshots and can alert on healthy ↔ degraded changes.
-- **Catalog recovery:** keeps the last 20 `source.json` snapshots with preview and typed-confirmation restore. They live in `DATA_DIR` next to the catalog, so they are not off-site backups and don't contain the binaries.
-- **Editorial:** up to five featured apps and AltStore-schema news items.
-- **Certificate check:** upload a `.p12` + `.mobileprovision` to see whether they pair, when each expires and which devices they cover. Nothing is signed or stored.
+---
+
+## Configuration
+
+Everything is set in `.env`; [`.env.example`](./.env.example) explains every variable. The ones that matter most:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `ADMIN_PASSWORD` | — | **Required.** The app refuses to start without it. |
+| `SECRET_KEY` | random per boot | Set it, or every restart signs you out. |
+| `PUBLIC_BASE_URL` | request `Host` | Canonical origin baked into catalog URLs. Unset falls back to the client's `Host` header and logs a warning. |
+| `DATA_DIR` | `/app/data` | Override for local runs. |
+| `PORT` / `WAITRESS_THREADS` | `5000` / `8` | One process only — see [Operating notes](#operating-notes). |
+| `MAX_CONTENT_LENGTH` | 2 GiB | Upload size cap. |
+| `STORAGE_BACKEND` / `ICON_STORAGE_BACKEND` / `APK_STORAGE_BACKEND` | `local` | See [Storage](#storage-local-disk-or-garages3). Needs `GARAGE_*`. |
+| `FDROID_KEYSTORE_PASSWORD` | — | Required for the `android` profile. |
+| `FDROID_UPDATE_INTERVAL` / `FDROID_UPDATE_TIMEOUT` | `15` / `1800` | Seconds between rebuild checks / maximum length of one rebuild. |
+| `FEATHER_BASE_URL` / `FEATHER_ADMIN_PASSWORD` | — | How the cron importer and bot reach the app: `http://altstore-manager:5000`. |
+| `RELEASE_IMPORT_*`, `GITHUB_TOKEN`, `GITLAB_TOKEN` | off | Cron importer. |
+| `TELEGRAM_*`, `BOT_API_*` | off | Telegram ingest and notifications. |
+| `COMPOSE_PROFILES` | — | `android`, `telegram`, `release-import` (comma-separated). |
+
+---
 
 ## Updating a deployment
 
@@ -176,7 +224,7 @@ Store IPAs and icons in an S3-compatible bucket instead of on disk. Migrate **be
 docker compose pull && docker compose up -d
 ```
 
-Use `pull`, not `--build`: CI already built and smoke-tested these exact images, and a local build bypasses that.
+Use `pull`, not `--build`: CI has already built and smoke-tested these exact images, and a local build bypasses that.
 
 | Image | Service | Enabled by |
 |---|---|---|
@@ -184,31 +232,59 @@ Use `pull`, not `--build`: CI already built and smoke-tested these exact images,
 | `ghcr.io/t1nk333r/feather-bot` | `ipa-ingest-bot` | profile `telegram` |
 | `ghcr.io/t1nk333r/feather-fdroid` | `fdroid-index` | profile `android` |
 
-## Routes
+Quick checks after an update:
 
-Public — clients fetch these without credentials, so they must stay unauthenticated:
+```bash
+curl -sI https://<host>/source.json | head -1          # 200
+curl -sI https://<host>/store | head -1                # 200
+docker logs --tail 5 feather-fdroid-index              # ends with "INFO: Finished"
+docker compose run --rm --no-deps -T release-import    # dry run; summary shows failed=0
+```
+
+---
+
+## Security
+
+What the app does for you:
+
+- **Sign-in required** for every change. The session cookie is `HttpOnly` and `SameSite=Lax`.
+- **Login throttling:** 5 failed attempts per client per 60 s, then `429` with `Retry-After`; a successful login clears it. Behind a reverse proxy all clients share the proxy's address, so the limit is effectively global.
+- **Untrusted files are handled defensively.** IPA/APK metadata reads are size-capped before anything is decompressed (`Info.plist` ≤ 4 MB, `AndroidManifest.xml` ≤ 16 MB, oversized `resources.arsc` skipped, icon images ≤ 8 MB), so a zip bomb can't exhaust memory. App names and descriptions are always rendered as text.
+- **Headers:** `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`. Everything under `/fdroid/repo/` is sandboxed by CSP, because fdroidserver writes the repo name into its HTML unescaped.
+- **Catalog fields are validated:** source/news URLs must be absolute `http(s)`, colours must be `#RRGGBB`.
+
+What stays your job:
+
+- **TLS** at the reverse proxy — the app speaks plain HTTP on port 5000.
+- **Rate limiting uploads** and any wider abuse protection at the proxy.
+- **Download-from-URL** features fetch whatever an admin gives them, including LAN addresses. Nothing is published unless it's a valid IPA/APK, but treat the admin password accordingly.
+
+The public, unauthenticated routes — clients fetch these without credentials, so they must stay public:
 
 | Route | Purpose |
 |---|---|
 | `GET /source.json` | iOS catalog |
-| `GET /ipas/<bundle_id>/<file>` | IPA download (302 to the bucket when using Garage) |
-| `GET /icons/<bundle_id>/icon.<ext>` | app icons |
+| `GET /ipas/<bundle>/<file>` | IPA download (302 to the bucket with Garage) |
+| `GET /icons/<bundle>/icon.<ext>` | app icons |
+| `GET /fdroid/repo/<path>` | F-Droid index, signatures, APKs (302 to the bucket with Garage), icons |
 | `GET /qr`, `GET /fdroid/qr` | add-source QR codes |
-| `GET /fdroid/repo/<path>` | F-Droid index, signatures, APKs, icons |
 | `GET /store` | read-only storefront |
-| `GET /`, `GET /sw.js` | admin UI shell (data behind it requires sign-in) |
+| `GET /`, `GET /sw.js` | admin page shell (everything behind it requires sign-in) |
 | `POST /api/login`, `POST /api/logout`, `GET /api/session` | session |
-| `GET /api/apps`, `GET /api/app/<bundle_id>` | read-only app JSON |
+| `GET /api/apps`, `GET /api/app/<bundle>` | read-only app JSON |
 
-Everything else under `/api/` requires a session: iOS catalog edits, release import and auto-import, import history, editorial, health, catalog backups, storage tools, certificate inspection, and all `/api/android/*` routes. The full list is `grep -n "@app.route" app.py`.
+Everything else under `/api/` requires a session. Full list: `grep -n "@app.route" app.py`.
+
+---
 
 ## Operating notes
 
-- **Single process.** Catalog writes use an in-process lock. Never run more than one worker process (for example `gunicorn -w 4`); raise `WAITRESS_THREADS` instead.
-- **No rate limiting.** Flask-Limiter is pinned but not wired in. Rate-limit `/api/login` and uploads at your reverse proxy.
-- **TLS belongs at the proxy.** The app speaks plain HTTP on port 5000.
-- **The F-Droid sidecar runs as root** inside its container; the upstream image requires it. It has no ports and mounts only `data/fdroid`.
-- **Back up** `data/` (catalog, binaries, icons, `fdroid/keystore.p12`), your `.env`, and any Garage bucket. Catalog snapshots alone cannot restore deleted binaries.
+- **One process only.** Catalog writes use an in-process lock; never run several worker processes (e.g. `gunicorn -w 4`). Raise `WAITRESS_THREADS` instead.
+- **The F-Droid sidecar runs as root** inside its container (the upstream image requires it). It has no ports and mounts only `data/fdroid`.
+- **Back up** `data/` (catalog, binaries, icons, `fdroid/keystore.p12`), your `.env`, and any Garage bucket. Catalog snapshots alone can't restore deleted binaries.
+- **`RATE_LIMIT`** in `.env.example` is accepted but not used.
+
+---
 
 ## Development
 
@@ -216,10 +292,10 @@ Everything else under `/api/` requires a session: iOS catalog edits, release imp
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 
-# run locally (there is no .env loading; export what you need)
+# run locally (no .env loading — export what you need)
 DATA_DIR=./data ADMIN_PASSWORD=dev SECRET_KEY=dev .venv/bin/python app.py
 
-# tests: no network, no Docker, a few seconds
+# tests: no network, no Docker, ~20 s
 ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q
 ```
 
@@ -227,21 +303,22 @@ ADMIN_PASSWORD=x .venv/bin/python -m pytest tests/ -q
 
 **CI** (`.github/workflows/ci.yml`) runs on every push and pull request: tests on Python 3.11 (the container) and 3.14, a `requests` pin check, then builds and smoke-tests all three images. Only `main` publishes to GHCR, and only after every smoke test passes.
 
-Conventions that have each broken a build before:
+Rules that have each broken a build before:
 
-- `.dockerignore` is deny-by-default. A new file a Dockerfile copies needs a matching `!path` line, and CI's image build is the only thing that will catch a missing one.
-- Every pin in `requirements.txt` needs wheels for both Python 3.11 and 3.14.
+- `.dockerignore` is deny-by-default: a new file a Dockerfile copies needs a matching `!path` line. Only CI's image build catches a missing one.
+- Every pin in `requirements.txt` needs wheels for Python 3.11 and 3.14.
 - `data/` is gitignored and must never be committed.
+- The admin page and `/store` pass an axe-core accessibility audit in light and dark mode — keep new controls labelled.
 
-## Repository layout
+### Repository layout
 
 ```
-app.py                              the Flask app (routes, catalog, storage, Android repo)
-templates/index.html                admin UI
-templates/store.html                public /store preview
+app.py                              the Flask app: routes, catalog, storage, Android repo
+templates/index.html                admin page
+templates/store.html                public /store
 static/                             icons, favicons, web manifest
 scripts/ipa_inspection.py           IPA metadata reader (shared)
-scripts/apk_inspection.py           APK metadata + signature check (shared)
+scripts/apk_inspection.py           APK metadata, signature and icon extraction (shared)
 scripts/certificate_inspection.py   .p12 / .mobileprovision inspector
 scripts/release_source_ingest.py    GitHub/GitLab release importer (cron + in-app)
 scripts/telegram_bot_ingest.py      Telegram ingest worker
