@@ -2579,3 +2579,95 @@ def test_add_app_with_unfetchable_icon_leaves_no_orphan_ipa(authed_client, tmp_p
     assert not (tmp_path / "ipas" / "com.test.orphan" / "1.0.ipa").exists()
     assert all(a["bundleIdentifier"] != "com.test.orphan"
                for a in authed_client.get("/source.json").get_json()["apps"])
+
+
+# ---------------------------------------------------------------------------
+# Icons extracted from uploaded binaries
+# ---------------------------------------------------------------------------
+
+
+def _ipa_with_icon(bundle_id, version, color=(200, 30, 30)):
+    import io, plistlib, zipfile
+    from PIL import Image
+    png = io.BytesIO()
+    Image.new("RGB", (120, 120), color).save(png, format="PNG")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("Payload/A.app/Info.plist", plistlib.dumps({
+            "CFBundleIdentifier": bundle_id, "CFBundleShortVersionString": version,
+            "CFBundleIcons": {"CFBundlePrimaryIcon": {"CFBundleIconFiles": ["AppIcon60x60"]}},
+        }))
+        zf.writestr("Payload/A.app/AppIcon60x60@2x.png", png.getvalue())
+    return buf.getvalue()
+
+
+def _add_app(client, bundle_id, ipa_bytes, **extra):
+    import io
+    data = {"name": "Iconic", "bundleIdentifier": bundle_id, "developerName": "x", "version": "1.0",
+            "ipaFile": (io.BytesIO(ipa_bytes), "a.ipa")}
+    data.update(extra)
+    return client.post("/api/add-app", data=data, content_type="multipart/form-data")
+
+
+def _catalog_app(client, bundle_id):
+    return next(a for a in client.get("/source.json").get_json()["apps"] if a["bundleIdentifier"] == bundle_id)
+
+
+def test_uploaded_ipa_without_icon_gets_icon_from_the_ipa(authed_client):
+    resp = _add_app(authed_client, "com.test.iconic", _ipa_with_icon("com.test.iconic", "1.0"))
+    assert resp.status_code == 200, resp.get_json()
+    icon_url = _catalog_app(authed_client, "com.test.iconic")["iconURL"]
+    assert "/icons/com.test.iconic/icon." in icon_url
+    icon = authed_client.get(icon_url.split("localhost", 1)[-1])
+    assert icon.status_code == 200 and icon.data[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_supplied_icon_url_is_not_replaced_by_the_ipa_icon(authed_client):
+    resp = _add_app(authed_client, "com.test.own", _ipa_with_icon("com.test.own", "1.0"),
+                    iconURL="https://example.com/mine.png")
+    assert resp.status_code == 200, resp.get_json()
+    assert _catalog_app(authed_client, "com.test.own")["iconURL"] == "https://example.com/mine.png"
+
+
+def test_add_version_fills_a_placeholder_icon_but_keeps_a_real_one(authed_client):
+    import io
+    assert _add_app(authed_client, "com.test.later", _minimal_ipa("com.test.later", "1.0")).status_code == 200
+    assert "/icons/" not in (_catalog_app(authed_client, "com.test.later").get("iconURL") or "")
+    resp = authed_client.post("/api/add-version", data={
+        "bundleIdentifier": "com.test.later", "version": "2.0",
+        "ipaFile": (io.BytesIO(_ipa_with_icon("com.test.later", "2.0")), "b.ipa")},
+        content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.get_json()
+    first = _catalog_app(authed_client, "com.test.later")["iconURL"]
+    assert "/icons/com.test.later/" in first
+    resp = authed_client.post("/api/add-version", data={
+        "bundleIdentifier": "com.test.later", "version": "3.0",
+        "ipaFile": (io.BytesIO(_ipa_with_icon("com.test.later", "3.0", (0, 0, 255))), "c.ipa")},
+        content_type="multipart/form-data")
+    assert resp.status_code == 200
+    assert _catalog_app(authed_client, "com.test.later")["iconURL"] == first
+
+
+def test_backfill_extracts_icons_for_existing_iconless_apps(authed_client, tmp_path):
+    assert _add_app(authed_client, "com.test.bf", _minimal_ipa("com.test.bf", "1.0")).status_code == 200
+    # Replace the stored IPA with one that has an icon, as an older upload would.
+    (tmp_path / "ipas" / "com.test.bf" / "1.0.ipa").write_bytes(_ipa_with_icon("com.test.bf", "1.0"))
+    resp = authed_client.post("/api/icons/backfill")
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["ios"]["added"] == 1
+    assert "/icons/com.test.bf/" in _catalog_app(authed_client, "com.test.bf")["iconURL"]
+
+
+def test_android_add_apk_publishes_extracted_icon_and_delete_removes_it(authed_client, monkeypatch, tmp_path):
+    app_module = authed_client.app_module
+    monkeypatch.setattr(app_module, "_inspect_apk", lambda _p: {
+        "package": "org.test.icon", "version_code": 3, "version_name": "3", "app_name": "Icon", "min_sdk": "21"})
+    monkeypatch.setattr(app_module, "extract_apk_icon", lambda _p: b"\x89PNG\r\n\x1a\nfake")
+    import io
+    resp = authed_client.post("/api/android/add-apk", data={"apkFile": (io.BytesIO(b"apk"), "a.apk")},
+                              content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.get_json()
+    icon = tmp_path / "fdroid" / "metadata" / "org.test.icon" / "en-US" / "icon.png"
+    assert icon.read_bytes().startswith(b"\x89PNG")
+    assert authed_client.post("/api/android/delete-app", json={"package": "org.test.icon"}).status_code == 200
+    assert not icon.parent.parent.exists()

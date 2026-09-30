@@ -35,7 +35,7 @@ _SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 import release_source_ingest as release_ingest
-from apk_inspection import inspect_apk, ApkInspectionError
+from apk_inspection import inspect_apk, ApkInspectionError, extract_apk_icon
 from ipa_inspection import inspect_ipa, InspectionError as IpaInspectionError
 import certificate_inspection
 
@@ -1050,7 +1050,14 @@ class SourceManager:
         holds self._lock.
         """
         self.ipa_warning = None
+        self.extracted_icon = None
         inspection = inspect_ipa(source, label or "IPA")
+        if getattr(self, "_icon_wanted", False):
+            # The uploader gave no icon and the app has none: take it from
+            # the IPA (Info.plist icon files / iTunesArtwork, CgBI decoded).
+            self.extracted_icon = _extract_ipa_icon(source)
+            if hasattr(source, "seek"):
+                source.seek(0)
         if inspection.bundle_identifier != bundle_id:
             self.ipa_warning = (
                 f"Note: this IPA's bundle identifier is {inspection.bundle_identifier}, "
@@ -1405,9 +1412,114 @@ class SourceManager:
             'version_date': current_date.strftime("%Y-%m-%dT%H:%M:%SZ")
         }
     
+    @staticmethod
+    def _has_real_icon(app):
+        icon = (app or {}).get('iconURL') if isinstance(app, dict) else None
+        return isinstance(icon, str) and icon.strip() and icon.strip() != SOURCE_ARTWORK_URL
+
+    def _store_extracted_icon(self, bundle_id, base_url):
+        """Persist self.extracted_icon (a temp PNG) as the app's hosted icon.
+        Best effort: returns (hosted_url, ext) or (None, None); always
+        removes the temp file."""
+        path = getattr(self, "extracted_icon", None)
+        self.extracted_icon = None
+        if not path:
+            return None, None
+        try:
+            with open(path, "rb") as fh:
+                ext = self.save_icon_file(FileStorage(stream=fh, filename="icon.png"), bundle_id)
+            if ext:
+                return self.get_hosted_icon_url(bundle_id, ext, base_url), ext
+            return None, None
+        except Exception as e:
+            logging.warning("could not store icon extracted from IPA for %s: %s", bundle_id, e)
+            return None, None
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def backfill_icons(self, base_url=None):
+        """Give every app without a real icon one extracted from its newest
+        hosted IPA. Slow part (fetch + extract) runs outside the lock; the
+        write re-checks under it so a concurrently set icon is never
+        overwritten. Returns {"added": n, "missing": [bundle ids]}."""
+        with self._lock:
+            source_data = self.load_source() or {}
+            targets = []
+            for app_entry in source_data.get('apps', []):
+                if not isinstance(app_entry, dict) or self._has_real_icon(app_entry):
+                    continue
+                versions = [v for v in app_entry.get('versions', []) if isinstance(v, dict) and v.get('version')]
+                if versions:
+                    targets.append((app_entry.get('bundleIdentifier'), versions[0]['version']))
+        added, missing, found = 0, [], {}
+        for bundle_id, version in targets:
+            icon_path = None
+            tmp_ipa = None
+            try:
+                if not bundle_id or not ipa_storage.exists(bundle_id, version):
+                    missing.append(bundle_id)
+                    continue
+                url = ipa_storage.public_url(bundle_id, version)
+                if url:
+                    fd, tmp_ipa = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix=".ipa")
+                    os.close(fd)
+                    with requests.get(url, stream=True, timeout=300) as resp:
+                        resp.raise_for_status()
+                        with open(tmp_ipa, "wb") as f:
+                            for chunk in resp.iter_content(1 << 20):
+                                f.write(chunk)
+                    source = tmp_ipa
+                else:
+                    source = self.get_ipa_path(bundle_id, version)
+                icon_path = _extract_ipa_icon(source)
+                if not icon_path:
+                    missing.append(bundle_id)
+                    continue
+                with open(icon_path, "rb") as fh:
+                    ext = self.save_icon_file(FileStorage(stream=fh, filename="icon.png"), bundle_id)
+                if ext:
+                    found[bundle_id] = self.get_hosted_icon_url(bundle_id, ext, base_url)
+                else:
+                    missing.append(bundle_id)
+            except Exception as e:
+                logging.warning("icon backfill failed for %s: %s", bundle_id, e)
+                missing.append(bundle_id)
+            finally:
+                for path in (icon_path, tmp_ipa):
+                    if path and os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+        if found:
+            with self._lock:
+                source_data = self.load_source() or {}
+                for app_entry in source_data.get('apps', []):
+                    bid = app_entry.get('bundleIdentifier') if isinstance(app_entry, dict) else None
+                    if bid in found and not self._has_real_icon(app_entry):
+                        app_entry['iconURL'] = found[bid]
+                        added += 1
+                self.save_source(source_data)
+        return {"added": added, "missing": missing}
+
     def add_app_manual(self, data, ipa_file=None, download_from_url=False, icon_file=None, download_icon_from_url=False, base_url=None):
         """Add app manually with provided data"""
         with self._lock:
+            try:
+                return self._add_app_manual_locked(data, ipa_file, download_from_url, icon_file, download_icon_from_url, base_url)
+            finally:
+                self._icon_wanted = False
+                if getattr(self, "extracted_icon", None):
+                    try:
+                        os.remove(self.extracted_icon)
+                    except OSError:
+                        pass
+                    self.extracted_icon = None
+
+    def _add_app_manual_locked(self, data, ipa_file, download_from_url, icon_file, download_icon_from_url, base_url):
             self.ipa_warning = None
             source_data = self.load_source()
             if not source_data:
@@ -1431,7 +1543,14 @@ class SourceManager:
 
             download_url = data.get('downloadURL', '')
             icon_url = data.get('iconURL', '')
-        
+
+            existing_app = next((a for a in source_data.get('apps', []) if a.get('bundleIdentifier') == bundle_id), None)
+            icon_supplied = bool(icon_file and allowed_icon_file(icon_file.filename)) or bool((icon_url or '').strip())
+            if existing_app is not None:
+                self._icon_wanted = not self._has_real_icon(existing_app)
+            else:
+                self._icon_wanted = not icon_supplied
+
             # Handle IPA file - upload, download, or use URL
             file_size = 0
             stored_ipa = False
@@ -1479,6 +1598,11 @@ class SourceManager:
                         self.delete_ipa_file(bundle_id, version)   # no orphan IPA without a catalog entry
                     return False, f"Failed to download icon from {icon_url}"
 
+            auto_icon_url, auto_icon_ext = self._store_extracted_icon(bundle_id, base_url)
+            if auto_icon_url:
+                icon_url = auto_icon_url
+                stored_icon_ext = auto_icon_ext
+
             new_app = {
                 "name": data['name'],
                 "bundleIdentifier": bundle_id,
@@ -1513,6 +1637,8 @@ class SourceManager:
                 # Update existing app with new version
                 source_data['apps'][existing_index]['versions'].insert(0, new_app['versions'][0])
                 source_data['apps'][existing_index]['addedDate'] = dates['feather_date']
+                if auto_icon_url:
+                    source_data['apps'][existing_index]['iconURL'] = auto_icon_url
                 logging.info(f"Updated app: {data['name']}")
             else:
                 # Add new app
@@ -1691,6 +1817,18 @@ class SourceManager:
     def add_version(self, bundle_identifier, version_data, ipa_file=None, download_from_url=False, base_url=None):
         """Add a new version to an existing app"""
         with self._lock:
+            try:
+                return self._add_version_locked(bundle_identifier, version_data, ipa_file, download_from_url, base_url)
+            finally:
+                self._icon_wanted = False
+                if getattr(self, "extracted_icon", None):
+                    try:
+                        os.remove(self.extracted_icon)
+                    except OSError:
+                        pass
+                    self.extracted_icon = None
+
+    def _add_version_locked(self, bundle_identifier, version_data, ipa_file, download_from_url, base_url):
             self.ipa_warning = None
             source_data = self.load_source()
             if not source_data:
@@ -1725,6 +1863,7 @@ class SourceManager:
 
             download_url = version_data.get('downloadURL', '')
             file_size = version_data.get('size', 0)
+            self._icon_wanted = not self._has_real_icon(app)
         
             # Handle IPA file - upload, download, or use URL
             if ipa_file and allowed_file(ipa_file.filename):
@@ -1758,6 +1897,9 @@ class SourceManager:
             # Insert at the beginning (latest version first)
             app['versions'].insert(0, new_version)
             app['addedDate'] = dates['feather_date']
+            auto_icon_url, _ = self._store_extracted_icon(bundle_identifier, base_url)
+            if auto_icon_url:
+                app['iconURL'] = auto_icon_url
         
             success = self.save_source(source_data)
             if not success:
@@ -1964,6 +2106,66 @@ class AndroidRepoManager:
     def metadata_path(self, package):
         return os.path.join(FDROID_METADATA_DIR, f"{package}.yml")
 
+    def icon_path(self, package):
+        """fdroidserver publishes metadata/<package>/en-US/icon.png as the
+        app's icon (index-v1 localized.en-US.icon, index-v2 icon)."""
+        return os.path.join(FDROID_METADATA_DIR, package, "en-US", "icon.png")
+
+    def _newest_apk(self, package):
+        best = None
+        if os.path.isdir(FDROID_REPO_DIR):
+            for fn in os.listdir(FDROID_REPO_DIR):
+                m = ANDROID_APK_FILENAME_RE.match(fn)
+                if m and m.group(1) == package and (best is None or int(m.group(2)) > best[0]):
+                    best = (int(m.group(2)), os.path.join(FDROID_REPO_DIR, fn))
+        return best
+
+    def refresh_icon(self, package, apk_path):
+        """Extract the launcher icon from apk_path into the metadata tree.
+        fdroidserver's own extraction misses adaptive/WebP launcher icons,
+        which leaves most modern apps iconless. Returns True if written."""
+        png = extract_apk_icon(apk_path)
+        if not png:
+            return False
+        dest = self.icon_path(package)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dest), prefix=".icon-", suffix=".png.tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(png)
+            os.replace(tmp, dest)
+        except Exception:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            raise
+        return True
+
+    def backfill_icons(self):
+        """Give every package without a published icon one from its newest
+        APK. Returns {"added": n, "missing": [packages with no raster icon]}."""
+        added, missing = 0, []
+        packages = set()
+        if os.path.isdir(FDROID_REPO_DIR):
+            for fn in os.listdir(FDROID_REPO_DIR):
+                m = ANDROID_APK_FILENAME_RE.match(fn)
+                if m and ANDROID_PACKAGE_RE.match(m.group(1)):
+                    packages.add(m.group(1))
+        for package in sorted(packages):
+            if os.path.exists(self.icon_path(package)):
+                continue
+            newest = self._newest_apk(package)
+            try:
+                if newest and self.refresh_icon(package, newest[1]):
+                    added += 1
+                else:
+                    missing.append(package)
+            except Exception as e:
+                logging.warning("icon backfill failed for %s: %s", package, e)
+                missing.append(package)
+        if added:
+            self.request_update()
+        return {"added": added, "missing": missing}
+
     # --- reads ---------------------------------------------------------
     def _read_metadata(self, package):
         path = self.metadata_path(package)
@@ -2052,6 +2254,13 @@ class AndroidRepoManager:
                 })
 
             signers = {v['signer'] for v in versions if v.get('signer')}
+            loc = index_entry.get('localized') or {}
+            loc = loc.get('en-US') or next(iter(loc.values()), {}) if isinstance(loc, dict) else {}
+            icon_url = None
+            if isinstance(loc, dict) and loc.get('icon'):
+                icon_url = f"/fdroid/repo/{package}/en-US/{loc['icon']}"
+            elif index_entry.get('icon'):
+                icon_url = f"/fdroid/repo/icons-640/{index_entry['icon']}"
             pending = marker_pending or any(not v['published'] for v in versions)
             apps.append({
                 "package": package,
@@ -2060,6 +2269,7 @@ class AndroidRepoManager:
                 "versions": versions,
                 "pending": pending,
                 "mixed_signers": len(signers) > 1,
+                "icon": icon_url,
             })
         return apps
 
@@ -2272,6 +2482,12 @@ class AndroidRepoManager:
 
         if not os.path.exists(self.metadata_path(package)):
             self.write_metadata(package, {"Name": info["app_name"]})
+        newest = self._newest_apk(package)
+        if newest and newest[1] == dest:
+            try:
+                self.refresh_icon(package, dest)
+            except Exception as e:
+                logging.warning("could not extract icon for %s: %s", package, e)
         self._sync_repo_config_url()
         self.request_update()
         return True, info
@@ -2310,6 +2526,9 @@ class AndroidRepoManager:
             if os.path.exists(meta_path):
                 os.remove(meta_path)
                 removed_something = True
+            meta_dir = os.path.join(FDROID_METADATA_DIR, package)
+            if os.path.isdir(meta_dir):
+                shutil.rmtree(meta_dir, ignore_errors=True)
         self.request_update()
         return removed_something
 
@@ -2934,6 +3153,22 @@ def _add_app_with_avatar_icon(new_app, fs, owner, base_url):
     return source_manager.add_app_manual(dict(new_app, iconURL=""), ipa_file=fs, base_url=base_url)
 
 
+_MAX_ICON_MEMBER_BYTES = 8 * 1024 * 1024
+
+
+def _zip_read_capped(zf, name):
+    """zf.read with a size cap: icon candidates and Info.plist come from an
+    untrusted archive and would otherwise be inflated whole (zip bomb)."""
+    info = zf.getinfo(name)
+    if info.file_size > _MAX_ICON_MEMBER_BYTES:
+        raise ValueError(f"{name} is implausibly large")
+    with zf.open(info) as handle:
+        data = handle.read(_MAX_ICON_MEMBER_BYTES + 1)
+    if len(data) > _MAX_ICON_MEMBER_BYTES:
+        raise ValueError(f"{name} is implausibly large")
+    return data
+
+
 def _extract_ipa_icon(ipa_path):
     """Best-effort extraction of the app icon from an .ipa, normalized to a
     standard PNG. Returns a path to a new temporary PNG file (the caller
@@ -2949,7 +3184,7 @@ def _extract_ipa_icon(ipa_path):
                 for name in names:
                     if "/" not in name and name.lower() == wanted:
                         try:
-                            img = Image.open(io.BytesIO(zf.read(name)))
+                            img = Image.open(io.BytesIO(_zip_read_capped(zf, name)))
                             img.load()
                             return _save_temp_png(img)
                         except Exception:
@@ -2970,7 +3205,7 @@ def _extract_ipa_icon(ipa_path):
             info_plist_path = f"{app_prefix}Info.plist"
             if info_plist_path in names:
                 try:
-                    plist = plistlib.loads(zf.read(info_plist_path))
+                    plist = plistlib.loads(_zip_read_capped(zf, info_plist_path))
                 except Exception:
                     plist = {}
                 primary = ((plist.get("CFBundleIcons") or {}).get("CFBundlePrimaryIcon") or {})
@@ -3016,7 +3251,7 @@ def _extract_ipa_icon(ipa_path):
             best_key = None
             for name in candidates:
                 try:
-                    raw = zf.read(name)
+                    raw = _zip_read_capped(zf, name)
                 except Exception:
                     continue
                 try:
@@ -3035,7 +3270,7 @@ def _extract_ipa_icon(ipa_path):
             if best_name is None:
                 return None
 
-            raw = zf.read(best_name)
+            raw = _zip_read_capped(zf, best_name)
 
             # 5. A minority of IPAs ship standard (non-CgBI) PNGs here.
             try:
@@ -5133,6 +5368,20 @@ def _reconcile_icons(apply=False):
     return result
 
 
+@app.route('/api/icons/backfill', methods=['POST'])
+@requires_auth
+def backfill_icons():
+    """Fill missing icons from the binaries: iOS apps from their newest
+    hosted IPA, Android packages from their newest APK."""
+    try:
+        ios = source_manager.backfill_icons(base_url=resolve_base_url())
+        android = android_repo.backfill_icons()
+        return jsonify({"success": True, "ios": ios, "android": android})
+    except Exception as e:
+        logging.error(f"Error backfilling icons: {str(e)}")
+        return jsonify({"success": False, "error": "Icon backfill failed"}), 400
+
+
 @app.route('/api/reconcile-icons', methods=['POST'])
 @requires_auth
 def reconcile_icons():
@@ -5493,8 +5742,14 @@ def android_repo_config():
 @requires_auth
 def android_request_update():
     try:
+        icons = android_repo.backfill_icons()
         android_repo.request_update()
-        return jsonify({"success": True, "message": "Index rebuild requested"})
+        message = "Index rebuild requested"
+        if icons["added"]:
+            message += f"; extracted {icons['added']} missing icon(s)"
+        if icons["missing"]:
+            message += f"; no raster icon in: {', '.join(icons['missing'][:5])}"
+        return jsonify({"success": True, "message": message, "icons": icons})
     except Exception as e:
         logging.error(f"Error requesting Android index update: {str(e)}")
         return jsonify({"success": False, "error": "Failed to request Android index update"}), 400

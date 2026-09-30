@@ -307,7 +307,10 @@
         $('sourceSubtitle').textContent = str(src.subtitle || src.description);
         document.title = `${name} · Store Preview`;
         const icon = safeUrl(src.iconURL);
-        if (icon) $('sourceIcon').src = icon;
+        if (icon) {
+            $('sourceIcon').addEventListener('error', () => { $('sourceIcon').src = '/static/icon.svg'; }, { once: true });
+            $('sourceIcon').src = icon;
+        }
         if (/^#?[0-9a-f]{6}$/i.test(str(src.tintColor))) {
             document.documentElement.style.setProperty('--accent', '#' + str(src.tintColor).replace('#', ''));
         }

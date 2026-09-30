@@ -160,3 +160,56 @@ def test_oversized_resources_skips_label_instead_of_inflating(tmp_path, monkeypa
     monkeypatch.setattr(pyaxmlparser, "APK", lambda _p: NoLabel())
     result = inspect_apk(path, "big.apk")
     assert result.app_name == "com.example.app"
+
+
+def _png(size, color):
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGBA", (size, size), color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_extract_apk_icon_prefers_highest_density_launcher_raster(tmp_path):
+    import io, zipfile
+    from PIL import Image
+    from scripts.apk_inspection import extract_apk_icon
+    path = tmp_path / "a.apk"
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("AndroidManifest.xml", b"not a real manifest")
+        zf.writestr("res/mipmap-mdpi-v4/ic_launcher.png", _png(48, (255, 0, 0, 255)))
+        zf.writestr("res/mipmap-xxxhdpi-v4/ic_launcher.png", _png(192, (0, 255, 0, 255)))
+        zf.writestr("res/drawable-xxxhdpi-v4/splash.png", _png(1024, (0, 0, 0, 255)))
+    img = Image.open(io.BytesIO(extract_apk_icon(path)))
+    assert img.size == (192, 192)
+    assert img.convert("RGB").getpixel((5, 5)) == (0, 255, 0)
+
+
+def test_extract_apk_icon_composites_raster_adaptive_layers(tmp_path):
+    import io, zipfile
+    from PIL import Image
+    from scripts.apk_inspection import extract_apk_icon
+    path = tmp_path / "b.apk"
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("AndroidManifest.xml", b"x")
+        zf.writestr("res/mipmap-anydpi-v26/ic_launcher.xml", b"<adaptive-icon/>")
+        zf.writestr("res/mipmap-xxhdpi-v4/ic_launcher_background.png", _png(108, (0, 0, 255, 255)))
+        fg = Image.new("RGBA", (108, 108), (0, 0, 0, 0))
+        fg.paste((255, 0, 0, 255), (34, 34, 74, 74))
+        buf = io.BytesIO(); fg.save(buf, format="PNG")
+        zf.writestr("res/mipmap-xxhdpi-v4/ic_launcher_foreground.png", buf.getvalue())
+    img = Image.open(io.BytesIO(extract_apk_icon(path))).convert("RGB")
+    assert img.getpixel((5, 5)) == (0, 0, 255)      # background shows at the edge
+    assert img.getpixel((54, 54)) == (255, 0, 0)    # foreground on top in the centre
+
+
+def test_extract_apk_icon_none_without_rasters_and_never_raises(tmp_path):
+    import zipfile
+    from scripts.apk_inspection import extract_apk_icon
+    path = tmp_path / "c.apk"
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("AndroidManifest.xml", b"x")
+        zf.writestr("res/drawable/ic_launcher_foreground.xml", b"<vector/>")
+    assert extract_apk_icon(path) is None
+    (tmp_path / "d.apk").write_bytes(b"garbage")
+    assert extract_apk_icon(tmp_path / "d.apk") is None

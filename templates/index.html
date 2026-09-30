@@ -719,7 +719,10 @@
         </div>
 
         <div id="manage-apps" class="tab-content">
-            <h2 style="margin-bottom: 20px;">Installed Apps</h2>
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:20px;">
+                <h2>Installed Apps</h2>
+                <button type="button" class="btn btn-secondary" id="backfillIconsBtn" onclick="backfillIcons()" title="Extract icons from the uploaded IPAs/APKs for apps that have none">Fill missing icons</button>
+            </div>
             <div class="search-filter-bar">
                 <div class="search-box">
                     <input type="text" id="searchInput" placeholder="Search apps by name or bundle ID..." oninput="filterApps()">
@@ -2063,6 +2066,26 @@
             if (response.ok) loadHealthMonitor();
         }
 
+        async function backfillIcons() {
+            const btn = document.getElementById('backfillIconsBtn');
+            btn.disabled = true; btn.textContent = 'Extracting…';
+            try {
+                const response = await fetch('/api/icons/backfill', {method: 'POST'});
+                const data = await response.json();
+                if (!response.ok) { showToast(data.error || 'Icon backfill failed', 'error'); return; }
+                const added = data.ios.added + data.android.added;
+                const missing = [...data.ios.missing, ...data.android.missing];
+                showToast(`Added ${added} icon${added === 1 ? '' : 's'}` +
+                    (missing.length ? `; no icon found in ${missing.length} app${missing.length === 1 ? '' : 's'}` : ''), added || !missing.length ? 'success' : 'error');
+                loadApps();
+                if (typeof loadAndroidApps === 'function') loadAndroidApps();
+            } catch (error) {
+                showToast('Icon backfill failed: ' + error.message, 'error');
+            } finally {
+                btn.disabled = false; btn.textContent = 'Fill missing icons';
+            }
+        }
+
         let selectedCatalogBackup = null;
         async function loadCatalogBackups() {
             const response = await fetch('/api/catalog-backups');
@@ -3001,11 +3024,14 @@
                     return `
                         <div class="app-card">
                             <div class="app-header">
+                                <div class="app-header-with-icon">
+                                <img src="${escapeHtml(app.icon || '/static/icon.svg')}" alt="" class="app-icon" onerror="this.onerror=null; this.src='/static/icon.svg'">
                                 <div class="app-info">
                                     <h3>${escapeHtml(app.name)}</h3>
                                     <p><strong>Package:</strong> ${escapeHtml(app.package)}</p>
                                     <p>${escapeHtml(app.summary || '')}</p>
                                     ${mixedSignersWarning}
+                                </div>
                                 </div>
                                 <div class="btn-group">
                                     <button class="btn btn-danger" onclick="deleteAndroidApp('${escapeHtml(app.package)}')">Delete App</button>
