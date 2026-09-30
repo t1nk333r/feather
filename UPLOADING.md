@@ -1,10 +1,79 @@
 # Uploading a build to Feather from a script or an agent
 
-The write API is the same one the admin UI uses. There is no API token: every
-mutating route is gated by a session cookie obtained from `POST /api/login`
-(plan 010). This file is the contract an unattended client has to satisfy —
-written down because the field names are **not guessable** and a wrong one fails
-as a validation error that reads like a missing file.
+**Use an API token and `POST /api/publish`.** It is one endpoint for both
+platforms, it reads the platform, bundle ID / package and version from the
+file, and it creates the app if it is new. Section 0 is all most clients need;
+sections 1–3 document the older session-cookie routes the admin UI uses.
+
+## 0. Token + `/api/publish` (recommended)
+
+Create a token in the admin page: **Source** tab → *API tokens*. It is shown
+once; only its SHA-256 is stored. A token can publish and read
+(`/api/publish`, `/api/android/apps`, `/api/android/status`); it cannot delete
+apps, change settings, or manage tokens. Revoke it on the same page.
+
+```bash
+# upload a file (field name: file; ipaFile/apkFile also accepted)
+curl -fsS -H "Authorization: Bearer $FEATHER_TOKEN" \
+  -F file=@MyApp.ipa \
+  -F name="My App" -F developerName="Me" -F description="What it does" \
+  https://apps.example.com/api/publish
+
+# or have Feather download it
+curl -fsS -H "Authorization: Bearer $FEATHER_TOKEN" -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/builds/app-release.apk"}' \
+  https://apps.example.com/api/publish
+```
+
+| Field | Default | Notes |
+|---|---|---|
+| `file` or `url` | — | exactly one; `.ipa` or `.apk` (detected from the archive, not the name) |
+| `name`, `developerName`, `description` | from the file / `Unknown` | applied only when the app is **created**; existing apps keep theirs |
+| `createIfMissing` | `true` | `false` refuses (404) an app that is not already published |
+
+Response (`200`):
+
+```json
+{"success": true, "platform": "ios", "id": "com.example.app", "version": "2.1",
+ "build": "45", "added": true, "created": false, "name": "My App",
+ "downloadURL": "https://apps.example.com/ipas/com.example.app/2.1.ipa", "size": 6125156,
+ "message": "Version added successfully"}
+```
+
+`added: false` means that exact version was already published (a safe retry).
+Android responses carry `"pending": true`: the APK is stored, and it appears in
+the F-Droid index after the sidecar's next rebuild. Errors are
+`{"success": false, "error": "..."}` with `400` (not a valid IPA/APK, bad
+field), `401` (missing/revoked token), `404` (`createIfMissing: false`), or
+`413` (an upload over `MAX_CONTENT_LENGTH`; an oversized `url` download is a `400`).
+
+### MCP server for agents
+
+`scripts/feather_mcp.py` wraps the same API as an MCP stdio server. Standard
+library only (Python 3.9+), so copy the one file to wherever the agent runs.
+
+```bash
+claude mcp add feather \
+  --env FEATHER_URL=https://apps.example.com \
+  --env FEATHER_TOKEN=ftr_... \
+  -- python3 /path/to/feather_mcp.py
+```
+
+Any MCP client works the same way (`command: python3`, `args: [/path/to/feather_mcp.py]`,
+those two env vars). Tools:
+
+| Tool | Does |
+|---|---|
+| `publish_app` | `path` (local file, streamed) or `url`; optional `name`, `developer_name`, `description`, `create_if_missing` |
+| `list_apps` | `platform`: `ios`, `android` or `all` |
+| `get_app` | by bundle ID or package |
+| `repo_status` | F-Droid subscribe URL, fingerprint, last index build, rejected APKs |
+
+---
+
+The sections below are the session-cookie contract the admin UI uses. Field
+names there are **not guessable** (`ipaFile`/`apkFile`, not `file`) and a wrong
+one fails as a validation error that reads like a missing file.
 
 Everything below was verified against a running instance on 2026-09-18 with a
 real 3,381,621-byte APK and a real 6,125,156-byte IPA.

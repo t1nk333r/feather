@@ -854,6 +854,21 @@
                 <button type="button" class="btn btn-secondary" onclick="resetNewsForm()">Clear form</button>
             </form>
 
+            <h2 style="margin-top:40px;">API tokens</h2>
+            <p>For agents and CI: <code>POST /api/publish</code> with <code>Authorization: Bearer &lt;token&gt;</code>, or the MCP server in <code>scripts/feather_mcp.py</code>. A token can publish and read; it cannot delete apps, change settings, or manage tokens.</p>
+            <div id="apiTokens"></div>
+            <form id="apiTokenForm" onsubmit="createApiToken(event)">
+                <div class="form-group">
+                    <label for="apiTokenName">Token name</label>
+                    <input id="apiTokenName" required maxlength="80" placeholder="claude-agent, github-actions…">
+                </div>
+                <button type="submit" class="btn">Create token</button>
+            </form>
+            <div id="apiTokenNew" hidden role="status">
+                <p><strong>Copy this token now; it will not be shown again.</strong></p>
+                <input id="apiTokenValue" readonly aria-label="New API token" style="font-family: var(--mono);" onclick="this.select()">
+            </div>
+
         </div>
 
         <div id="import-repo" class="tab-content">
@@ -1354,6 +1369,7 @@
                 loadApps();
             } else if (tabName === 'source-info') {
                 loadSourceInfo();
+                loadApiTokens();
             } else if (tabName === 'import-repo') {
                 loadAutoImport();
             } else if (tabName === 'health') {
@@ -2073,6 +2089,46 @@
             const data = await response.json();
             showToast(response.ok ? 'Health monitor saved' : (data.error || 'Save failed'), response.ok ? 'success' : 'error');
             if (response.ok) loadHealthMonitor();
+        }
+
+        async function loadApiTokens() {
+            const box = document.getElementById('apiTokens');
+            try {
+                const response = await fetch('/api/tokens');
+                const tokens = await response.json();
+                if (!response.ok) { box.textContent = tokens.error || 'Could not load tokens'; return; }
+                if (!tokens.length) { box.innerHTML = '<p class="field-hint">No tokens yet.</p>'; return; }
+                box.innerHTML = tokens.map(t => `
+                    <div class="news-row" style="align-items:center; margin-bottom:8px;">
+                        <div><strong>${escapeHtml(t.name)}</strong> <code>${escapeHtml(t.prefix)}…</code><br>
+                        <small class="field-hint">Created ${escapeHtml(t.created || '')} · last used ${escapeHtml(t.lastUsed || 'never')}</small></div>
+                        <button type="button" class="btn btn-secondary" data-token-id="${escapeHtml(t.id)}" onclick="revokeApiToken(this.dataset.tokenId)">Revoke</button>
+                    </div>`).join('');
+            } catch (error) {
+                box.textContent = 'Could not load tokens: ' + error.message;
+            }
+        }
+
+        async function createApiToken(event) {
+            event.preventDefault();
+            const name = document.getElementById('apiTokenName').value.trim();
+            const response = await fetch('/api/tokens', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name})});
+            const data = await response.json();
+            if (!response.ok) { showToast(data.error || 'Could not create token', 'error'); return; }
+            document.getElementById('apiTokenValue').value = data.token;
+            document.getElementById('apiTokenNew').hidden = false;
+            document.getElementById('apiTokenName').value = '';
+            loadApiTokens();
+        }
+
+        async function revokeApiToken(id) {
+            if (!confirm('Revoke this token? Anything using it stops working immediately.')) return;
+            const response = await fetch('/api/tokens/revoke', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id})});
+            const data = await response.json();
+            if (!response.ok) { showToast(data.error || 'Could not revoke token', 'error'); return; }
+            document.getElementById('apiTokenNew').hidden = true;
+            showToast('Token revoked', 'success');
+            loadApiTokens();
         }
 
         async function backfillIcons() {

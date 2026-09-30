@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""Feather MCP server: lets an AI agent publish IPAs/APKs to a Feather
+instance and read its catalogue.
+
+Stdio transport, newline-delimited JSON-RPC 2.0, standard library only, so
+it runs anywhere Python 3.9+ does -- no pip install on the agent's machine.
+
+    FEATHER_URL=https://feather.example.com \\
+    FEATHER_TOKEN=ftr_... \\
+    python3 scripts/feather_mcp.py
+
+Create the token in the Feather admin page (Source tab -> API tokens). A
+token can publish and read; it cannot delete apps or manage tokens.
+
+Claude Code:
+    claude mcp add feather --env FEATHER_URL=https://feather.example.com \\
+        --env FEATHER_TOKEN=ftr_... -- python3 /path/to/feather_mcp.py
+"""
+
+import http.client
+import json
+import mimetypes
+import os
+import ssl
+import sys
+import uuid
+from urllib.parse import quote, urlparse
+
+SERVER_NAME = "feather"
+SERVER_VERSION = "1.0.0"
+SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
+TIMEOUT = float(os.environ.get("FEATHER_TIMEOUT", "600"))
+
+TOOLS = [
+    {
+        "name": "publish_app",
+        "description": (
+            "Publish an iOS .ipa or Android .apk to Feather. Give either a local file `path` "
+            "or a public `url` Feather should download. Platform, bundle ID / package and "
+            "version are read from the file. New apps are created unless create_if_missing "
+            "is false; name, developer_name and description apply only to new apps. "
+            "Publishing a version that already exists is a no-op (added=false)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Local path to an .ipa or .apk"},
+                "url": {"type": "string", "description": "http(s) URL of an .ipa or .apk"},
+                "name": {"type": "string", "description": "Display name for a new app (max 50)"},
+                "developer_name": {"type": "string", "description": "Developer for a new app"},
+                "description": {"type": "string", "description": "Description for a new app"},
+                "create_if_missing": {"type": "boolean", "default": True},
+            },
+        },
+    },
+    {
+        "name": "list_apps",
+        "description": "List published apps with their versions.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "platform": {"type": "string", "enum": ["ios", "android", "all"], "default": "all"},
+            },
+        },
+    },
+    {
+        "name": "get_app",
+        "description": "Get one app by iOS bundle identifier or Android package name.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "repo_status",
+        "description": "Android F-Droid repo status: subscribe URL, fingerprint, last index build and rejected APKs.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+]
+
+
+class FeatherError(Exception):
+    pass
+
+
+class Feather:
+    def __init__(self, base_url, token):
+        if not base_url:
+            raise FeatherError("FEATHER_URL is not set")
+        parsed = urlparse(base_url.rstrip("/"))
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise FeatherError(f"FEATHER_URL must be an http(s) URL, got {base_url!r}")
+        self.parsed = parsed
+        self.prefix = parsed.path.rstrip("/")
+        self.token = token
+
+    def _conn(self):
+        if self.parsed.scheme == "https":
+            return http.client.HTTPSConnection(self.parsed.hostname, self.parsed.port,
+                                               timeout=TIMEOUT, context=ssl.create_default_context())
+        return http.client.HTTPConnection(self.parsed.hostname, self.parsed.port, timeout=TIMEOUT)
+
+    def request(self, method, path, body=None, headers=None, auth=True):
+        headers = dict(headers or {})
+        if auth:
+            if not self.token:
+                raise FeatherError("FEATHER_TOKEN is not set (create one in the admin page)")
+            headers["Authorization"] = f"Bearer {self.token}"
+        conn = self._conn()
+        try:
+            if callable(body):
+                conn.putrequest(method, self.prefix + path)
+                for k, v in headers.items():
+                    conn.putheader(k, v)
+                conn.endheaders()
+                body(conn)
+            else:
+                conn.request(method, self.prefix + path, body=body, headers=headers)
+            resp = conn.getresponse()
+            raw = resp.read()
+        except OSError as e:
+            raise FeatherError(f"Could not reach Feather at {self.parsed.geturl()}: {e}")
+        finally:
+            conn.close()
+        try:
+            data = json.loads(raw) if raw else {}
+        except ValueError:
+            data = {"error": raw[:300].decode("utf-8", "replace")}
+        if resp.status >= 400:
+            msg = data.get("error") if isinstance(data, dict) else None
+            raise FeatherError(f"HTTP {resp.status}: {msg or resp.reason}")
+        return data
+
+    def publish_file(self, path, fields):
+        boundary = uuid.uuid4().hex
+        parts = []
+        for key, value in fields.items():
+            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n'
+                         .encode() + str(value).encode("utf-8") + b"\r\n")
+        filename = os.path.basename(path).replace('"', "_")
+        ctype = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
+                     f'filename="{filename}"\r\nContent-Type: {ctype}\r\n\r\n'.encode())
+        head = b"".join(parts)
+        tail = f"\r\n--{boundary}--\r\n".encode()
+        size = os.path.getsize(path)
+
+        def send(conn):
+            conn.send(head)
+            with open(path, "rb") as fh:
+                while True:
+                    chunk = fh.read(1 << 20)
+                    if not chunk:
+                        break
+                    conn.send(chunk)
+            conn.send(tail)
+
+        return self.request("POST", "/api/publish", body=send, headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Length": str(len(head) + size + len(tail)),
+        })
+
+
+def _publish(feather, args):
+    path, url = args.get("path"), args.get("url")
+    if bool(path) == bool(url):
+        raise FeatherError("Give exactly one of `path` or `url`")
+    fields = {}
+    for arg, field in (("name", "name"), ("developer_name", "developerName"), ("description", "description")):
+        if args.get(arg):
+            fields[field] = args[arg]
+    if "create_if_missing" in args:
+        fields["createIfMissing"] = "true" if args["create_if_missing"] else "false"
+    if url:
+        return feather.request("POST", "/api/publish", body=json.dumps({"url": url, **fields}),
+                               headers={"Content-Type": "application/json"})
+    path = os.path.expanduser(path)
+    if not os.path.isfile(path):
+        raise FeatherError(f"No such file: {path}")
+    return feather.publish_file(path, fields)
+
+
+def _summarise_ios(apps):
+    return [{"platform": "ios", "id": a.get("bundleIdentifier"), "name": a.get("name"),
+             "developer": a.get("developerName"),
+             "versions": [v.get("version") for v in a.get("versions", []) if isinstance(v, dict)]}
+            for a in apps if isinstance(a, dict)]
+
+
+def _list(feather, args):
+    platform = args.get("platform") or "all"
+    out = []
+    if platform in ("ios", "all"):
+        out += _summarise_ios(feather.request("GET", "/api/apps", auth=False))
+    if platform in ("android", "all"):
+        for a in feather.request("GET", "/api/android/apps"):
+            out.append({"platform": "android", "id": a.get("package"), "name": a.get("name"),
+                        "versions": [{k: v.get(k) for k in ("versionCode", "versionName", "published")}
+                                     for v in a.get("versions") or []]})
+    return out
+
+
+def _get(feather, args):
+    app_id = (args.get("id") or "").strip()
+    if not app_id:
+        raise FeatherError("`id` is required")
+    try:
+        return {"platform": "ios", **feather.request("GET", "/api/app/" + quote(app_id, safe=""), auth=False)}
+    except FeatherError as e:
+        if not str(e).startswith("HTTP 404"):
+            raise
+    for a in feather.request("GET", "/api/android/apps"):
+        if a.get("package") == app_id:
+            return {"platform": "android", **a}
+    raise FeatherError(f"No app with id {app_id!r}")
+
+
+HANDLERS = {
+    "publish_app": _publish,
+    "list_apps": _list,
+    "get_app": _get,
+    "repo_status": lambda feather, _args: feather.request("GET", "/api/android/status"),
+}
+
+
+def _call_tool(params):
+    name = params.get("name")
+    handler = HANDLERS.get(name)
+    if handler is None:
+        return {"content": [{"type": "text", "text": f"Unknown tool: {name}"}], "isError": True}
+    try:
+        feather = Feather(os.environ.get("FEATHER_URL", ""), os.environ.get("FEATHER_TOKEN", ""))
+        result = handler(feather, params.get("arguments") or {})
+        is_error = isinstance(result, dict) and result.get("success") is False
+        return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}], "isError": is_error}
+    except FeatherError as e:
+        return {"content": [{"type": "text", "text": str(e)}], "isError": True}
+
+
+def handle(msg):
+    """Return the response dict for one JSON-RPC message, or None for a notification."""
+    method, msg_id = msg.get("method"), msg.get("id")
+    if msg_id is None:
+        return None
+    params = msg.get("params") or {}
+    if method == "initialize":
+        requested = params.get("protocolVersion")
+        result = {
+            "protocolVersion": requested if requested in SUPPORTED_PROTOCOLS else SUPPORTED_PROTOCOLS[0],
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+            "instructions": "Publish iOS .ipa / Android .apk files to a Feather app source with publish_app.",
+        }
+    elif method == "ping":
+        result = {}
+    elif method == "tools/list":
+        result = {"tools": TOOLS}
+    elif method == "tools/call":
+        result = _call_tool(params)
+    else:
+        return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": f"Method not found: {method}"}}
+    return {"jsonrpc": "2.0", "id": msg_id, "result": result}
+
+
+def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}
+        else:
+            if not isinstance(msg, dict):
+                response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid request"}}
+            else:
+                response = handle(msg)
+        if response is not None:
+            sys.stdout.write(json.dumps(response) + "\n")
+            sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()

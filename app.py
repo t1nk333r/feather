@@ -12,6 +12,7 @@ import requests
 import tempfile
 import hashlib
 import hmac
+import secrets
 import threading
 import time
 import uuid
@@ -2718,6 +2719,78 @@ def requires_auth(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         if not session.get('authed'):
+            return jsonify({"success": False, "error": "Authentication required"}), 401
+        return f(*args, **kwargs)
+    return wrapper
+
+
+# API tokens for agents and CI. A token can publish IPAs/APKs and read the
+# catalogue (requires_publish) but never manage tokens, delete apps, or change
+# settings -- those stay session-only (requires_auth). Only a SHA-256 of each
+# token is stored; the plaintext is shown once, at creation.
+API_TOKENS_FILE = os.path.join(DATA_DIR, "api-tokens.json")
+API_TOKEN_PREFIX = "ftr_"
+_api_tokens_lock = threading.Lock()
+
+
+def _hash_token(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _load_api_tokens():
+    try:
+        with open(API_TOKENS_FILE, "r") as f:
+            data = json.load(f)
+        return [t for t in data if isinstance(t, dict) and t.get("hash")] if isinstance(data, list) else []
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as e:
+        logging.error(f"Could not read {API_TOKENS_FILE}: {e}")
+        return []
+
+
+def _save_api_tokens(tokens):
+    tmp = API_TOKENS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(tokens, f, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, API_TOKENS_FILE)
+
+
+def _public_token(t):
+    return {k: t.get(k) for k in ("id", "name", "prefix", "created", "lastUsed")}
+
+
+def _bearer_token_valid():
+    """True when the request carries a live `Authorization: Bearer ftr_...`."""
+    header = request.headers.get("Authorization", "")
+    scheme, _, supplied = header.partition(" ")
+    supplied = supplied.strip()
+    if scheme.lower() != "bearer" or not supplied.startswith(API_TOKEN_PREFIX):
+        return False
+    digest = _hash_token(supplied)
+    with _api_tokens_lock:
+        tokens = _load_api_tokens()
+        match = next((t for t in tokens if hmac.compare_digest(t["hash"], digest)), None)
+        if match is None:
+            return False
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        last = match.get("lastUsed")
+        # Record use at most once a minute so a busy agent is not a write storm.
+        if not last or (now - datetime.fromisoformat(last.replace("Z", "+00:00"))).total_seconds() >= 60:
+            match["lastUsed"] = now.isoformat().replace("+00:00", "Z")
+            try:
+                _save_api_tokens(tokens)
+            except OSError as e:
+                logging.warning(f"Could not record API token use: {e}")
+    return True
+
+
+def requires_publish(f):
+    """Admin session OR a valid API token."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not session.get('authed') and not _bearer_token_valid():
             return jsonify({"success": False, "error": "Authentication required"}), 401
         return f(*args, **kwargs)
     return wrapper
@@ -5603,7 +5676,7 @@ def _download_to_temp(url, suffix):
     fd, filepath = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix=suffix)
     os.close(fd)
     try:
-        logging.info(f"Downloading APK from: {url}")
+        logging.info(f"Downloading from: {url}")
         response = requests.get(url, stream=True, timeout=300)
         response.raise_for_status()
         total = 0
@@ -5624,6 +5697,227 @@ def _download_to_temp(url, suffix):
             except OSError:
                 pass
         raise ValueError(f"Failed to download from {url}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# API tokens (session-only management) and the agent publish endpoint
+# ---------------------------------------------------------------------------
+
+@app.route('/api/tokens')
+@requires_auth
+def list_api_tokens():
+    with _api_tokens_lock:
+        return jsonify([_public_token(t) for t in _load_api_tokens()])
+
+
+@app.route('/api/tokens', methods=['POST'])
+@requires_auth
+def create_api_token():
+    data = request.get_json(silent=True) or {}
+    name = data.get('name')
+    name = name.strip() if isinstance(name, str) else ""
+    if not name or len(name) > 80:
+        return jsonify({"success": False, "error": "name is required (at most 80 characters)"}), 400
+    token = API_TOKEN_PREFIX + secrets.token_urlsafe(32)
+    entry = {
+        "id": uuid.uuid4().hex[:12],
+        "name": name,
+        "hash": _hash_token(token),
+        "prefix": token[:len(API_TOKEN_PREFIX) + 6],
+        "created": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "lastUsed": None,
+    }
+    with _api_tokens_lock:
+        tokens = _load_api_tokens()
+        if len(tokens) >= 100:
+            return jsonify({"success": False, "error": "Too many tokens; revoke some first"}), 400
+        tokens.append(entry)
+        _save_api_tokens(tokens)
+    return jsonify({"success": True, "token": token, **_public_token(entry)})
+
+
+@app.route('/api/tokens/revoke', methods=['POST'])
+@requires_auth
+def revoke_api_token():
+    data = request.get_json(silent=True) or {}
+    token_id = data.get('id')
+    with _api_tokens_lock:
+        tokens = _load_api_tokens()
+        kept = [t for t in tokens if t.get("id") != token_id]
+        if len(kept) == len(tokens):
+            return jsonify({"success": False, "error": "Token not found"}), 404
+        _save_api_tokens(kept)
+    return jsonify({"success": True})
+
+
+def _sniff_platform(path, filename):
+    """'ios' / 'android' from the archive layout, falling back to the
+    extension (an unreadable archive is then rejected by the inspector)."""
+    try:
+        with zipfile.ZipFile(path) as zf:
+            names = zf.namelist()
+    except (zipfile.BadZipFile, OSError, ValueError):
+        names = []
+    if "AndroidManifest.xml" in names:
+        return "android"
+    if any(n.startswith("Payload/") and ".app/" in n for n in names):
+        return "ios"
+    ext = filename.lower().rsplit('.', 1)[-1] if '.' in filename else ''
+    return {"apk": "android", "ipa": "ios"}.get(ext)
+
+
+def _truthy(value, default):
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ("false", "0", "no", "off")
+
+
+def _publish_ios(tmp_path, opts, base_url):
+    try:
+        inspection = inspect_ipa(tmp_path, "IPA")
+    except IpaInspectionError as e:
+        raise ValueError(str(e))
+    bundle_id, version = inspection.bundle_identifier, inspection.version
+    result = {"platform": "ios", "id": bundle_id, "version": version,
+              "build": inspection.build_version, "created": False}
+    existing = source_manager.get_app(bundle_id)
+    if existing and any(isinstance(v, dict) and v.get('version') == version for v in existing.get('versions', [])):
+        return 200, {**result, "success": True, "added": False, "name": existing.get("name"),
+                     "message": f"Already present: {bundle_id} {version}"}
+    if not existing and not opts["createIfMissing"]:
+        return 404, {**result, "success": False,
+                     "error": f"{bundle_id} is not in the catalogue and createIfMissing is false"}
+
+    with open(tmp_path, "rb") as fh:
+        fs = FileStorage(stream=fh, filename="app.ipa")
+        if existing:
+            ok, message = source_manager.add_version(bundle_id, {
+                "version": version,
+                "buildVersion": inspection.build_version,
+                "minOSVersion": inspection.minimum_os_version,
+            }, ipa_file=fs, base_url=base_url)
+        else:
+            new_app = {
+                "name": opts["name"] or inspection.name or bundle_id,
+                "bundleIdentifier": bundle_id,
+                "developerName": opts["developerName"] or "Unknown",
+                "localizedDescription": opts["description"],
+                "version": version,
+                "buildVersion": inspection.build_version,
+                "minOSVersion": inspection.minimum_os_version,
+            }
+            if inspection.privacy:
+                new_app["appPermissions"] = {"entitlements": [], "privacy": inspection.privacy}
+            ok, message = source_manager.add_app_manual(new_app, ipa_file=fs, base_url=base_url)
+            result["created"] = ok
+    if not ok:
+        return 400, {**result, "success": False, "error": message}
+
+    app_info = source_manager.get_app(bundle_id) or {}
+    entry = next((v for v in app_info.get("versions", []) if v.get("version") == version), {})
+    notify("add_version" if existing else "add_app",
+           f"Published via API: {app_info.get('name', bundle_id)} ({bundle_id}) {version}\n{base_url}/source.json")
+    return 200, {**result, "success": True, "added": True, "name": app_info.get("name"),
+                 "downloadURL": entry.get("downloadURL"), "size": entry.get("size"), "message": message}
+
+
+def _publish_android(tmp_path, opts, base_url):
+    info = _inspect_apk(tmp_path)
+    package = info["package"]
+    result = {"platform": "android", "id": package, "version": info["version_name"],
+              "build": info["version_code"], "created": False}
+    known = os.path.exists(android_repo.metadata_path(package))
+    if not known and not opts["createIfMissing"]:
+        return 404, {**result, "success": False,
+                     "error": f"{package} is not in the repo and createIfMissing is false"}
+    fields = {}
+    if not known:
+        fields = android_repo.validate_metadata({
+            "Name": opts["name"] or None,
+            "AuthorName": opts["developerName"] or None,
+            "Description": opts["description"] or None,
+        })
+    added, _ = android_repo.add_apk(tmp_path, expected_package=package)
+    url = f"{base_url}/fdroid/repo/{android_repo.apk_filename(package, info['version_code'])}"
+    if not added:
+        return 200, {**result, "success": True, "added": False, "downloadURL": url,
+                     "message": f"Already present: {package} versionCode {info['version_code']}"}
+    if fields:
+        android_repo.write_metadata(package, fields)
+    notify("android_add_apk", f"Published via API: {package} {info['version_name']}")
+    return 200, {**result, "success": True, "added": True, "created": not known, "downloadURL": url,
+                 "pending": True, "name": opts["name"] or info.get("app_name"),
+                 "message": f"Added {package} versionCode {info['version_code']}; "
+                            "the F-Droid index rebuilds on the sidecar's next pass"}
+
+
+@app.route('/api/publish', methods=['POST'])
+@requires_publish
+def publish():
+    """One call for agents and CI: upload (multipart `file`) or point at a
+    `url` of an .ipa or .apk. Platform, bundle ID / package, and version come
+    from the file itself. New apps are created unless createIfMissing=false;
+    name / developerName / description apply only when an app is created."""
+    temp_path = None
+    try:
+        is_multipart = bool(request.content_type and 'multipart/form-data' in request.content_type)
+        src = request.form if is_multipart else (request.get_json(silent=True) or {})
+        if not hasattr(src, "get"):
+            return jsonify({"success": False, "error": "Expected a JSON object or multipart form"}), 400
+
+        def text(key, limit):
+            value = src.get(key)
+            value = value.strip() if isinstance(value, str) else ""
+            if len(value) > limit:
+                raise ValueError(f"{key} must be at most {limit} characters")
+            return value
+
+        opts = {
+            "name": text("name", 50),
+            "developerName": text("developerName", 100),
+            "description": text("description", 4000),
+            "createIfMissing": _truthy(src.get("createIfMissing"), True),
+        }
+        upload = None
+        if is_multipart:
+            upload = next((request.files[k] for k in ("file", "ipaFile", "apkFile")
+                           if k in request.files and request.files[k].filename), None)
+        url = text("url", 2048)
+
+        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+        if upload is not None:
+            filename = upload.filename
+            fd, temp_path = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix=".upload")
+            os.close(fd)
+            upload.save(temp_path)
+        elif url:
+            if urlparse(url).scheme not in ("http", "https"):
+                return jsonify({"success": False, "error": "url must be http(s)"}), 400
+            filename = os.path.basename(urlparse(url).path)
+            temp_path = _download_to_temp(url, ".upload")
+        else:
+            return jsonify({"success": False, "error": "Send a multipart `file` or a `url`"}), 400
+
+        platform = _sniff_platform(temp_path, filename)
+        if platform is None:
+            return jsonify({"success": False, "error": "Not an .ipa or .apk"}), 400
+        base_url = resolve_base_url()
+        publisher = _publish_ios if platform == "ios" else _publish_android
+        status, body = publisher(temp_path, opts, base_url)
+        return jsonify(body), status
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error publishing via API: {e}")
+        return jsonify({"success": False, "error": "Publish failed"}), 500
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
 
 @app.route('/fdroid/repo/<path:filename>')
@@ -5676,7 +5970,7 @@ def fdroid_qr():
 
 
 @app.route('/api/android/status')
-@requires_auth
+@requires_publish
 def android_status():
     try:
         return jsonify(android_repo.status(sync_url=True))
@@ -5686,7 +5980,7 @@ def android_status():
 
 
 @app.route('/api/android/apps')
-@requires_auth
+@requires_publish
 def android_apps():
     try:
         return jsonify(android_repo.list_apps())

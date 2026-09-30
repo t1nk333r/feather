@@ -77,7 +77,8 @@ Open `http://<host>:7000`, sign in with `ADMIN_PASSWORD`, and add an app. Put a 
 | Method | iOS | Android | Where |
 |---|---|---|---|
 | Upload a file or paste a URL | ✓ | ✓ | admin page → **Add** / **Android** |
-| HTTP API (scripts, CI) | ✓ | ✓ | [`UPLOADING.md`](./UPLOADING.md) |
+| HTTP API with a token (scripts, CI) | ✓ | ✓ | `POST /api/publish` — [`UPLOADING.md`](./UPLOADING.md) |
+| MCP server (AI agents) | ✓ | ✓ | `scripts/feather_mcp.py` — [`UPLOADING.md`](./UPLOADING.md#mcp-server-for-agents) |
 | Import a GitHub/GitLab release | ✓ | ✓ | **Import** tab |
 | Scheduled auto-import (inside the app) | ✓ | ✓ | **Import** → *Save & auto-import* |
 | Cron importer (separate container) | ✓ | ✓ | [Cron importer](#cron-release-importer) |
@@ -90,9 +91,15 @@ What every path has in common:
 - **Icons come from the binary.** If you don't supply an icon, the IPA's own icon files or the APK's launcher icon are used. A supplied icon, or a real icon the app already has, is never replaced. For apps added before this existed, click **Fill missing icons** on the Apps tab (Android: **Rebuild Index** does it too). Limits: iOS icons that exist only inside `Assets.car`, and Android icons that are vector-only, can't be extracted — the default icon is shown.
 - **A different bundle ID is allowed, with a warning.** Renamed/patched builds are often catalogued under their own ID on purpose; devices still install and update them by the IPA's real identifier, so the response tells you.
 
-**API field names** are `ipaFile` and `apkFile`, not `file` — a wrong name fails with an error that reads like a missing file. [`UPLOADING.md`](./UPLOADING.md) documents the login flow, each endpoint, and how to confirm a publish landed.
+**For scripts and agents,** create a token on the **Source** tab (*API tokens*) and send the file to `POST /api/publish` — one endpoint for both platforms; the platform, ID and version come from the file:
 
-**Release assets** are matched per job with a glob (`*.apk`) or a full-match regex (`.*arm64-v8a\.apk`). Regex exists for projects that ship one APK per CPU architecture; a job must match at most one asset per platform.
+```bash
+curl -H "Authorization: Bearer $FEATHER_TOKEN" -F file=@MyApp.ipa https://apps.example.com/api/publish
+```
+
+AI agents can use the stdlib-only MCP server instead (`claude mcp add feather --env FEATHER_URL=… --env FEATHER_TOKEN=… -- python3 scripts/feather_mcp.py`). [`UPLOADING.md`](./UPLOADING.md) has the full contract.
+
+**Release assets** are matched per job with a glob (`*.apk`) or a full-match regex (`.*arm64-v8a\.apk`). Regex exists for projects that ship one APK per CPU architecture; a job must match at most one asset per platform. When a release ships several variants (e.g. `…-sideloaded-Twitter_7.0.0.ipa` and `…-sideloaded-X_7.0.0.ipa`), the error lists every match; narrow the glob to the part that differs (`*-sideloaded-Twitter_*.ipa`) or set an exclude glob.
 
 ---
 
@@ -248,6 +255,7 @@ docker compose run --rm --no-deps -T release-import    # dry run; summary shows 
 What the app does for you:
 
 - **Sign-in required** for every change. The session cookie is `HttpOnly` and `SameSite=Lax`.
+- **API tokens are publish-only.** A token can upload and read, never delete apps, change settings, or create tokens. Only a SHA-256 of each token is stored (`data/api-tokens.json`, mode 600); revoking takes effect on the next request.
 - **Login throttling:** 5 failed attempts per client per 60 s, then `429` with `Retry-After`; a successful login clears it. Behind a reverse proxy all clients share the proxy's address, so the limit is effectively global.
 - **Untrusted files are handled defensively.** IPA/APK metadata reads are size-capped before anything is decompressed (`Info.plist` ≤ 4 MB, `AndroidManifest.xml` ≤ 16 MB, oversized `resources.arsc` skipped, icon images ≤ 8 MB), so a zip bomb can't exhaust memory. App names and descriptions are always rendered as text.
 - **Headers:** `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`. Everything under `/fdroid/repo/` is sandboxed by CSP, because fdroidserver writes the repo name into its HTML unescaped.
@@ -321,11 +329,12 @@ scripts/ipa_inspection.py           IPA metadata reader (shared)
 scripts/apk_inspection.py           APK metadata, signature and icon extraction (shared)
 scripts/certificate_inspection.py   .p12 / .mobileprovision inspector
 scripts/release_source_ingest.py    GitHub/GitLab release importer (cron + in-app)
+scripts/feather_mcp.py              MCP server for agents (stdlib only)
 scripts/telegram_bot_ingest.py      Telegram ingest worker
 scripts/fdroid_index_loop.sh        F-Droid sidecar rebuild loop
 scripts/migrate_*_to_garage.py      one-shot local → Garage migrations
 Dockerfile, Dockerfile.bot, Dockerfile.fdroid, compose.yml
-UPLOADING.md                        write-API contract for scripts
+UPLOADING.md                        write-API contract for scripts and agents
 plans/                              design history; plans/README.md is the index
 tests/                              pytest suite
 ```

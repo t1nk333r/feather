@@ -564,7 +564,9 @@ def github_select_candidate(job, releases):
                 raise ProviderError(
                     f"job {job.id}: release "
                     f"{release.get('tag_name') or release.get('id')} has {len(items)} "
-                    f"{platform} assets matching {job.asset_glob!r}, expected at most one"
+                    f"{platform} assets matching {job.asset_glob!r}, expected at most one "
+                    f"({', '.join(sorted(a.get('name') or '?' for a in items))}); "
+                    f"narrow assetGlob or set assetExcludeGlob"
                 )
             asset = items[0]
             candidates.append(ReleaseCandidate(
@@ -647,7 +649,9 @@ def gitlab_select_candidate(job, releases, now=None):
                 raise ProviderError(
                     f"job {job.id}: release "
                     f"{release.get('tag_name') or release.get('id')} has {len(items)} "
-                    f"{platform} asset links matching {job.asset_glob!r}, expected at most one"
+                    f"{platform} asset links matching {job.asset_glob!r}, expected at most one "
+                    f"({', '.join(sorted(link.get('name') or '?' for link in items))}); "
+                    f"narrow assetGlob or set assetExcludeGlob"
                 )
             link = items[0]
             url = link.get("url")

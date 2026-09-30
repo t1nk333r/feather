@@ -2058,3 +2058,37 @@ def test_feather_client_login_unreachable_is_clean():
     client = ingest.FeatherClient(Down(), "http://feather.example", "pw")
     with pytest.raises(ingest.FeatherAuthError, match="cannot reach feather"):
         client.login()
+
+
+def _neofreebird_release():
+    return [{
+        "id": 7, "tag_name": "v7.0.0", "draft": False, "prerelease": False,
+        "published_at": "2026-09-30T00:00:00Z",
+        "assets": [
+            {"id": 71, "name": "orionblur-NFB-BHTwitter-sideloaded-Twitter_7.0.0_12.28.1.ipa",
+             "size": 100, "url": "https://api.github.com/repos/orionblur/NeoFreeBird/releases/assets/71"},
+            {"id": 72, "name": "orionblur-NFB-BHTwitter-sideloaded-X_7.0.0_12.28.1.ipa",
+             "size": 100, "url": "https://api.github.com/repos/orionblur/NeoFreeBird/releases/assets/72"},
+        ],
+    }]
+
+
+def test_two_ipas_error_names_both_assets():
+    job = make_job(id="nfb", project="orionblur/NeoFreeBird", bundle_identifier="com.atebits.Tweetie2",
+                   asset_glob="*.ipa")
+    with pytest.raises(ingest.ProviderError) as exc:
+        ingest.github_select_candidate(job, _neofreebird_release())
+    msg = str(exc.value)
+    assert "sideloaded-Twitter_7.0.0" in msg and "sideloaded-X_7.0.0" in msg
+    assert "assetExcludeGlob" in msg
+
+
+def test_neofreebird_glob_picks_the_twitter_branded_ipa():
+    job = make_job(id="nfb", project="orionblur/NeoFreeBird", bundle_identifier="com.atebits.Tweetie2",
+                   asset_glob="*-sideloaded-Twitter_*.ipa")
+    [candidate] = ingest.github_select_candidate(job, _neofreebird_release())
+    assert candidate.asset_name == "orionblur-NFB-BHTwitter-sideloaded-Twitter_7.0.0_12.28.1.ipa"
+    x_job = make_job(id="nfb", project="orionblur/NeoFreeBird", bundle_identifier="com.atebits.Tweetie2",
+                     asset_glob="*-sideloaded-X_*.ipa")
+    [x] = ingest.github_select_candidate(x_job, _neofreebird_release())
+    assert x.asset_name == "orionblur-NFB-BHTwitter-sideloaded-X_7.0.0_12.28.1.ipa"
