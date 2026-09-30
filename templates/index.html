@@ -237,8 +237,7 @@
             background-color: var(--surface-2);
             background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='none' stroke='%238e8e93' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' d='M1 1.5 6 6.5 11 1.5'/%3E%3C/svg%3E");
             background-repeat: no-repeat;
-            background-position-x: right 14px !important;
-            background-position-y: center !important;
+            background-position: right 14px center !important;   /* the -x edge-offset form is not supported everywhere */
             padding-right: 38px;      /* room for the chevron */
         }
         .btn {
@@ -654,7 +653,7 @@
                 <img src="/static/icon.svg" alt="" width="24" height="24" style="border-radius:6px;">
                 <span>Source Manager</span>
             </div>
-            <a class="btn-link" href="/store" target="_blank" rel="noopener" style="margin-left:auto;margin-right:12px;text-decoration:none;">Preview store</a>
+            <a class="btn-link" href="/store" target="_blank" rel="noopener" style="margin-left:auto;margin-right:12px;text-decoration:none;white-space:nowrap;">Store</a>
             <button class="btn-link signout" onclick="logout()">Sign out</button>
         </header>
         <main class="workspace">
@@ -2066,9 +2065,9 @@
             const data = await response.json();
             const target = document.getElementById('catalogBackups');
             target.innerHTML = (data.backups || []).map(item =>
-                `<div class="app-card"><strong>${escapeHtml(item.filename)}</strong> — ${item.valid ? `${item.appCount} apps` : escapeHtml(item.error || 'invalid')}` +
-                ` <a class="btn btn-secondary" href="/api/catalog-backups/${encodeURIComponent(item.filename)}/download">Download</a>` +
-                (item.valid ? ` <button type="button" class="btn btn-secondary" data-file="${escapeHtml(item.filename)}" onclick="previewCatalogBackup(this.dataset.file)">Preview</button>` : '') + '</div>'
+                `<div class="app-card"><strong>${escapeHtml(item.filename)}</strong> — ${item.valid ? `${item.appCount} ${item.appCount === 1 ? 'app' : 'apps'}` : escapeHtml(item.error || 'invalid')}` +
+                `<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;"><a class="btn btn-secondary" href="/api/catalog-backups/${encodeURIComponent(item.filename)}/download">Download</a>` +
+                (item.valid ? `<button type="button" class="btn btn-secondary" data-file="${escapeHtml(item.filename)}" onclick="previewCatalogBackup(this.dataset.file)">Preview</button>` : '') + '</div></div>'
             ).join('') || '<p>No snapshots found.</p>';
         }
 

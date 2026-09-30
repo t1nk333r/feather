@@ -223,8 +223,22 @@ def _run_notify_threads_synchronously(app_module, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _minimal_ipa(bundle_id="com.test.fixture", version="1.0"):
+    """Smallest archive ipa_inspection accepts: one app Info.plist."""
+    import io, plistlib, zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("Payload/Fixture.app/Info.plist", plistlib.dumps({
+            "CFBundleIdentifier": bundle_id,
+            "CFBundleShortVersionString": version,
+            "CFBundleVersion": version,
+        }))
+        zf.writestr("Payload/Fixture.app/Fixture", b"\0" * 2048)
+    return buf.getvalue()
+
+
 class _GzipIpaHandler(http.server.BaseHTTPRequestHandler):
-    payload = b"PK\x03\x04 fake but plausible ipa bytes " * 50
+    payload = _minimal_ipa()
 
     def do_GET(self):
         compressed = gzip.compress(self.payload)
@@ -2400,3 +2414,64 @@ def test_editorial_routes_validate_and_round_trip(authed_client):
     assert authed_client.post('/api/news/delete', json={
         "identifier": "release-2",
     }).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Uploaded IPAs are inspected before they are stored
+# ---------------------------------------------------------------------------
+
+
+def _upload_version(authed_client, data_bytes, bundle_id="com.example.app", version="9.0"):
+    import io
+    return authed_client.post(
+        "/api/add-version",
+        data={"bundleIdentifier": bundle_id, "version": version,
+              "ipaFile": (io.BytesIO(data_bytes), "upload.ipa")},
+        content_type="multipart/form-data",
+    )
+
+
+def test_add_version_rejects_a_file_that_is_not_an_ipa(authed_client):
+    resp = _upload_version(authed_client, b"<html>filebin landing page</html>")
+    assert resp.status_code == 400
+    assert "not a valid ZIP" in resp.get_json()["error"]
+    versions = [v["version"] for a in authed_client.get("/source.json").get_json()["apps"]
+                if a["bundleIdentifier"] == "com.example.app" for v in a["versions"]]
+    assert "9.0" not in versions
+
+
+def test_add_version_rejects_a_zip_without_an_app(authed_client):
+    import io, zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("readme.txt", "hello")
+    resp = _upload_version(authed_client, buf.getvalue())
+    assert resp.status_code == 400
+    assert "Payload" in resp.get_json()["error"]
+
+
+def test_add_version_accepts_a_real_ipa(authed_client):
+    resp = _upload_version(authed_client, _minimal_ipa("com.example.app", "9.0"))
+    assert resp.status_code == 200, resp.get_json()
+    assert "Note:" not in resp.get_json()["message"]
+
+
+def test_add_version_warns_but_publishes_a_different_bundle_id(authed_client):
+    """Renamed patched builds are catalogued under their own ID on purpose."""
+    resp = _upload_version(authed_client, _minimal_ipa("com.burbn.instagram", "9.0"))
+    assert resp.status_code == 200, resp.get_json()
+    assert "com.burbn.instagram" in resp.get_json()["message"]
+
+
+def test_delete_app_drops_featured_and_news_references(authed_client):
+    assert authed_client.post("/api/featured-apps", json={"bundleIdentifiers": ["com.example.app"]}).status_code == 200
+    resp = authed_client.post("/api/news", json={
+        "identifier": "launch", "title": "Launch", "caption": "Out now",
+        "date": "2026-09-30T12:00:00Z", "appID": "com.example.app",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    assert authed_client.post("/api/delete-app", json={"bundleIdentifier": "com.example.app"}).status_code == 200
+    source = authed_client.get("/source.json").get_json()
+    assert "com.example.app" not in source.get("featuredApps", [])
+    news = [n for n in source.get("news", []) if n["identifier"] == "launch"]
+    assert news and "appID" not in news[0]
