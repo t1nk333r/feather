@@ -7,12 +7,19 @@ set -eu
 : "${FDROID_KEYSTORE_PASSWORD:?FDROID_KEYSTORE_PASSWORD is required (the repo signing key password)}"
 export FDROID_KEYSTORE_PASSWORD
 INTERVAL="${FDROID_UPDATE_INTERVAL:-15}"
+# A hung `fdroid update` would otherwise freeze the loop forever: the marker
+# is never consumed again and the index silently stops changing.
+UPDATE_TIMEOUT="${FDROID_UPDATE_TIMEOUT:-1800}"
 FEATHER_UID="${FEATHER_UID:-999}"
 [ "${FDROID_REPO_URL:-}" = "/fdroid/repo" ] && unset FDROID_REPO_URL
 case "$INTERVAL" in
   ''|*[!0-9]*) echo "FDROID_UPDATE_INTERVAL must be a positive integer (got '$INTERVAL')" >&2; exit 1 ;;
 esac
 [ "$INTERVAL" -gt 0 ] || { echo "FDROID_UPDATE_INTERVAL must be a positive integer (got '$INTERVAL')" >&2; exit 1; }
+case "$UPDATE_TIMEOUT" in
+  ''|*[!0-9]*) echo "FDROID_UPDATE_TIMEOUT must be a positive integer (got '$UPDATE_TIMEOUT')" >&2; exit 1 ;;
+esac
+[ "$UPDATE_TIMEOUT" -gt 0 ] || { echo "FDROID_UPDATE_TIMEOUT must be a positive integer (got '$UPDATE_TIMEOUT')" >&2; exit 1; }
 cd /repo
 . /etc/profile.d/bsenv.sh
 FDROID="$fdroidserver/fdroid"
@@ -84,16 +91,31 @@ run_update() {
     OK=false
   fi
   if [ "$OK" = true ]; then
-    if "$FDROID" update --create-metadata --pretty > /tmp/fdroid-update.log 2>&1; then OK=true; else OK=false; fi
+    timeout "$UPDATE_TIMEOUT" "$FDROID" update --create-metadata --pretty > /tmp/fdroid-update.log 2>&1
+    RC=$?
+    if [ "$RC" -eq 0 ]; then OK=true; else OK=false; fi
+    [ "$RC" -eq 124 ] && echo "fdroid-index: fdroid update killed after ${UPDATE_TIMEOUT}s (FDROID_UPDATE_TIMEOUT)" >> /tmp/fdroid-update.log
   fi
   # hand the outputs back to feather's uid; keystore/config stay root-only
   chown -R "$FEATHER_UID:$FEATHER_UID" repo metadata fingerprint.txt || true
   if ! python3 - "$OK" "$START" <<'PY'
-import json, sys, os, collections
+import json, sys, os, collections, re
 ok = sys.argv[1] == 'true'
-tail = collections.deque(open('/tmp/fdroid-update.log', errors='replace'), maxlen=40)
+lines = open('/tmp/fdroid-update.log', errors='replace').readlines()
+tail = collections.deque(lines, maxlen=40)
+# fdroid update exits 0 while dropping APKs it will not publish; without
+# this list the admin sees "Added" and then the version never appears.
+rejected = []
+for line in lines:
+    m = re.search(r"Skipping '([^']+)' with invalid signature", line)
+    if m:
+        rejected.append({'apk': os.path.basename(m.group(1)), 'reason': 'unsigned or invalid signature (left in repo/, not published)'})
+        continue
+    m = re.search(r"Archiving (\S+) with invalid signature", line)
+    if m:
+        rejected.append({'apk': os.path.basename(m.group(1)), 'reason': 'invalid signature (moved to archive/, not published)'})
 json.dump({'ok': ok, 'started_at': sys.argv[2], 'finished_at': __import__('datetime').datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
-           'log_tail': ''.join(tail)}, open('last-update.json.tmp', 'w'))
+           'rejected': rejected, 'log_tail': ''.join(tail)}, open('last-update.json.tmp', 'w'))
 os.replace('last-update.json.tmp', 'last-update.json')
 PY
   then

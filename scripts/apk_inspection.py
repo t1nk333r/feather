@@ -47,6 +47,14 @@ def inspect_apk(path, label="APK"):
         )
     if version_code <= 0:
         raise ApkInspectionError(f"{safe_label}: APK declares versionCode {version_code}; must be > 0")
+    # `fdroid update` never publishes an unsigned APK: it logs "Skipping ...
+    # with invalid signature" and still exits 0, so accepting one here would
+    # report "Added" for a version that can never reach the index.
+    if not apk.is_signed():
+        raise ApkInspectionError(
+            f"{safe_label}: APK is unsigned (no v1/v2/v3 signature); "
+            "F-Droid cannot publish it -- upload the signed release build"
+        )
     return ApkInspection(
         package=package,
         version_code=version_code,

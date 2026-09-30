@@ -19,7 +19,7 @@ class _FakeApk:
 
     def __init__(self, package="com.example.app", version_code="42",
                  version_name="4.2", min_sdk=21, target_sdk=34,
-                 app_name="Demo", valid=True):
+                 app_name="Demo", valid=True, signed=True):
         self.package = package
         self.version_code = version_code
         self.version_name = version_name
@@ -27,9 +27,13 @@ class _FakeApk:
         self._target_sdk = target_sdk
         self._app_name = app_name
         self._valid = valid
+        self._signed = signed
 
     def is_valid_APK(self):
         return self._valid
+
+    def is_signed(self):
+        return self._signed
 
     def get_min_sdk_version(self):
         return self._min_sdk
@@ -87,6 +91,14 @@ def test_rejects_non_positive_version_code(tmp_path, monkeypatch):
     _patch_apk(monkeypatch, version_code="0")
     with pytest.raises(ApkInspectionError, match="must be > 0"):
         inspect_apk(path, "zero-version.apk")
+
+
+def test_rejects_unsigned_apk(tmp_path, monkeypatch):
+    path = tmp_path / "unsigned.apk"
+    path.write_bytes(b"fake-apk-bytes")
+    _patch_apk(monkeypatch, signed=False)
+    with pytest.raises(ApkInspectionError, match="APK is unsigned"):
+        inspect_apk(path, "unsigned.apk")
 
 
 def test_accepts_happy_path(tmp_path, monkeypatch):

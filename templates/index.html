@@ -2860,9 +2860,14 @@
                         ? ` &middot; last build finished ${escapeHtml(data.last_update.finished_at || '')}`
                         : ` &middot; <span style="color: var(--danger);">last build FAILED</span> at ${escapeHtml(data.last_update.finished_at || '')}`;
                 }
+                const rejected = (data.last_update && Array.isArray(data.last_update.rejected)) ? data.last_update.rejected : [];
+                const rejectedBox = rejected.length
+                    ? `<div class="info-box" style="border-color: var(--danger);"><strong>Not published by F-Droid:</strong><ul>${rejected.map(r => `<li>${escapeHtml(r.apk || '')} &mdash; ${escapeHtml(r.reason || '')}</li>`).join('')}</ul></div>`
+                    : '';
 
                 el.innerHTML = `
                     <p><strong>Status:</strong> ${statusLine}</p>
+                    ${rejectedBox}
                     <img src="/fdroid/qr?_=${Date.now()}" alt="F-Droid repo QR code" style="max-width: 220px; display: block; margin: 16px 0;">
                     <div class="source-url">
                         <strong>Subscribe URL:</strong><br>

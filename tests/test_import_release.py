@@ -1196,6 +1196,9 @@ class _FakeApk:
     def is_valid_APK(self):
         return self._valid
 
+    def is_signed(self):
+        return True
+
     def get_min_sdk_version(self):
         return self._min_sdk
 

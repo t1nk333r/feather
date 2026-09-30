@@ -1179,6 +1179,9 @@ def _patch_pyaxmlparser_apk(monkeypatch, **fields):
         def is_valid_APK(self):
             return True
 
+        def is_signed(self):
+            return True
+
         def get_min_sdk_version(self):
             return 21
 
