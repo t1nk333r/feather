@@ -12,7 +12,7 @@
 [SYSTEM_FLOW]
 
 1. Public clients fetch iOS `source.json`/IPA/icon/QR or F-Droid index/APK/QR routes without authentication; the Android QR encodes a standard `fdroidrepos://` client deep link.
-2. An operator logs into the admin UI, mutates iOS/Android catalog state, and receives stable JSON outcomes.
+2. An operator logs into the admin UI, mutates iOS/Android catalog state, and receives stable JSON outcomes. Agents and CI publish with an API token via `POST /api/publish` or the MCP server; tokens cannot delete or reconfigure.
 3. Manual, Telegram, one-off repository, and scheduled repository imports validate artifacts before catalog mutation.
 4. A `.p12` + `.mobileprovision` pair can be inspected for usability and device coverage; nothing is signed and nothing is stored.
 5. Catalog mutations are serialized and atomically persisted; the F-Droid sidecar consumes rebuild markers and signs generated indexes.
@@ -29,10 +29,12 @@
 - `templates/index.html`: single-page admin UI.
 - `tests/`: isolated-data pytest suite; no external network required.
 - `plans/`: implementation contracts and execution status.
-- `UPLOADING.md`: the write API's contract for unattended clients — session flow, per-endpoint multipart field names, publish confirmation.
+- `scripts/feather_mcp.py`: stdlib MCP stdio server for agents; wraps `POST /api/publish` and the read routes with an API token.
+- `UPLOADING.md`: the write API's contract for scripts and agents — token + `/api/publish` first, then the legacy session routes.
+- `AGENTS.md`: instructions and invariants for coding agents (`CLAUDE.md` imports it).
 
 [ORPHANS & PENDING]
 
 - No selected implementation plans remain pending. Plan 079 was rejected as already fixed; plans 067–078 and 080–087 are complete, and 086 is research that produced no code.
 - Deferred audit findings remain documented in `plans/README.md`; they are not authorized work until selected.
-- Nothing on `main` past `936e1d4` is deployed. The certificate panel additionally requires an image rebuild, because a stale image has no `cryptography` and 404s `/api/certificate/inspect`.
+- Deployment state is not tracked in the repo; see `plans/HANDOFF.md` → *Verifying a deployment* for the freshness probe.
