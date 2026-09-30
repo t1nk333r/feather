@@ -43,8 +43,6 @@ The Android QR encodes a standard `fdroidrepos://` deep link while the manual re
 
 **Deployed 2026-09-19** (build #7, SUCCESS): `feather:latest` = `sha256:40b252bd…`, `feather-bot:latest` = `sha256:89c08c9b…`, `feather-fdroid:latest` = `sha256:bce9f20f…`. Narrow recreate of `altstore-source-manager` only. Verified live: `/source.json` 200, `/qr` 200, and `POST /api/certificate/inspect` answers `401 Authentication required` — that route exists only in the new image, so 401 (rather than 404) is the freshness probe.
 
-**The Jenkins agent was given real resources.** Build #7 took 34.8 minutes instead of ~2 because the `docker-host` WebSocket kept dropping, costing a 5-minute queue wait per flap. The agent is a container capped at 4 CPUs / 4 GiB while sharing a 24-core host with 40+ containers; during the 1.5 GB fdroid base pull the JVM starved, missed its WS pings and the channel tore down mid-write (`hudson.remoting.Engine$1AgentEndpoint$Transport.write` → `InterruptedException` in the agent's own log). Raised to 8 CPU / 8 GiB — in `/path/to/jenkins/compose.yaml` and in place on the running container via Dockhand `update_container_runtime` (no recreate, so the running build was not disturbed).
-
 ## What changed on 2026-09-18
 
 **Certificate inspection, and a deliberate refusal to sign.** Plan 086 researched
@@ -122,7 +120,7 @@ The cause was never a deleted package: **the pipeline had never produced a succe
 
 ## Deployment
 
-TrueNAS, managed through **Dockhand** at the Tailscale address `http://<tailnet-host>` (environment `truenas`, ID 1). The stack data is at `/path/to/feather`; the historical path name does not mean Dockge is still the control plane. Optional profiles add services:
+A self-hosted Docker host, managed through a container UI. The stack lives at `/path/to/feather`. Optional profiles add services:
 
 | Container | Image | Notes |
 |---|---|---|
@@ -133,21 +131,13 @@ TrueNAS, managed through **Dockhand** at the Tailscale address `http://<tailnet-
 
 Public at `https://feather.example.com` (openresty on `<proxy-ip>`). Garage S3 at `https://s3.example.com`, bucket `feather-repo` served at `https://feather-repo.web.example.com`.
 
-**Jenkins infrastructure.** Controller at `http://<lan-ip>:8080` (an LXC), published as `https://jenkins.example.com` through `<lan-ip>`. The `docker-host` build agent is a container (`jenkins-agent`, image `jenkins-agent:local`, loaded by `docker load`) **on TrueNAS** (`<nas-ip>`), connecting outbound over WebSocket; its compose file is `/path/to/jenkins/compose.yaml`. It mounts the host docker socket, so image builds execute on the TrueNAS daemon — and its container limits are what starved the JVM on 2026-09-19.
-
-The custom Dockhand MCP bridge is installed locally under `~/.local/share/mcp-dockhand`, configured in `~/.codex/config.toml`, and run by `~/.config/systemd/user/mcp-dockhand.service`. Its environment file is `~/.config/mcp-dockhand/env` (mode 0600). The MCP bridge is bound to `127.0.0.1:8080` and separately bearer-protected. Never copy its bearer credential into this repository or a handoff.
-
 **Update ritual:**
 ```bash
 docker compose pull && docker compose up -d      # NOT --build
 ```
 `--build` gives you a locally built image instead of the CI-verified one — same source, different artifact, silently bypassing what CI checked.
 
-**Deploying without shell access to the box.** Both a `dockhand` and a `jenkins` MCP server are configured for Claude Code globally in `~/.claude.json` (HTTP transport, bearer in `headers`). If a session does not load them as tools, they can still be driven directly over HTTP: `initialize` → `notifications/initialized` → `tools/call`, carrying the returned `Mcp-Session-Id`. Read the header out of `~/.claude.json` into a variable; **never echo it**.
-
-Useful calls: `getJob`/`getBuild`/`getBuildLog`/`triggerBuild` (Jenkins, job `d7eeem/feather/main`); `list_containers`/`get_container`/`batch_update_containers` (Dockhand, `environmentId: 1`, name `truenas`). Note the argument names are `environmentId`, `containerId`, `jobFullName` — not `env`/`id`/`job` — and container IDs are the full 64 characters.
-
-**Deploy the app container alone, not the whole stack.** `batch_update_containers` with just `altstore-source-manager` re-pulls and recreates only the app. A whole-stack recreate would also try to re-pull `feather-fdroid`; when that package was unavailable, that would have taken the Android sidecar down. Prefer the narrow operation unless the sidecar image itself changed.
+**Deploy the app container alone, not the whole stack.** Re-pulling and recreating just `altstore-source-manager` (`docker compose pull altstore-manager && docker compose up -d altstore-manager`) touches only the app. A whole-stack recreate would also try to re-pull `feather-fdroid`; when that package was unavailable, that would have taken the Android sidecar down. Prefer the narrow operation unless the sidecar image itself changed.
 
 ## Outstanding — operator tasks
 
@@ -198,8 +188,6 @@ Each of these cost real debugging time. They are the reason this file exists.
 **Every pin in `requirements.txt` needs wheels for both cp311 (the container) and cp314 (the test host).** This is not hypothetical — `pillow==10.1.0` publishes no cp314 wheel and stalled Plan 004. Check with `pip download --no-deps --only-binary=:all: --python-version 311` and again with `314`. The host's system `python3` has no `pip`; use a venv's.
 
 **A digest pin can vanish when upstream rebuilds the tag it was pinned from.** `Dockerfile.fdroid` pinned `registry.gitlab.com/fdroid/docker-executable-fdroidserver@sha256:e5853810…` (verified 2026-08-28). Upstream rebuilt `master` on 2026-09-06 and GitLab garbage-collected the old digest, so every build failed `failed to resolve source metadata … not found` — a pin that protects against a moving tag is itself mortal. Symptoms look like a registry outage; check the current tag digest with the registry API (`https://gitlab.com/jwt/auth?service=container_registry&scope=repository:<path>:pull`, then `GET /v2/<path>/manifests/master`) and re-pin with the fdroidserver revision from the image config's `org.opencontainers.image.revision` label. `latest` on that repo is years stale (built 2024-10-21) — pin `master`.
-
-**The Jenkins agent is a container with a hard CPU cap — starvation shows up as WebSocket flaps.** With 4 CPUs / 4 GiB on a 24-core host running 40+ containers, a GB-scale image pull starved the agent JVM long enough to miss its remoting pings: the controller logged `docker-host seems to be removed or offline … will wait for 5 min`, the build froze mid-stage, and each flap cost a 5-minute queue wait. The agent's own log shows the mechanism — `hudson.remoting.Engine$1AgentEndpoint$Transport.write` throwing `InterruptedException` from the Tyrus WebSocket future. Fix without a recreate: Dockhand `update_container_runtime` with `NanoCpus`/`Memory` (Docker's in-place update), and sync the compose file at `/path/to/jenkins/compose.yaml` so a recreate keeps it. Note the Jenkins system log (`/log/all`) is drowned in `io.modelcontextprotocol` keep-alive warnings; it is not useful for node history.
 
 **`getFile` is synchronous over the download in `--local` mode.** It blocks for the whole transfer, so the timeout must be sized to the file, not to an API call. It is configurable (`BOT_API_GETFILE_TIMEOUT`, default 900 s).
 
