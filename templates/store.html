@@ -29,7 +29,7 @@
             --label-tertiary: #6d6d74;
             --separator: #cdcdca;
             --border: #dededb;
-            --accent: #c6371c;
+            --accent: var(--tint-light, #c6371c);
             --accent-contrast: #ffffff;
             --accent-press: #a82c15;
             --accent-tint: rgba(198,55,28,0.10);
@@ -51,7 +51,7 @@
                 --label-tertiary: #7d7d84;
                 --separator: #28282c;
                 --border: #1c1c20;
-                --accent: #ff5a36;
+                --accent: var(--tint-dark, #ff5a36);
                 --accent-contrast: #111111;
                 --accent-press: #e64a2b;
                 --accent-tint: rgba(255,90,54,0.14);
@@ -141,6 +141,7 @@
         .mono { font-family: var(--mono); }
         .table-scroll { overflow-x: auto; }
         .qr { display: block; width: 240px; max-width: 100%; margin: 12px auto; border-radius: var(--radius-md); background: #fff; }
+        .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
         .muted { color: var(--label-secondary); font-size: 13px; }
         @media (max-width: 560px) {
             .hero h1 { font-size: 21px; }
@@ -150,18 +151,21 @@
 </head>
 <body>
 <div class="wrap">
+    <header>
     <div class="preview-banner">
         <span>Store preview: the same catalog subscribers get from <span class="mono">/source.json</span> and the F-Droid index.</span>
         <a href="/">Admin</a>
     </div>
 
-    <header class="hero">
+    <div class="hero">
         <img id="sourceIcon" alt="" src="/static/icon.svg">
         <div>
             <h1 id="sourceName">Loading…</h1>
             <p id="sourceSubtitle"></p>
         </div>
+    </div>
     </header>
+    <main>
 
     <div class="actions" id="actions"></div>
 
@@ -181,6 +185,7 @@
     <h2 class="section" id="listTitle">Apps</h2>
     <div class="grid" id="grid"></div>
     <p class="empty" id="empty" hidden></p>
+    </main>
 </div>
 
 <dialog id="detail" aria-labelledby="detailName"><div class="dialog-body" id="detailBody"></div></dialog>
@@ -234,6 +239,17 @@
     }
     // replaceChildren() stringifies null ("null"); optional children are null.
     function fill(parent, ...children) { parent.replaceChildren(...children.flat().filter(Boolean)); }
+    function luminance(hex) {
+        const c = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255)
+            .map(x => x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4);
+        return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    }
+    function readableOnWhite(hex) {
+        let rgb = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
+        const toHex = v => '#' + v.map(x => Math.round(x).toString(16).padStart(2, '0')).join('');
+        for (let i = 0; i < 20 && 1.05 / (luminance(toHex(rgb)) + 0.05) < 5.3; i++) rgb = rgb.map(x => x * 0.9);
+        return toHex(rgb);
+    }
     function str(v) { return typeof v === 'string' ? v : (v === null || v === undefined ? '' : String(v)); }
 
     // --- data -------------------------------------------------------------
@@ -312,7 +328,11 @@
             $('sourceIcon').src = icon;
         }
         if (/^#?[0-9a-f]{6}$/i.test(str(src.tintColor))) {
-            document.documentElement.style.setProperty('--accent', '#' + str(src.tintColor).replace('#', ''));
+            const tint = '#' + str(src.tintColor).replace('#', '');
+            // Light mode puts white text on the tint and uses it for links on
+            // a near-white page: darken (same hue) until that reads at 4.5:1.
+            document.documentElement.style.setProperty('--tint-light', readableOnWhite(tint));
+            document.documentElement.style.setProperty('--tint-dark', tint);
         }
 
         const sourceUrl = new URL('/source.json', location.href).href;
@@ -402,7 +422,7 @@
             a.description ? el('p', { class: 'desc', text: a.description }) : null,
             rows.length
                 ? el('div', { class: 'table-scroll' }, el('table', null,
-                    el('thead', null, el('tr', null, ...['Version', 'Date', 'Size', 'Requires', 'Notes', ''].map(h => el('th', { text: h })))),
+                    el('thead', null, el('tr', null, ...['Version', 'Date', 'Size', 'Requires', 'Notes'].map(h => el('th', { text: h })), el('th', null, el('span', { class: 'sr-only', text: 'Download' })))),
                     el('tbody', null, rows)))
                 : el('p', { class: 'muted', text: 'No published versions.' }),
             el('p', { class: 'muted', text: a.platform === 'ios'

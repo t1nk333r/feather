@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <title>AltStore Source Manager</title>
     <link rel="icon" type="image/svg+xml" href="/static/icon.svg" media="(prefers-color-scheme: light)">
@@ -42,6 +42,9 @@
             --accent-tint: rgba(198,55,28,0.10);
             --danger: #c0392b;                       /* distinct red — not the accent */
             --danger-press: #a5311f;
+            --danger-fill: #c0392b;                  /* button background; white text 5.4:1 */
+            --danger-fill-press: #a5311f;
+            --secondary-text: var(--accent-press);   /* 5.6:1 on --accent-tint */
             --danger-tint: rgba(192,57,43,0.10);
             --success: #65751e;
             --warning: #9a6700;
@@ -79,6 +82,9 @@
                 --accent-tint: rgba(255,90,54,0.14);
                 --danger: #e5484d;
                 --danger-press: #cf3f44;
+                --danger-fill: #c9373c;              /* white text 5.1:1 (was 3.9:1 on --danger) */
+                --danger-fill-press: #b32f34;
+                --secondary-text: var(--accent);
                 --danger-tint: rgba(229,72,77,0.14);
                 --success: #b4c96f;
                 --warning: #ffb000;
@@ -127,6 +133,7 @@
             position: sticky; top: 10px; z-index: 5;
             background: var(--surface);
         }
+        .brand-title { font: inherit; margin: 0; }
         .brand {
             display: flex; align-items: center; gap: 8px;
             font-weight: 700; font-size: 1.0em; color: var(--label);
@@ -138,6 +145,7 @@
             font-size: 15px; color: var(--accent); padding: 6px 8px;
         }
         .btn-link.signout {
+            white-space: nowrap;
             color: var(--danger);
             border: 1px solid var(--danger);
             border-radius: 999px;
@@ -193,6 +201,7 @@
         .form-group {
             margin-bottom: 20px;
         }
+        input[type="checkbox"] { width: 20px !important; height: 20px; flex: none; accent-color: var(--accent); cursor: pointer; vertical-align: middle; }
         .field-hint { display: block; margin-top: 6px; font-size: 12px; color: var(--label-secondary); }
         label .optional { font-weight: 400; font-size: 12px; color: var(--label-tertiary); margin-left: 4px; }
         .checkbox-label { display: flex; align-items: center; gap: 8px; margin-bottom: 0; }
@@ -258,11 +267,11 @@
             opacity: .8;
         }
         .btn-danger {
-            background: var(--danger);
+            background: var(--danger-fill);
             color: #fff;
         }
         .btn-danger:hover {
-            background: var(--danger-press);
+            background: var(--danger-fill-press);
         }
         .app-list {
             display: grid;
@@ -363,7 +372,7 @@
         }
         .btn-secondary {
             background: var(--accent-tint);
-            color: var(--accent);
+            color: var(--secondary-text);
             margin-right: 10px;
         }
         .btn-secondary:hover {
@@ -655,7 +664,7 @@
         <header class="topbar">
             <div class="brand">
                 <img src="/static/icon.svg" alt="" width="24" height="24" style="border-radius:6px;">
-                <span>Source Manager</span>
+                <h1 class="brand-title">Source Manager</h1>
             </div>
             <a class="btn-link" href="/store" target="_blank" rel="noopener" style="margin-left:auto;margin-right:12px;text-decoration:none;white-space:nowrap;">Store</a>
             <button class="btn-link signout" onclick="logout()">Sign out</button>
@@ -667,22 +676,22 @@
                 <div id="manualFields">
                     <div class="form-group">
                         <label>App Name:</label>
-                        <input type="text" name="name" required placeholder="My Awesome App">
+                        <input aria-label="App Name" type="text" name="name" required placeholder="My Awesome App">
                     </div>
                     <div class="form-group">
                         <label>Bundle Identifier:</label>
-                        <input type="text" name="bundleIdentifier" placeholder="com.example.app" required>
+                        <input aria-label="Bundle Identifier" type="text" name="bundleIdentifier" placeholder="com.example.app" required>
                     </div>
                     <div class="form-group">
                         <label>Developer Name:</label>
-                        <input type="text" name="developerName" required placeholder="Developer Name">
+                        <input aria-label="Developer Name" type="text" name="developerName" required placeholder="Developer Name">
                     </div>
                     <div class="form-group">
                         <label>Description:</label>
-                        <textarea name="localizedDescription" placeholder="App description..."></textarea>
+                        <textarea aria-label="Description" name="localizedDescription" placeholder="App description..."></textarea>
                     </div>
                     <div class="form-group">
-                        <label>Icon:</label>
+                        <label for="iconFile">Icon:</label>
                         <div style="margin-bottom: 10px;">
                             <input type="file" id="iconFile" name="iconFile" accept=".png,.jpg,.jpeg,.webp,.gif" style="margin-bottom: 10px; width: 100%;">
                             <div style="display: flex; align-items: center; gap: 8px; margin-top: 10px;">
@@ -694,10 +703,10 @@
                     </div>
                     <div class="form-group">
                         <label>Version:</label>
-                        <input type="text" name="version" placeholder="1.0.0" required>
+                        <input aria-label="Version" type="text" name="version" placeholder="1.0.0" required>
                     </div>
                     <div class="form-group">
-                        <label>IPA File:</label>
+                        <label for="ipaFile">IPA File:</label>
                         <div style="margin-bottom: 10px;">
                             <input type="file" id="ipaFile" name="ipaFile" accept=".ipa" style="margin-bottom: 10px; width: 100%;">
                             <div style="display: flex; align-items: center; gap: 8px; margin-top: 10px;">
@@ -709,7 +718,7 @@
                     </div>
                     <div class="form-group">
                         <label>Min iOS Version:</label>
-                        <input type="text" name="minOSVersion" placeholder="14.0">
+                        <input aria-label="Min iOS Version" type="text" name="minOSVersion" placeholder="14.0">
                     </div>
                 </div>
 
@@ -725,12 +734,12 @@
             </div>
             <div class="search-filter-bar">
                 <div class="search-box">
-                    <input type="text" id="searchInput" placeholder="Search apps by name or bundle ID..." oninput="filterApps()">
+                    <input type="text" id="searchInput" aria-label="Search apps" placeholder="Search apps by name or bundle ID..." oninput="filterApps()">
                 </div>
-                <select id="filterDeveloper" class="filter-select" onchange="filterApps()">
+                <select id="filterDeveloper" aria-label="Filter by developer" class="filter-select" onchange="filterApps()">
                     <option value="">All Developers</option>
                 </select>
-                <select id="sortBy" class="filter-select" onchange="filterApps()">
+                <select id="sortBy" aria-label="Sort apps" class="filter-select" onchange="filterApps()">
                     <option value="name">Sort by Name</option>
                     <option value="date">Sort by Date</option>
                     <option value="version">Sort by Version</option>
@@ -767,34 +776,34 @@
             <h2 style="margin-bottom: 20px;">Source Information</h2>
             <form id="sourceInfoForm">
                 <div class="form-group">
-                    <label>Source Name:</label>
+                    <label for="sourceName">Source Name:</label>
                     <input type="text" name="name" id="sourceName">
                 </div>
                 <div class="form-group">
-                    <label>Subtitle:</label>
+                    <label for="sourceSubtitle">Subtitle:</label>
                     <input type="text" name="subtitle" id="sourceSubtitle">
                 </div>
                 <div class="form-group">
-                    <label>Description:</label>
+                    <label for="sourceDescription">Description:</label>
                     <textarea name="description" id="sourceDescription"></textarea>
                 </div>
                 <div class="form-group">
-                    <label>Website:</label>
+                    <label for="sourceWebsite">Website:</label>
                     <input type="url" name="website" id="sourceWebsite">
                 </div>
                 <div class="form-group">
-                    <label>Icon URL:</label>
+                    <label for="sourceIconURL">Icon URL:</label>
                     <input type="url" name="iconURL" id="sourceIconURL">
                 </div>
                 <div class="form-group">
-                    <label>Tint Color (hex):</label>
+                    <label for="sourceTintColor">Tint Color (hex):</label>
                     <input type="text" name="tintColor" id="sourceTintColor" placeholder="#4185A9">
                 </div>
                 <button type="submit" class="btn">Update Source Info</button>
             </form>
             <h2 style="margin-top:40px;">Featured Apps</h2>
             <p>Select up to five existing apps; order follows the selection list.</p>
-            <select id="featuredAppsSelect" multiple size="6"></select>
+            <select id="featuredAppsSelect" aria-label="Featured apps" multiple size="6"></select>
             <button type="button" class="btn" onclick="saveFeaturedApps()">Save Featured Apps</button>
 
             <h2 style="margin-top:40px;">News</h2>
@@ -852,38 +861,38 @@
             <form id="importRepoForm">
                 <div class="form-group">
                     <label>Provider:</label>
-                    <select name="provider" required>
+                    <select aria-label="Provider" name="provider" required>
                         <option value="github">GitHub</option>
                         <option value="gitlab">GitLab</option>
                     </select>
                 </div>
                 <div class="form-group">
                     <label>Repository:</label>
-                    <input type="text" name="project" required placeholder="owner/repo or a full repo URL">
+                    <input aria-label="Repository" type="text" name="project" required placeholder="owner/repo or a full repo URL">
                 </div>
                 <div class="form-group">
                     <label>Bundle Identifier:</label>
-                    <input type="text" name="bundleIdentifier" placeholder="leave blank to auto-detect from the IPA">
+                    <input aria-label="Bundle Identifier" type="text" name="bundleIdentifier" placeholder="leave blank to auto-detect from the IPA">
                 </div>
                 <div class="form-group">
                     <label>Android Package:</label>
-                    <input type="text" name="package" placeholder="leave blank to auto-detect from the APK">
+                    <input aria-label="Android Package" type="text" name="package" placeholder="leave blank to auto-detect from the APK">
                 </div>
                 <div class="form-group">
                     <label>Match Mode:</label>
-                    <select name="assetMatchMode">
+                    <select aria-label="Match Mode" name="assetMatchMode">
                         <option value="glob">Glob</option>
                         <option value="regex">Regular expression</option>
                     </select>
                 </div>
                 <div class="form-group">
                     <label>Asset Pattern:</label>
-                    <input type="text" name="assetGlob" value="*.ipa" placeholder="*.ipa — for both platforms, e.g. *.{ipa,apk} — or, in regex mode, .*arm64-v8a\.apk to pin one ABI">
+                    <input aria-label="Asset Pattern" type="text" name="assetGlob" value="*.ipa" placeholder="*.ipa — for both platforms, e.g. *.{ipa,apk} — or, in regex mode, .*arm64-v8a\.apk to pin one ABI">
                     <small style="display: block; margin-top: 5px; color: var(--label-secondary); font-size: 0.85em;">Glob mode: a shell-style pattern like <code>*.apk</code>. Regex mode: a full-match regular expression, e.g. <code>.*arm64-v8a\.apk</code> to pin exactly one asset out of several.</small>
                 </div>
                 <div class="form-group">
                     <label>Exclude Pattern (optional):</label>
-                    <input type="text" name="assetExcludeGlob" placeholder="*-tvOS.ipa — or, in regex mode, .*-tvOS\.ipa">
+                    <input aria-label="Exclude Pattern (optional)" type="text" name="assetExcludeGlob" placeholder="*-tvOS.ipa — or, in regex mode, .*-tvOS\.ipa">
                 </div>
                 <div class="form-group">
                     <div style="display: flex; align-items: center; gap: 8px;">
@@ -899,25 +908,25 @@
                 </div>
                 <div class="form-group">
                     <label>Allowed Download Hosts (required for GitLab):</label>
-                    <input type="text" name="allowedDownloadHosts" placeholder="gitlab.com, example.com">
+                    <input aria-label="Allowed Download Hosts (required for GitLab)" type="text" name="allowedDownloadHosts" placeholder="gitlab.com, example.com">
                 </div>
                 <div class="form-group">
                     <label>Name (for new apps):</label>
-                    <input type="text" name="name" placeholder="My Awesome App">
+                    <input aria-label="Name (for new apps)" type="text" name="name" placeholder="My Awesome App">
                 </div>
                 <div class="form-group">
                     <label>Developer Name (for new apps):</label>
-                    <input type="text" name="developerName" placeholder="Developer Name">
+                    <input aria-label="Developer Name (for new apps)" type="text" name="developerName" placeholder="Developer Name">
                 </div>
                 <div class="form-group">
                     <label>Icon URL (optional — applied to new and existing apps)</label>
-                    <input type="url" name="iconURL" placeholder="https://example.com/icon.png">
+                    <input aria-label="Icon URL (optional — applied to new and existing apps)" type="url" name="iconURL" placeholder="https://example.com/icon.png">
                 </div>
 
                 <h3 style="margin-top: 25px; margin-bottom: 15px;">Auto-import options</h3>
                 <div class="form-group">
                     <label>Job ID (optional):</label>
-                    <input type="text" name="jobId" placeholder="blank = derived from repo">
+                    <input aria-label="Job ID (optional)" type="text" name="jobId" placeholder="blank = derived from repo">
                 </div>
                 <div class="form-group">
                     <div style="display: flex; align-items: center; gap: 8px;">
@@ -945,7 +954,7 @@
                     </div>
                 </div>
                 <div class="form-group" style="margin-bottom: 15px;">
-                    <label>Interval (hours):</label>
+                    <label for="autoImportInterval">Interval (hours):</label>
                     <input type="number" id="autoImportInterval" min="1" max="168" value="6" style="max-width: 160px;">
                 </div>
                 <button type="button" class="btn" id="autoImportSaveConfigBtn" onclick="saveAutoImportConfig()">Save Schedule</button>
@@ -971,7 +980,7 @@
             <h2 style="margin-top:40px; margin-bottom:20px;">Health Monitor</h2>
             <div class="parser-options">
                 <label><input type="checkbox" id="healthMonitorEnabled" style="width:auto;"> Enable scheduled scans</label>
-                <input type="number" id="healthMonitorInterval" min="1" max="168" value="6" style="max-width:160px;">
+                <input type="number" id="healthMonitorInterval" aria-label="Scan interval in hours" min="1" max="168" value="6" style="max-width:160px;">
                 <button type="button" class="btn" onclick="saveHealthMonitorConfig()">Save Monitor</button>
                 <div id="healthMonitorHistory" style="margin-top:12px;"></div>
             </div>
@@ -1028,7 +1037,7 @@
             </div>
 
             <div class="form-group" style="max-width: 480px; margin-top: 20px;">
-                <label>Repository Name:</label>
+                <label for="androidRepoName">Repository Name:</label>
                 <input type="text" id="androidRepoName" placeholder="Feather Android">
                 <label style="margin-top: 10px;">Description:</label>
                 <textarea id="androidRepoDescription" placeholder="Optional description"></textarea>
@@ -1039,7 +1048,7 @@
             <h2 style="margin-top: 40px; margin-bottom: 20px;">Add APK</h2>
             <form id="addApkForm">
                 <div class="form-group">
-                    <label>APK File:</label>
+                    <label for="apkFile">APK File:</label>
                     <div style="margin-bottom: 10px;">
                         <input type="file" id="apkFile" name="apkFile" accept=".apk" style="margin-bottom: 10px; width: 100%;">
                         <div style="display: flex; align-items: center; gap: 8px; margin-top: 10px;">
@@ -1051,35 +1060,35 @@
                 </div>
                 <div class="form-group">
                     <label>Package (optional -- must match the APK if set):</label>
-                    <input type="text" name="package" placeholder="org.example.app">
+                    <input aria-label="Package (optional -- must match the APK if set)" type="text" name="package" placeholder="org.example.app">
                 </div>
                 <div class="form-group">
                     <label>Name (optional -- overrides the APK's app label):</label>
-                    <input type="text" name="name" maxlength="50" placeholder="My Android App">
+                    <input aria-label="Name (optional -- overrides the APK's app label)" type="text" name="name" maxlength="50" placeholder="My Android App">
                 </div>
                 <div class="form-group">
                     <label>Summary:</label>
-                    <input type="text" name="summary" maxlength="80" placeholder="Short one-line summary">
+                    <input aria-label="Summary" type="text" name="summary" maxlength="80" placeholder="Short one-line summary">
                 </div>
                 <div class="form-group">
                     <label>Description:</label>
-                    <textarea name="description" maxlength="4000" placeholder="Longer description..."></textarea>
+                    <textarea aria-label="Description" name="description" maxlength="4000" placeholder="Longer description..."></textarea>
                 </div>
                 <div class="form-group">
                     <label>Author Name:</label>
-                    <input type="text" name="authorName" placeholder="Developer Name">
+                    <input aria-label="Author Name" type="text" name="authorName" placeholder="Developer Name">
                 </div>
                 <div class="form-group">
                     <label>Website:</label>
-                    <input type="url" name="website" placeholder="https://example.com">
+                    <input aria-label="Website" type="url" name="website" placeholder="https://example.com">
                 </div>
                 <div class="form-group">
                     <label>Source Code URL:</label>
-                    <input type="url" name="sourceCode" placeholder="https://github.com/example/app">
+                    <input aria-label="Source Code URL" type="url" name="sourceCode" placeholder="https://github.com/example/app">
                 </div>
                 <div class="form-group">
                     <label>License (SPDX id):</label>
-                    <input type="text" name="license" placeholder="Apache-2.0">
+                    <input aria-label="License (SPDX id)" type="text" name="license" placeholder="Apache-2.0">
                 </div>
                 <button type="submit" class="btn">Add APK</button>
             </form>
@@ -1099,15 +1108,15 @@
             </p>
             <form id="certificateInspectForm" autocomplete="off">
                 <div class="form-group">
-                    <label>Signing Certificate (.p12):</label>
+                    <label for="p12File">Signing Certificate (.p12):</label>
                     <input type="file" id="p12File" name="p12File" accept=".p12" style="width: 100%;">
                 </div>
                 <div class="form-group">
-                    <label>Provisioning Profile (.mobileprovision):</label>
+                    <label for="provisionFile">Provisioning Profile (.mobileprovision):</label>
                     <input type="file" id="provisionFile" name="provisionFile" accept=".mobileprovision" style="width: 100%;">
                 </div>
                 <div class="form-group">
-                    <label>P12 Passphrase (leave blank if the .p12 has no passphrase):</label>
+                    <label for="p12Password">P12 Passphrase (leave blank if the .p12 has no passphrase):</label>
                     <input type="password" id="p12Password" name="p12Password" autocomplete="new-password" placeholder="Optional">
                 </div>
                 <button type="submit" class="btn" id="certificateInspectBtn" disabled>Inspect</button>
@@ -1156,31 +1165,31 @@
                         <img id="editAppIcon" src="" alt="App Icon" class="app-icon" style="margin: 0 auto; display: block;">
                     </div>
                     <div class="form-group">
-                        <label>App Name:</label>
+                        <label for="editName">App Name:</label>
                         <input type="text" id="editName" name="name" required>
                     </div>
                     <div class="form-group">
-                        <label>Developer Name:</label>
+                        <label for="editDeveloperName">Developer Name:</label>
                         <input type="text" id="editDeveloperName" name="developerName" required>
                     </div>
                     <div class="form-group">
-                        <label>Subtitle:</label>
+                        <label for="editSubtitle">Subtitle:</label>
                         <input type="text" id="editSubtitle" name="subtitle">
                     </div>
                     <div class="form-group">
-                        <label>Description:</label>
+                        <label for="editDescription">Description:</label>
                         <textarea id="editDescription" name="localizedDescription" rows="4"></textarea>
                     </div>
                     <div class="form-group">
-                        <label>Screenshot URLs (one per line):</label>
+                        <label for="editScreenshotURLs">Screenshot URLs (one per line):</label>
                         <textarea id="editScreenshotURLs" name="screenshotURLs" rows="4" placeholder="https://example.com/screenshot1.png"></textarea>
                     </div>
                     <div class="form-group">
-                        <label>Tint Color:</label>
+                        <label for="editTintColor">Tint Color:</label>
                         <input type="text" id="editTintColor" name="tintColor" placeholder="#007AFF">
                     </div>
                     <div class="form-group">
-                        <label>Icon:</label>
+                        <label for="editIconFile">Icon:</label>
                         <div style="margin-bottom: 10px;">
                             <input type="file" id="editIconFile" name="iconFile" accept=".png,.jpg,.jpeg,.webp,.gif" style="margin-bottom: 10px; width: 100%;">
                             <div style="display: flex; align-items: center; gap: 8px; margin-top: 10px;">
@@ -1191,7 +1200,7 @@
                         <input type="url" id="editIconURL" name="iconURL" placeholder="https://example.com/icon.png" style="display: none; width: 100%;">
                     </div>
                     <div class="form-group">
-                        <label>Bundle Identifier (read-only):</label>
+                        <label for="editBundleIdentifier">Bundle Identifier (read-only):</label>
                         <input type="text" id="editBundleIdentifier" readonly style="background: var(--surface-2);">
                     </div>
 
@@ -1202,11 +1211,11 @@
                         <div class="add-version-section">
                             <h4 style="margin-bottom: 15px; color: var(--accent);">Add New Version</h4>
                             <div class="form-group">
-                                <label>Version:</label>
+                                <label for="newVersion">Version:</label>
                                 <input type="text" id="newVersion" name="version" placeholder="1.0.0">
                             </div>
                             <div class="form-group">
-                                <label>IPA File:</label>
+                                <label for="newIpaFile">IPA File:</label>
                                 <div style="margin-bottom: 10px;">
                                     <input type="file" id="newIpaFile" name="ipaFile" accept=".ipa" style="margin-bottom: 10px; width: 100%;">
                                     <div style="display: flex; align-items: center; gap: 8px; margin-top: 10px;">
@@ -1217,7 +1226,7 @@
                                 <input type="url" id="newDownloadURL" name="downloadURL" placeholder="https://example.com/app.ipa" style="display: none; width: 100%;">
                             </div>
                             <div class="form-group">
-                                <label>Min iOS Version:</label>
+                                <label for="newMinOSVersion">Min iOS Version:</label>
                                 <input type="text" id="newMinOSVersion" name="minOSVersion" placeholder="14.0">
                             </div>
                             <button type="button" class="btn" id="addVersionBtn" onclick="addNewVersion(this)">Add Version</button>
@@ -1233,10 +1242,10 @@
         </div>
 
         <!-- Login Modal -->
-        <div id="loginModal" class="modal">
+        <div id="loginModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h2>Sign in</h2>
+                    <h2 id="loginTitle">Sign in</h2>
                 </div>
                 <form id="loginForm">
                     <div class="form-group">
