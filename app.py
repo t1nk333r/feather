@@ -36,6 +36,7 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 import release_source_ingest as release_ingest
 from apk_inspection import inspect_apk, ApkInspectionError
+from ipa_inspection import inspect_ipa, InspectionError as IpaInspectionError
 import certificate_inspection
 
 # Configure logging
@@ -1036,6 +1037,28 @@ class SourceManager:
         filename = f"{secure_filename(version)}.ipa"
         return os.path.join(bundle_folder, filename)
     
+    def check_ipa(self, source, bundle_id, label):
+        """Refuse anything that is not a real IPA before it is stored.
+
+        `source` is a path or a seekable file object. Raises
+        IpaInspectionError (not caught by the save/download helpers, so the
+        route reports the reason). A different CFBundleIdentifier is only a
+        warning: renamed patched builds are published under their own
+        catalog ID on purpose, but devices install and update by the IPA's
+        identifier, so the uploader should know. The warning is left in
+        self.ipa_warning for the caller's success message; every caller
+        holds self._lock.
+        """
+        self.ipa_warning = None
+        inspection = inspect_ipa(source, label or "IPA")
+        if inspection.bundle_identifier != bundle_id:
+            self.ipa_warning = (
+                f"Note: this IPA's bundle identifier is {inspection.bundle_identifier}, "
+                f"not {bundle_id}; devices install and update it as {inspection.bundle_identifier}."
+            )
+            logging.warning("IPA for %s declares bundle identifier %s", bundle_id, inspection.bundle_identifier)
+        return inspection
+
     def save_ipa_file(self, file, bundle_id, version, dest_path=None):
         """Save uploaded IPA file via the configured storage backend
         (ipa_storage -- Plan 011).
@@ -1053,6 +1076,8 @@ class SourceManager:
         """
         filepath = None
         try:
+            self.check_ipa(file.stream, bundle_id, file.filename)
+            file.stream.seek(0)
             if dest_path:
                 filepath = dest_path
                 os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -1065,6 +1090,8 @@ class SourceManager:
             if file_size is None:
                 return None, 0
             return True, file_size
+        except IpaInspectionError:
+            raise
         except Exception as e:
             logging.error(f"Error saving IPA file: {str(e)}")
             if filepath and os.path.exists(filepath):
@@ -1114,6 +1141,8 @@ class SourceManager:
                         raise ValueError(f"Download exceeded size limit of {limit} bytes")
                     f.write(chunk)
 
+            self.check_ipa(filepath, bundle_id, url.rsplit('/', 1)[-1].split('?')[0])
+
             if is_staging_write:
                 file_size = get_file_size(filepath)
                 logging.info(f"Downloaded IPA file: {filepath} ({file_size} bytes)")
@@ -1128,6 +1157,13 @@ class SourceManager:
             if file_size is None:
                 return None, 0
             return True, file_size
+        except IpaInspectionError:
+            if filepath and os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
+            raise
         except Exception as e:
             logging.error(f"Error downloading IPA file: {str(e)}")
             if filepath and os.path.exists(filepath):
@@ -1372,6 +1408,7 @@ class SourceManager:
     def add_app_manual(self, data, ipa_file=None, download_from_url=False, icon_file=None, download_icon_from_url=False, base_url=None):
         """Add app manually with provided data"""
         with self._lock:
+            self.ipa_warning = None
             source_data = self.load_source()
             if not source_data:
                 return False, "Failed to load source data"
@@ -1478,7 +1515,7 @@ class SourceManager:
             if self.save_source(source_data):
                 if stored_icon_ext:
                     icon_storage.cleanup_variants(bundle_id, stored_icon_ext)
-                return True, "App added successfully"
+                return True, " ".join(filter(None, ["App added successfully", getattr(self, "ipa_warning", None)]))
             return False, "Failed to save source data"
 
     def delete_app(self, bundle_identifier):
@@ -1502,6 +1539,15 @@ class SourceManager:
             ]
         
             if len(source_data['apps']) < initial_count:
+                # Drop editorial references to the deleted app: a dangling
+                # featuredApps entry or news appID is published as-is and
+                # makes the news item fail validation on its next save.
+                featured = source_data.get('featuredApps')
+                if isinstance(featured, list):
+                    source_data['featuredApps'] = [b for b in featured if b != bundle_identifier]
+                for item in source_data.get('news') or []:
+                    if isinstance(item, dict) and item.get('appID') == bundle_identifier:
+                        del item['appID']
                 # Delete IPA files before save (Plan 011 behavior), but only
                 # delete the icon after the catalog removal is committed.
                 if app_to_delete:
@@ -1638,6 +1684,7 @@ class SourceManager:
     def add_version(self, bundle_identifier, version_data, ipa_file=None, download_from_url=False, base_url=None):
         """Add a new version to an existing app"""
         with self._lock:
+            self.ipa_warning = None
             source_data = self.load_source()
             if not source_data:
                 return False, "Failed to load source data"
@@ -1706,7 +1753,9 @@ class SourceManager:
             app['addedDate'] = dates['feather_date']
         
             success = self.save_source(source_data)
-            return success, "Version added successfully" if success else "Failed to add version"
+            if not success:
+                return False, "Failed to add version"
+            return True, " ".join(filter(None, ["Version added successfully", getattr(self, 'ipa_warning', None)]))
     
     def update_version(self, bundle_identifier, version, version_data, ipa_file=None, download_from_url=False, base_url=None):
         """Update a specific version of an app"""
@@ -1802,9 +1851,28 @@ class SourceManager:
             if not source_data:
                 return False, "Failed to load source data"
         
+            if not isinstance(data, dict):
+                return False, "Expected a JSON object"
+            updates = {}
             for key in ['name', 'subtitle', 'description', 'website', 'tintColor', 'iconURL']:
-                if key in data and data[key]:
-                    source_data[key] = data[key]
+                value = data.get(key)
+                if not value:
+                    continue
+                if not isinstance(value, str):
+                    return False, f"{key} must be a string"
+                value = value.strip()
+                # Every client renders these, so hold them to the same rules
+                # as news items: absolute http(s) URLs and a #RRGGBB colour.
+                if key in ('website', 'iconURL'):
+                    parsed = urlparse(value)
+                    if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
+                        return False, f"{key} must be an absolute http(s) URL"
+                elif key == 'tintColor':
+                    if not re.fullmatch(r'#?[0-9A-Fa-f]{6}', value):
+                        return False, "tintColor must be a six-digit hex colour like #4185A9"
+                    value = '#' + value.lstrip('#').upper()
+                updates[key] = value
+            source_data.update(updates)
         
             success = self.save_source(source_data)
             return success, "Source information updated successfully" if success else "Failed to update source information"
