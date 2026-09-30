@@ -115,7 +115,7 @@ The cause was never a deleted package: **the pipeline had never produced a succe
 ## Not finished
 
 - **No APK has been imported end to end for real.** Every test is offline by design. A live `/inspect` against `RyanYuuki/AnymeX` correctly tagged both ABI APKs as `platform: android`, but nothing has been downloaded and published. **This is the highest-value next action** — and it is now fully unblocked: regex mode is live in production, so a multi-ABI release works.
-- **`parse_manifest_dict` is still over-strict.** `scripts/release_source_ingest.py:330` requires "at least one of `bundleIdentifier` or `package`" for **CLI manifest** jobs — the same rule removed from the UI paths in `fd38864`, because both fields are auto-detected. An Android-only cron job is forced to declare a package it does not need. Pre-existing from plan 083, left deliberately rather than widen an unrelated merge.
+- ~~**`parse_manifest_dict` is still over-strict.**~~ **Fixed 2026-09-30** — identity is optional in cron manifests too; the CLI detects it from the artifact. `scripts/release_source_ingest.py:330` requires "at least one of `bundleIdentifier` or `package`" for **CLI manifest** jobs — the same rule removed from the UI paths in `fd38864`, because both fields are auto-detected. An Android-only cron job is forced to declare a package it does not need. Pre-existing from plan 083, left deliberately rather than widen an unrelated merge.
 - **The fdroid re-pin skipped the real-APK spike** (see 2026-09-19). The image builds and its smoke passes, but before the Android sidecar is next updated, run the spike against the new fdroidserver and record the result in the `Dockerfile.fdroid` comment.
 
 ## Deployment

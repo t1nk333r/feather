@@ -2564,3 +2564,18 @@ def test_import_release_wrong_field_types_is_an_error_event_not_a_500(authed_cli
     # The route streams NDJSON progress; a validation failure is an error event, never a 500.
     assert resp.status_code == 200
     assert '"stage": "error"' in resp.get_data(as_text=True)
+
+
+def test_add_app_with_unfetchable_icon_leaves_no_orphan_ipa(authed_client, tmp_path):
+    import io
+    resp = authed_client.post(
+        "/api/add-app",
+        data={"name": "Orphan", "bundleIdentifier": "com.test.orphan", "developerName": "x",
+              "version": "1.0", "downloadIconFromUrl": "true", "iconURL": "http://127.0.0.1:1/icon.png",
+              "ipaFile": (io.BytesIO(_minimal_ipa("com.test.orphan", "1.0")), "o.ipa")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 400
+    assert not (tmp_path / "ipas" / "com.test.orphan" / "1.0.ipa").exists()
+    assert all(a["bundleIdentifier"] != "com.test.orphan"
+               for a in authed_client.get("/source.json").get_json()["apps"])

@@ -87,7 +87,7 @@ services:
     restart: unless-stopped
 
   # Plan 029: one-shot GitHub/GitLab release importer, launched by host
-  # crontab (`docker compose run --rm -T release-import --apply`). Opt-in
+  # crontab (`docker compose run --rm --no-deps -T release-import --apply`). Opt-in
   # (profile, not started by a plain `docker compose up -d`) and one-shot
   # (restart: "no" -- it is not a daemon). It never mounts app.py's data
   # directory: the only writable mount is its own config/state directory,
@@ -99,7 +99,7 @@ services:
     container_name: feather-release-import
     entrypoint: ["python", "/app/scripts/release_source_ingest.py"]
     # Dry-run by default -- append --apply on the crontab invocation, e.g.
-    # `docker compose run --rm -T release-import --apply`.
+    # `docker compose run --rm --no-deps -T release-import --apply`.
     env_file:
       - .env
     environment:

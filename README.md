@@ -143,8 +143,12 @@ docker compose run --rm -T release-import --apply   # publish; a second run repo
 Schedule it from the host's crontab:
 
 ```cron
-17 */6 * * * cd /path/to/feather && docker compose run --rm -T release-import --apply >> /var/log/feather-release-import.log 2>&1
+17 */6 * * * cd /path/to/feather && docker compose run --rm --no-deps -T release-import --apply >> /var/log/feather-release-import.log 2>&1
 ```
+
+- `--no-deps` keeps cron from starting or recreating the app container; the importer only needs it reachable. Set `FEATHER_BASE_URL=http://altstore-manager:5000` in `.env` so it talks to the app inside Compose, not through your proxy.
+- A job's `bundleIdentifier` / `package` are optional and read from the artifact; when set they must match. Unchanged Android assets are skipped without re-downloading.
+- Exit code `0` means every job succeeded or had nothing new, `1` means at least one job failed (including a wrong password or unreachable app — reported once, before any download), `2` means the manifest or environment is invalid.
 
 Supports `owner/repo` on github.com and `namespace/project` on gitlab.com; not self-hosted forges, branch builds or CI artifacts. For in-app scheduling instead, use auto-import in the admin UI.
 

@@ -1434,10 +1434,12 @@ class SourceManager:
         
             # Handle IPA file - upload, download, or use URL
             file_size = 0
+            stored_ipa = False
             if ipa_file and allowed_file(ipa_file.filename):
                 # Upload file
                 filepath, file_size = self.save_ipa_file(ipa_file, bundle_id, version)
                 if filepath:
+                    stored_ipa = True
                     download_url = self.get_local_ipa_url(bundle_id, version, base_url)
                 else:
                     return False, f"Failed to save uploaded IPA for {bundle_id} {version}"
@@ -1445,6 +1447,7 @@ class SourceManager:
                 # Download from URL
                 filepath, file_size = self.download_ipa_from_url(download_url, bundle_id, version)
                 if filepath:
+                    stored_ipa = True
                     download_url = self.get_local_ipa_url(bundle_id, version, base_url)
                 else:
                     return False, f"Failed to download IPA from {download_url}"
@@ -1463,6 +1466,8 @@ class SourceManager:
                 if stored_icon_ext:
                     icon_url = self.get_hosted_icon_url(bundle_id, stored_icon_ext, base_url)
                 else:
+                    if stored_ipa:
+                        self.delete_ipa_file(bundle_id, version)   # no orphan IPA without a catalog entry
                     return False, f"Failed to save uploaded icon for {bundle_id}"
             elif download_icon_from_url and icon_url:
                 # Download icon from URL
@@ -1470,6 +1475,8 @@ class SourceManager:
                 if stored_icon_ext:
                     icon_url = self.get_hosted_icon_url(bundle_id, stored_icon_ext, base_url)
                 else:
+                    if stored_ipa:
+                        self.delete_ipa_file(bundle_id, version)   # no orphan IPA without a catalog entry
                     return False, f"Failed to download icon from {icon_url}"
 
             new_app = {
@@ -2911,6 +2918,22 @@ def _save_temp_png(img):
     return path
 
 
+def _add_app_with_avatar_icon(new_app, fs, owner, base_url):
+    """Create an app using the GitHub owner avatar as its icon. The avatar
+    is cosmetic: if it cannot be fetched (404 for some org/renamed owners,
+    rate limits, network), create the app iconless -- the source icon is
+    served in its place -- instead of failing the whole import."""
+    with_icon = dict(new_app, iconURL=f"https://github.com/{owner}.png")
+    ok, message = source_manager.add_app_manual(
+        with_icon, ipa_file=fs, download_icon_from_url=True, base_url=base_url)
+    if ok or not str(message).startswith("Failed to download icon"):
+        return ok, message
+    logging.warning("import: owner avatar for %s unavailable; creating %s without an icon",
+                    owner, new_app.get("bundleIdentifier"))
+    fs.stream.seek(0)
+    return source_manager.add_app_manual(dict(new_app, iconURL=""), ipa_file=fs, base_url=base_url)
+
+
 def _extract_ipa_icon(ipa_path):
     """Best-effort extraction of the app icon from an .ipa, normalized to a
     standard PNG. Returns a path to a new temporary PNG file (the caller
@@ -3478,9 +3501,7 @@ def _run_auto_import_ios_candidate(job_obj, job, base_url, session_req, tokens, 
                         # auto-imports simply go iconless here.
                         owner = _repo_owner(job_obj.project) if job_obj.provider == "github" else ""
                         if owner:
-                            new_app["iconURL"] = f"https://github.com/{owner}.png"
-                            ok, message = source_manager.add_app_manual(
-                                new_app, ipa_file=fs, download_icon_from_url=True, base_url=base_url)
+                            ok, message = _add_app_with_avatar_icon(new_app, fs, owner, base_url)
                         else:
                             ok, message = source_manager.add_app_manual(new_app, ipa_file=fs, base_url=base_url)
                 finally:
@@ -4065,9 +4086,7 @@ def import_release():
                         # extra API call, so GitLab imports simply go iconless here.
                         owner = _repo_owner(project) if provider == "github" else ""
                         if owner:
-                            new_app["iconURL"] = f"https://github.com/{owner}.png"
-                            ok, message = source_manager.add_app_manual(
-                                new_app, ipa_file=fs, download_icon_from_url=True, base_url=base_url)
+                            ok, message = _add_app_with_avatar_icon(new_app, fs, owner, base_url)
                         else:
                             ok, message = source_manager.add_app_manual(new_app, ipa_file=fs, base_url=base_url)
                 finally:

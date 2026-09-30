@@ -347,7 +347,9 @@ def test_load_manifest_accepts_github_and_gitlab_jobs(tmp_path):
         "release-sources.example.json",
     )
     example = ingest.load_manifest(example_path)
-    assert len(example["jobs"]) == 2
+    assert len(example["jobs"]) == 3
+    android = [j for j in example["jobs"] if j.id == "example-android-app"][0]
+    assert android.bundle_identifier is None and android.package is None
 
 
 def test_asset_exclude_glob_round_trips_and_rejects_non_string():
@@ -538,12 +540,14 @@ def test_manifest_accepts_job_with_both_identities():
     assert job.package == "org.example.app"
 
 
-def test_manifest_requires_bundle_identifier_or_package():
-    with pytest.raises(ingest.ConfigError, match="bundleIdentifier.*package|package.*bundleIdentifier"):
-        ingest.parse_manifest_dict({
-            "schemaVersion": 1,
-            "jobs": [_valid_github_job(bundleIdentifier=None)],
-        })
+def test_manifest_allows_jobs_without_bundle_identifier_or_package():
+    """Identity is auto-detected from the artifact, as in the UI paths; one
+    such job used to make the whole manifest (every job) fail to load."""
+    jobs = ingest.parse_manifest_dict({
+        "schemaVersion": 1,
+        "jobs": [_valid_github_job(bundleIdentifier=None)],
+    })
+    assert jobs[0].bundle_identifier is None and jobs[0].package is None
 
 
 def test_manifest_rejects_invalid_package_name():
@@ -577,6 +581,7 @@ def test_config_errors_and_logs_never_expose_tokens(tmp_path, monkeypatch, caplo
         "https://api.github.com/repos/owner/repo/releases",
         FakeResponse(403, headers={"X-RateLimit-Reset": "1700000000"}),
     )
+    fake_session.add_response("http://feather.example/api/login", FakeResponse(200, json_data={"success": True}))
     monkeypatch.setattr(ingest.requests, "Session", lambda: fake_session)
 
     github_secret = "ghp_super-secret-token-value"
@@ -1950,3 +1955,106 @@ def test_anymex_regex_pins_exactly_the_arm64_asset():
     android = [c for c in candidates if c.platform == "android"]
     assert len(android) == 1
     assert android[0].asset_name == "AnymeX-Android-arm64-v8a.apk"
+
+
+# ---------------------------------------------------------------------------
+# Cron CLI without configured identity; no-op runs; fail-fast login
+# ---------------------------------------------------------------------------
+
+
+def _asset_downloads(session):
+    return [url for url, _ in session.calls if "/releases/assets/" in url]
+
+
+def test_ios_job_without_bundle_identifier_uses_the_ipa_and_then_state(tmp_path):
+    job = make_job(bundle_identifier=None)
+    feather = FakeFeatherClient(
+        apps={"com.detected.app": {"bundleIdentifier": "com.detected.app", "versions": []}}
+    )
+    state = ingest.load_state(str(tmp_path / "state.json"))
+    summary = ingest.Summary()
+
+    session = make_github_session(build_ipa_bytes(bundle_id="com.detected.app", version="3.0"))
+    assert ingest.process_job(job, session, NO_TOKENS, feather, state, True, 30, 1_000_000, summary)
+    assert [c[:2] for c in feather.add_version_calls] == [("com.detected.app", "3.0")]
+    assert state["jobs"][job.id]["ios"]["bundleIdentifier"] == "com.detected.app"
+
+    # Next run: same release, identity remembered from state -> no download.
+    session2 = make_github_session(build_ipa_bytes(bundle_id="com.detected.app", version="3.0"))
+    assert ingest.process_job(job, session2, NO_TOKENS, feather, state, True, 30, 1_000_000, summary)
+    assert _asset_downloads(session2) == []
+    assert summary.skipped == 1
+
+
+def test_ios_job_without_bundle_identifier_new_app_needs_create_if_missing(tmp_path):
+    job = make_job(bundle_identifier=None, create_if_missing=False)
+    feather = FakeFeatherClient(apps={})
+    state = ingest.load_state(str(tmp_path / "state.json"))
+    summary = ingest.Summary()
+    session = make_github_session(build_ipa_bytes(bundle_id="com.brand.new", version="1.0"))
+
+    assert not ingest.process_job(job, session, NO_TOKENS, feather, state, True, 30, 1_000_000, summary)
+    assert summary.failed == 1
+    assert feather.add_app_calls == [] and feather.add_version_calls == []
+
+
+class _IndexedFeather(FakeFeatherClient):
+    def __init__(self, indexed, **kw):
+        super().__init__(**kw)
+        self.indexed = indexed
+
+    def android_index_has(self, package, version_code):
+        return self.indexed
+
+
+@pytest.mark.parametrize("still_indexed, downloads", [(True, 0), (False, 1)])
+def test_android_unchanged_release_skips_download_only_while_still_indexed(
+        tmp_path, monkeypatch, still_indexed, downloads):
+    job = _make_apk_job(package=None)
+    _patch_pyaxmlparser_apk(monkeypatch, package="org.example.app", version_code="7", version_name="1.7")
+    feather = _IndexedFeather(still_indexed, add_apk_result=(True, "Added", True))
+    state = ingest.load_state(str(tmp_path / "state.json"))
+    summary = ingest.Summary()
+    first = make_github_session(b"fake-apk-bytes", asset_name="App.apk")
+    assert ingest.process_job(job, first, NO_TOKENS, feather, state, True, 30, 1_000_000, summary)
+
+    second = make_github_session(b"fake-apk-bytes", asset_name="App.apk")
+    assert ingest.process_job(job, second, NO_TOKENS, feather, state, True, 30, 1_000_000, summary)
+    assert len(_asset_downloads(second)) == downloads
+    assert len(feather.add_apk_calls) == 1 + downloads
+
+
+def test_apply_with_wrong_password_fails_once_before_any_provider_call(tmp_path, monkeypatch):
+    cfg = tmp_path / "sources.json"
+    cfg.write_text(json.dumps({"schemaVersion": 1, "jobs": [_valid_github_job(), _valid_github_job(id="second")]}))
+    session = FakeSession()
+    session.add_response("http://feather.example/api/login", FakeResponse(401))
+    monkeypatch.setattr(ingest.requests, "Session", lambda: session)
+    monkeypatch.setenv("FEATHER_BASE_URL", "http://feather.example")
+    monkeypatch.setenv("FEATHER_ADMIN_PASSWORD", "wrong")
+
+    exit_code = ingest.main(["--config", str(cfg), "--state", str(tmp_path / "state.json"), "--apply"])
+
+    assert exit_code == 1
+    assert [url for url, _ in session.calls] == ["http://feather.example/api/login"]
+
+
+@pytest.mark.parametrize("response, needle", [
+    (FakeResponse(429, headers={"Retry-After": "42"}), "retry in 42s"),
+    (FakeResponse(503), "HTTP 503"),
+])
+def test_feather_client_login_errors_are_clean(response, needle):
+    session = FakeSession()
+    session.add_response("http://feather.example/api/login", response)
+    client = ingest.FeatherClient(session, "http://feather.example", "pw")
+    with pytest.raises(ingest.FeatherAuthError, match=needle):
+        client.login()
+
+
+def test_feather_client_login_unreachable_is_clean():
+    class Down:
+        def post(self, *a, **k):
+            raise ingest.requests.ConnectionError("refused")
+    client = ingest.FeatherClient(Down(), "http://feather.example", "pw")
+    with pytest.raises(ingest.FeatherAuthError, match="cannot reach feather"):
+        client.login()

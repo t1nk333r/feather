@@ -327,10 +327,9 @@ def parse_manifest_dict(data):
         if package is not None and not ANDROID_PACKAGE_RE.match(package):
             raise ConfigError(f"job {job_id}: 'package' {package!r} is not a valid Android package name")
 
-        if bundle_identifier is None and package is None:
-            raise ConfigError(
-                f"job {job_id}: at least one of 'bundleIdentifier' or 'package' is required"
-            )
+        # Both are optional: the bundle identifier / package is read from
+        # the downloaded artifact, and a configured value is only an
+        # assertion (the same rule as the admin UI and auto-import paths).
 
         asset_glob = _require_nonempty_str(raw, "assetGlob", job_id)
         asset_exclude_glob = raw.get("assetExcludeGlob")
@@ -990,13 +989,34 @@ class FeatherClient:
         return resp.json()
 
     def login(self):
-        resp = self.session.post(
-            f"{self.base_url}/api/login", json={"password": self.password}, timeout=30
-        )
+        try:
+            resp = self.session.post(
+                f"{self.base_url}/api/login", json={"password": self.password}, timeout=30
+            )
+        except requests.RequestException as e:
+            raise FeatherAuthError(f"cannot reach feather at {self.base_url}: {e.__class__.__name__}")
         if resp.status_code == 401:
-            raise FeatherAuthError("feather /api/login returned 401")
-        resp.raise_for_status()
+            raise FeatherAuthError("feather /api/login returned 401 (check FEATHER_ADMIN_PASSWORD)")
+        if resp.status_code == 429:
+            raise FeatherAuthError(
+                "feather /api/login is throttling after repeated failed logins; "
+                f"retry in {resp.headers.get('Retry-After', '60')}s"
+            )
+        if resp.status_code >= 400:
+            raise FeatherAuthError(f"feather /api/login returned HTTP {resp.status_code}")
         self._logged_in = True
+
+    def android_index_has(self, package, version_code):
+        """True if the public F-Droid index lists package@version_code; None
+        when the index cannot be read (no Android repo, feather down)."""
+        try:
+            resp = self.session.get(f"{self.base_url}/fdroid/repo/index-v1.json", timeout=30)
+            if resp.status_code != 200:
+                return None
+            entries = (resp.json().get("packages") or {}).get(package) or []
+        except (requests.RequestException, ValueError, AttributeError):
+            return None
+        return any(str(e.get("versionCode")) == str(version_code) for e in entries if isinstance(e, dict))
 
     def _ensure_login(self):
         if not self._logged_in:
@@ -1252,12 +1272,17 @@ def _process_ios_candidate(job, candidate, session, tokens, feather, state, appl
         and recorded.get("assetId") == candidate.asset_id
     )
 
-    try:
-        catalog_app = feather.get_app(job.bundle_identifier)
-    except Exception as e:
-        _log_job_error(f"job {job.id}: failed to query feather for {job.bundle_identifier}: {e}")
-        summary.failed += 1
-        return False
+    # Without a configured bundleIdentifier, fall back to the one detected
+    # on the previous run; with neither, the IPA must be downloaded first.
+    known_bid = job.bundle_identifier or (recorded or {}).get("bundleIdentifier")
+    catalog_app = None
+    if known_bid:
+        try:
+            catalog_app = feather.get_app(known_bid)
+        except Exception as e:
+            _log_job_error(f"job {job.id}: failed to query feather for {known_bid}: {e}")
+            summary.failed += 1
+            return False
 
     if already_recorded and catalog_app and _catalog_has_version(
         catalog_app, recorded.get("version")
@@ -1270,9 +1295,9 @@ def _process_ios_candidate(job, candidate, session, tokens, feather, state, appl
         )
         return True
 
-    if catalog_app is None and not job.create_if_missing:
+    if known_bid and catalog_app is None and not job.create_if_missing:
         _log_job_error(
-            f"job {job.id}: app {job.bundle_identifier} not found in the catalog "
+            f"job {job.id}: app {known_bid} not found in the catalog "
             "and createIfMissing is false"
         )
         summary.failed += 1
@@ -1303,7 +1328,7 @@ def _process_ios_candidate(job, candidate, session, tokens, feather, state, appl
         inspection = inspect_ipa_metadata(tmp_path, candidate.asset_name, job, candidate)
         bundle_id = inspection.bundle_identifier
         version = inspection.version
-        if bundle_id != job.bundle_identifier:
+        if job.bundle_identifier and bundle_id != job.bundle_identifier:
             raise ValidationError(
                 f"job {job.id}: extracted bundle identifier {bundle_id!r} does not "
                 f"match configured bundleIdentifier {job.bundle_identifier!r}"
@@ -1313,9 +1338,24 @@ def _process_ios_candidate(job, candidate, session, tokens, feather, state, appl
         summary.failed += 1
         return False
 
+    if bundle_id != known_bid:
+        try:
+            catalog_app = feather.get_app(bundle_id)
+        except Exception as e:
+            _log_job_error(f"job {job.id}: failed to query feather for {bundle_id}: {e}")
+            summary.failed += 1
+            return False
+        if catalog_app is None and not job.create_if_missing:
+            _log_job_error(
+                f"job {job.id}: app {bundle_id} (detected from the IPA) not found in "
+                "the catalog and createIfMissing is false"
+            )
+            summary.failed += 1
+            return False
+
     if catalog_app and _catalog_has_version(catalog_app, version):
         _advance_state(state, job, "ios", candidate, version, sha256_hex,
-                        bundleIdentifier=job.bundle_identifier)
+                        bundleIdentifier=bundle_id)
         summary.skipped += 1
         logger.info(
             "job %s: catalog already has extracted version %s -- not "
@@ -1361,7 +1401,7 @@ def _process_ios_candidate(job, candidate, session, tokens, feather, state, appl
         return False
 
     _advance_state(state, job, "ios", candidate, version, sha256_hex,
-                    bundleIdentifier=job.bundle_identifier)
+                    bundleIdentifier=bundle_id)
     if created:
         summary.created += 1
     else:
@@ -1392,6 +1432,26 @@ def _process_android_candidate(job, candidate, session, tokens, feather, state, 
     the endpoint reports as already present), False on failure
     (summary.failed is also incremented in that case).
     """
+    # Same release asset as last run and still in the signed index: nothing
+    # to do, and no reason to re-download a possibly 100+ MB APK. If the
+    # APK was deleted from the repo since, the index check fails and it is
+    # imported again.
+    recorded = _platform_state_record(state, job.id, "android")
+    if (
+        recorded
+        and recorded.get("releaseId") == candidate.release_id
+        and recorded.get("assetId") == candidate.asset_id
+        and recorded.get("package")
+        and hasattr(feather, "android_index_has")
+        and feather.android_index_has(recorded["package"], recorded.get("versionCode"))
+    ):
+        summary.skipped += 1
+        logger.info(
+            "job %s: release/asset unchanged and the repo already has %s versionCode %s -- skipping",
+            job.id, recorded["package"], recorded.get("versionCode"),
+        )
+        return True
+
     if not apply:
         summary.would_publish += 1
         logger.info(
@@ -1588,6 +1648,18 @@ def main(argv=None):
         )
 
         state = load_state(state_path)
+
+        if args.apply:
+            # Fail fast and once: a wrong password or unreachable feather
+            # used to surface per job, after downloads, and each retry
+            # counted against the login throttle.
+            try:
+                feather.login()
+            except FeatherAuthError as e:
+                logger.error(_redact(str(e)))
+                summary.failed += 1
+                print(summary.format())
+                return 1
 
         any_failed = False
         for job in jobs:
