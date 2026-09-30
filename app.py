@@ -152,6 +152,10 @@ STORAGE_BACKEND = os.environ.get("STORAGE_BACKEND", "local")
 # local disk at /app/data/icons). Defaults to STORAGE_BACKEND for backward
 # compatibility, so existing single-backend deployments are unaffected.
 ICON_STORAGE_BACKEND = os.environ.get("ICON_STORAGE_BACKEND", STORAGE_BACKEND)
+# APKs always keep a local copy in data/fdroid/repo -- fdroidserver must
+# read them to build and sign the index. With "garage" each APK is also
+# uploaded, byte-identical, and downloads are redirected to the bucket.
+APK_STORAGE_BACKEND = os.environ.get("APK_STORAGE_BACKEND", STORAGE_BACKEND)
 GARAGE_S3_ENDPOINT = os.environ.get("GARAGE_S3_ENDPOINT")
 GARAGE_S3_REGION = os.environ.get("GARAGE_S3_REGION", "garage")
 GARAGE_S3_ACCESS_KEY_ID = os.environ.get("GARAGE_S3_ACCESS_KEY_ID")
@@ -635,6 +639,66 @@ class GarageIpaStorage:
     def public_url(self, bundle_id, version):
         key = self._key(bundle_id, version)
         return f"{GARAGE_PUBLIC_BASE_URL.rstrip('/')}/{key}"
+
+
+class GarageApkMirror:
+    """Garage copy of the F-Droid repo's APKs, keyed apks/<file>.apk.
+
+    The local file in FDROID_REPO_DIR stays the source of truth (the
+    sidecar signs from it); this only moves download bandwidth to the
+    bucket. Every method is best effort and never raises: a missing or
+    failed object just means the download is served from local disk.
+    """
+
+    CONTENT_TYPE = "application/vnd.android.package-archive"
+
+    def __init__(self):
+        _require_garage_config()
+        self._client = boto3.client(
+            "s3",
+            endpoint_url=GARAGE_S3_ENDPOINT,
+            region_name=GARAGE_S3_REGION,
+            aws_access_key_id=GARAGE_S3_ACCESS_KEY_ID,
+            aws_secret_access_key=GARAGE_S3_SECRET_ACCESS_KEY,
+        )
+
+    @staticmethod
+    def key(filename):
+        return f"apks/{secure_filename(filename)}"
+
+    def put(self, path):
+        """Upload a local APK; True only if the object's size matches."""
+        key = self.key(os.path.basename(path))
+        try:
+            self._client.upload_file(path, GARAGE_BUCKET, key, ExtraArgs={"ContentType": self.CONTENT_TYPE})
+            head = self._client.head_object(Bucket=GARAGE_BUCKET, Key=key)
+            if head.get("ContentLength") != os.path.getsize(path):
+                logging.error("Garage APK %s has the wrong size after upload", key)
+                return False
+            return True
+        except ClientError as e:
+            logging.error("Error uploading APK to Garage (%s): %s", key, e.response.get("Error", {}).get("Code", "unknown"))
+        except Exception as e:
+            logging.error("Error uploading APK to Garage (%s): %s", key, e)
+        return False
+
+    def exists(self, filename):
+        try:
+            self._client.head_object(Bucket=GARAGE_BUCKET, Key=self.key(filename))
+            return True
+        except Exception:
+            return False
+
+    def delete(self, filename):
+        try:
+            self._client.delete_object(Bucket=GARAGE_BUCKET, Key=self.key(filename))
+            return True
+        except Exception as e:
+            logging.error("Error deleting APK object %s: %s", self.key(filename), e)
+            return False
+
+    def public_url(self, filename):
+        return f"{GARAGE_PUBLIC_BASE_URL.rstrip('/')}/{self.key(filename)}"
 
 
 def garage_icon_key(bundle_id, ext):
@@ -2120,6 +2184,21 @@ class AndroidRepoManager:
                     best = (int(m.group(2)), os.path.join(FDROID_REPO_DIR, fn))
         return best
 
+    def mirror_apks(self):
+        """Upload every local APK the Garage mirror lacks. Returns
+        {"uploaded": n, "failed": [...]}; no-op without a mirror."""
+        uploaded, failed = 0, []
+        if apk_storage is None or not os.path.isdir(FDROID_REPO_DIR):
+            return {"uploaded": 0, "failed": []}
+        for fn in sorted(os.listdir(FDROID_REPO_DIR)):
+            if not ANDROID_APK_FILENAME_RE.match(fn) or apk_storage.exists(fn):
+                continue
+            if apk_storage.put(os.path.join(FDROID_REPO_DIR, fn)):
+                uploaded += 1
+            else:
+                failed.append(fn)
+        return {"uploaded": uploaded, "failed": failed}
+
     def refresh_icon(self, package, apk_path):
         """Extract the launcher icon from apk_path into the metadata tree.
         fdroidserver's own extraction misses adaptive/WebP launcher icons,
@@ -2482,6 +2561,9 @@ class AndroidRepoManager:
 
         if not os.path.exists(self.metadata_path(package)):
             self.write_metadata(package, {"Name": info["app_name"]})
+        if apk_storage is not None and not apk_storage.put(dest):
+            logging.warning("APK %s kept on local disk only; Rebuild Index retries the Garage upload",
+                            os.path.basename(dest))
         newest = self._newest_apk(package)
         if newest and newest[1] == dest:
             try:
@@ -2504,6 +2586,8 @@ class AndroidRepoManager:
             if not os.path.exists(path):
                 return False
             os.remove(path)
+        if apk_storage is not None:
+            apk_storage.delete(os.path.basename(path))
         self.request_update()
         return True
 
@@ -2522,6 +2606,8 @@ class AndroidRepoManager:
                         removed_something = True
                     except OSError:
                         pass
+                    if apk_storage is not None:
+                        apk_storage.delete(fn)
             meta_path = self.metadata_path(package)
             if os.path.exists(meta_path):
                 os.remove(meta_path)
@@ -2551,6 +2637,9 @@ if STORAGE_BACKEND == "garage":
     ipa_storage = GarageIpaStorage()
 else:
     ipa_storage = LocalIpaStorage()
+
+# APK download mirror (APK_STORAGE_BACKEND, defaults to STORAGE_BACKEND).
+apk_storage = GarageApkMirror() if APK_STORAGE_BACKEND == "garage" else None
 
 # Icon storage backend (ICON_STORAGE_BACKEND, defaults to STORAGE_BACKEND).
 # Independent so icons can live on local disk while IPAs stay on Garage.
@@ -5544,6 +5633,9 @@ def fdroid_repo_file(filename):
     sends no credentials. send_from_directory rejects path traversal on
     its own (safe_join), so a crafted "../..." filename 404s here too."""
     try:
+        if (apk_storage is not None and ANDROID_APK_FILENAME_RE.match(filename) and "/" not in filename
+                and os.path.exists(os.path.join(FDROID_REPO_DIR, filename)) and apk_storage.exists(filename)):
+            return redirect(apk_storage.public_url(filename), code=302)
         ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
         mimetype = FDROID_REPO_MIME_TYPES.get(ext)
         if mimetype:
@@ -5743,13 +5835,18 @@ def android_repo_config():
 def android_request_update():
     try:
         icons = android_repo.backfill_icons()
+        mirror = android_repo.mirror_apks()
         android_repo.request_update()
         message = "Index rebuild requested"
+        if mirror["uploaded"]:
+            message += f"; uploaded {mirror['uploaded']} APK(s) to Garage"
+        if mirror["failed"]:
+            message += f"; Garage upload failed for {len(mirror['failed'])} APK(s)"
         if icons["added"]:
             message += f"; extracted {icons['added']} missing icon(s)"
         if icons["missing"]:
             message += f"; no raster icon in: {', '.join(icons['missing'][:5])}"
-        return jsonify({"success": True, "message": message, "icons": icons})
+        return jsonify({"success": True, "message": message, "icons": icons, "garage": mirror})
     except Exception as e:
         logging.error(f"Error requesting Android index update: {str(e)}")
         return jsonify({"success": False, "error": "Failed to request Android index update"}), 400

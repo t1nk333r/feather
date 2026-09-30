@@ -117,6 +117,7 @@ Everything is set in `.env`; [`.env.example`](./.env.example) lists and explains
 | `PORT` / `WAITRESS_THREADS` | `5000` / `8` | One process only — see [Operating notes](#operating-notes). |
 | `MAX_CONTENT_LENGTH` | 2 GiB | Upload size cap. |
 | `STORAGE_BACKEND` / `ICON_STORAGE_BACKEND` | `local` | `garage` stores IPAs/icons in S3-compatible storage; needs the `GARAGE_*` variables. |
+| `APK_STORAGE_BACKEND` | `STORAGE_BACKEND` | `garage` uploads every APK to `<bucket>/apks/` and redirects downloads there. A local copy always stays in `data/fdroid/repo` — the F-Droid sidecar signs the index from it. **Rebuild Index** uploads APKs added before you switched. |
 | `FDROID_KEYSTORE_PASSWORD` | — | Required for the `android` profile. |
 | `FDROID_UPDATE_INTERVAL` / `FDROID_UPDATE_TIMEOUT` | `15` / `1800` | Seconds between rebuild checks / max length of one rebuild. |
 | `TELEGRAM_*`, `BOT_API_*` | off | Telegram ingest worker and notifications. |

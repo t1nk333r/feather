@@ -162,6 +162,8 @@ def garage_client(tmp_path, monkeypatch):
     fake_client = FakeS3Client()
     app_module.ipa_storage._client = fake_client
     app_module.icon_storage._client = fake_client
+    if app_module.apk_storage is not None:
+        app_module.apk_storage._client = fake_client
 
     app_module.app.config["TESTING"] = True
     with app_module.app.test_client() as c:
@@ -850,3 +852,68 @@ def test_split_icon_local_ipa_garage(tmp_path, monkeypatch):
 
     assert isinstance(app_module.icon_storage, app_module.LocalIconStorage)
     assert isinstance(app_module.ipa_storage, app_module.GarageIpaStorage)
+
+
+# ---------------------------------------------------------------------------
+# APKs mirrored to Garage; downloads redirected to the bucket
+# ---------------------------------------------------------------------------
+
+
+def _garage_login_and_fake_apk(garage_client, monkeypatch, package="org.test.g", code=5):
+    app_module = garage_client.app_module
+    monkeypatch.setattr(app_module, "_inspect_apk", lambda _p: {
+        "package": package, "version_code": code, "version_name": str(code), "app_name": "G", "min_sdk": "21"})
+    monkeypatch.setattr(app_module, "extract_apk_icon", lambda _p: None)
+    assert garage_client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+    return garage_client.post("/api/android/add-apk", data={"apkFile": (io.BytesIO(b"apk-bytes-" + str(code).encode()), "a.apk")},
+                              content_type="multipart/form-data")
+
+
+def test_apk_is_uploaded_to_garage_and_download_redirects(garage_client, monkeypatch):
+    resp = _garage_login_and_fake_apk(garage_client, monkeypatch)
+    assert resp.status_code == 200, resp.get_json()
+    assert garage_client.fake_client.objects[("test-bucket", "apks/org.test.g_5.apk")] == len(b"apk-bytes-5")
+    dl = garage_client.get("/fdroid/repo/org.test.g_5.apk")
+    assert dl.status_code == 302
+    assert dl.headers["Location"] == "https://garage-web.example.invalid/apks/org.test.g_5.apk"
+    # Non-APK repo files (index, jars) are still served locally.
+    assert garage_client.get("/fdroid/repo/index-v1.json").status_code in (200, 404)
+    assert "Location" not in garage_client.get("/fdroid/repo/index-v1.json").headers
+
+
+def test_failed_garage_upload_still_publishes_and_serves_locally(garage_client, monkeypatch):
+    garage_client.fake_client.fail_uploads = True
+    resp = _garage_login_and_fake_apk(garage_client, monkeypatch)
+    assert resp.status_code == 200 and resp.get_json()["added"] is True
+    dl = garage_client.get("/fdroid/repo/org.test.g_5.apk")
+    assert dl.status_code == 200 and dl.data == b"apk-bytes-5"
+
+
+def test_deleting_an_apk_removes_the_garage_object(garage_client, monkeypatch):
+    assert _garage_login_and_fake_apk(garage_client, monkeypatch).status_code == 200
+    resp = garage_client.post("/api/android/delete-version", json={"package": "org.test.g", "versionCode": 5})
+    assert resp.status_code == 200
+    assert ("test-bucket", "apks/org.test.g_5.apk") not in garage_client.fake_client.objects
+
+
+def test_rebuild_index_mirrors_apks_added_before_garage(garage_client, monkeypatch, tmp_path):
+    assert garage_client.post("/api/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+    repo = tmp_path / "fdroid" / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / "org.old.app_3.apk").write_bytes(b"old-apk")
+    monkeypatch.setattr(garage_client.app_module, "extract_apk_icon", lambda _p: None)
+    resp = garage_client.post("/api/android/request-update")
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["garage"]["uploaded"] == 1
+    assert ("test-bucket", "apks/org.old.app_3.apk") in garage_client.fake_client.objects
+
+
+def test_apk_storage_can_stay_local_while_ipas_use_garage(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ADMIN_PASSWORD", TEST_ADMIN_PASSWORD)
+    for key, value in GARAGE_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("APK_STORAGE_BACKEND", "local")
+    import app as app_module
+    importlib.reload(app_module)
+    assert app_module.apk_storage is None
