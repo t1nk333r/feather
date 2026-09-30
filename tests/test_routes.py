@@ -2475,3 +2475,27 @@ def test_delete_app_drops_featured_and_news_references(authed_client):
     assert "com.example.app" not in source.get("featuredApps", [])
     news = [n for n in source.get("news", []) if n["identifier"] == "launch"]
     assert news and "appID" not in news[0]
+
+
+@pytest.mark.parametrize("payload, needle", [
+    ({"iconURL": "javascript:alert(1)"}, "iconURL"),
+    ({"website": "ftp://example.com"}, "website"),
+    ({"tintColor": "red;background:url(x)"}, "tintColor"),
+    ({"name": ["not", "a", "string"]}, "name"),
+])
+def test_update_source_rejects_invalid_fields(authed_client, payload, needle):
+    before = authed_client.get("/source.json").get_json()
+    resp = authed_client.post("/api/update-source", json=payload)
+    assert resp.status_code == 400
+    assert needle in resp.get_json()["error"]
+    assert authed_client.get("/source.json").get_json() == before
+
+
+def test_update_source_normalises_tint_and_accepts_valid_urls(authed_client):
+    resp = authed_client.post("/api/update-source", json={
+        "tintColor": "4185a9", "iconURL": "https://example.com/i.png", "website": "https://example.com",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    source = authed_client.get("/source.json").get_json()
+    assert source["tintColor"] == "#4185A9"
+    assert source["iconURL"] == "https://example.com/i.png"

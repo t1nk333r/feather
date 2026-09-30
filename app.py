@@ -1851,9 +1851,28 @@ class SourceManager:
             if not source_data:
                 return False, "Failed to load source data"
         
+            if not isinstance(data, dict):
+                return False, "Expected a JSON object"
+            updates = {}
             for key in ['name', 'subtitle', 'description', 'website', 'tintColor', 'iconURL']:
-                if key in data and data[key]:
-                    source_data[key] = data[key]
+                value = data.get(key)
+                if not value:
+                    continue
+                if not isinstance(value, str):
+                    return False, f"{key} must be a string"
+                value = value.strip()
+                # Every client renders these, so hold them to the same rules
+                # as news items: absolute http(s) URLs and a #RRGGBB colour.
+                if key in ('website', 'iconURL'):
+                    parsed = urlparse(value)
+                    if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
+                        return False, f"{key} must be an absolute http(s) URL"
+                elif key == 'tintColor':
+                    if not re.fullmatch(r'#?[0-9A-Fa-f]{6}', value):
+                        return False, "tintColor must be a six-digit hex colour like #4185A9"
+                    value = '#' + value.lstrip('#').upper()
+                updates[key] = value
+            source_data.update(updates)
         
             success = self.save_source(source_data)
             return success, "Source information updated successfully" if success else "Failed to update source information"
