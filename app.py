@@ -2280,6 +2280,13 @@ def requires_auth(f):
 def index():
     return render_template('index.html')
 
+@app.route('/store')
+def store_preview():
+    """Public read-only storefront. Renders client-side from the same public
+    documents subscribers fetch (/source.json, /fdroid/repo/index-v1.json),
+    so it can never show more than a phone already sees."""
+    return render_template('store.html')
+
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.get_json(silent=True) or {}
