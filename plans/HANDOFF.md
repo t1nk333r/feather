@@ -34,21 +34,33 @@ All on `main`, all with tests:
 
 Ordered by value. None is started.
 
-1. **Push one real APK through `/api/publish` and through the release importer against a real GitHub release.** Every test is offline; Android inspection is monkeypatched in route tests because a signed APK can't be authored in a test. The code path under both is the same `AndroidRepoManager.add_apk` that the UI's APK upload uses, which *has* been used for real.
-2. **Deploy and smoke the agent API on the real host**: create a token, `claude mcp add feather …`, `publish_app` an IPA, confirm it appears in `/source.json` and installs.
-3. **Token hardening, if agents multiply:** tokens are all-or-nothing publish+read. Per-token scopes (e.g. one app ID or one platform) or expiry would be the next step; not needed for a single operator.
-4. `/api/publish` applies `name` / `developerName` / `description` **only when it creates an app**. Updating metadata of an existing app still needs the admin UI (`/api/update-app`, session only). Deliberate — say so if an agent asks.
+1. **Import one real APK through the release importer against a real GitHub release.** The importer is tested only against a fake GitHub. (`/api/publish` + MCP *has* now been used for real: an agent published DAVKeep and nasplayer on 2026-10-01; index rebuilt with nothing rejected.)
+2. **Re-run the agent smoke after deploying this round**: scoped token, `publish_app` with `whats_new` + details, `update_app`, then check an F-Droid client shows summary, licence, links, release notes and the Feather repo icon.
+3. **Localised F-Droid text.** Only `en-US` is written (changelogs, icon). Per-locale summaries/descriptions would need fdroidserver's `metadata/<pkg>/<locale>/` files.
+
+### Agent feedback round (2026-10-01)
+
+An agent published DAVKeep and nasplayer through the MCP server and reported back. Addressed, with tests that fail when each fix is reverted:
+
+- **"Description dropped"** — it wasn't: it was stored as F-Droid `Description`, but F-Droid lists show `Summary`, which was empty. A missing `summary` is now derived from the description's first line, and `summary` can be sent directly (iOS: subtitle).
+- **Debuggable APK published silently** — `inspect_apk` now reads `android:debuggable`; the publish response carries a warning, and `APK_REJECT_DEBUGGABLE=true` refuses them. Default stays "warn": the operator's own debug builds are a legitimate use, and fdroidserver itself only warns.
+- **More fields:** `summary`, `license`, `website`, `sourceCode`, `categories`; **release notes** as `whatsNew` (Android `changelogs/<versionCode>.txt`, iOS version `localizedDescription`).
+- **Update details over the API:** `POST /api/app-details` + MCP `update_app`.
+- **Tokens:** optional per-token app allowlist (403 otherwise) and expiry. Note the agent's "a leaked token could replace any app" overstated it: an existing version is never overwritten. What a leaked unscoped token *can* do is add a new, higher version to any app — scoping closes that.
+- **Repo icon** was a QR-code placeholder: fdroidserver resolves `repo_icon: icon.png` relative to `data/fdroid/`, and nothing wrote it. The app now installs `static/icon-512.png` there once; an operator's own file is never overwritten.
+- **Repo description is empty** — that is an operator setting (Android tab → repo name/description), deliberately session-only. Set it.
 
 ## Outstanding — operator tasks
 
 Last known state; none of these is visible from the repo, so verify before acting.
 
-1. **Fix the NeoFreeBird job glob:** `*-sideloaded-Twitter_*.ipa` (or `*-sideloaded-X_*.ipa`). See the trap at the end.
-2. **Use the corrected `compose.yml`** delivered on 2026-09-30 (indentation under top-level `volumes:` had been lost — "volumes must be a mapping"; adds the `release-import` service, `fdroid-index` memory 2048m, `FDROID_UPDATE_TIMEOUT`).
-3. **Rotate the Telegram bot token and `ADMIN_PASSWORD`** if not done since they were exposed (older handoffs have the history).
-4. **Back up `data/fdroid/keystore.p12` and `FDROID_KEYSTORE_PASSWORD`.** Losing either changes the repo fingerprint for every subscriber.
-5. **Garage for APKs:** set `APK_STORAGE_BACKEND=garage`, make sure the bucket is publicly readable, then press **Rebuild Index** once to mirror existing APKs.
-6. **Catalogue hygiene** carried from earlier handoffs: three versions that are gzip-compressed HTML rather than IPAs (`com.instagram.theta 408.1.0_TH`, `com.instagram.ifgram 408.1.0_IF`, `com.fouadraheb.watusi B_25.36.10_WC`), and three catalogue IDs that differ from their binaries' IDs. Decide and fix in the UI.
+1. **Set the F-Droid repo name and description** (Android tab) — subscribers currently see an undescribed repo. Then fix DAVKeep's details via `update_app` or the UI if it was created before the summary fix.
+2. **Fix the NeoFreeBird job glob:** `*-sideloaded-Twitter_*.ipa` (or `*-sideloaded-X_*.ipa`). See the trap at the end.
+3. **Use the corrected `compose.yml`** delivered on 2026-09-30 (indentation under top-level `volumes:` had been lost — "volumes must be a mapping"; adds the `release-import` service, `fdroid-index` memory 2048m, `FDROID_UPDATE_TIMEOUT`).
+4. **Rotate the Telegram bot token and `ADMIN_PASSWORD`** if not done since they were exposed (older handoffs have the history).
+5. **Back up `data/fdroid/keystore.p12` and `FDROID_KEYSTORE_PASSWORD`.** Losing either changes the repo fingerprint for every subscriber.
+6. **Garage for APKs:** set `APK_STORAGE_BACKEND=garage`, make sure the bucket is publicly readable, then press **Rebuild Index** once to mirror existing APKs.
+7. **Catalogue hygiene** carried from earlier handoffs: three versions that are gzip-compressed HTML rather than IPAs (`com.instagram.theta 408.1.0_TH`, `com.instagram.ifgram 408.1.0_IF`, `com.fouadraheb.watusi B_25.36.10_WC`), and three catalogue IDs that differ from their binaries' IDs. Decide and fix in the UI.
 
 ## Deployment
 
@@ -133,6 +145,8 @@ Each of these cost real debugging time. They are the reason this file exists.
 **A running container does not prove its registry image still exists.** Docker can continue running a cached `feather-fdroid` image after the GHCR package is deleted or made inaccessible. Test recovery with an anonymous pull on a host without that cached image before redeploying. Never delete the running container merely to test registry availability.
 
 **A cherry-picked branch can silently undo a fix made while it was running.** Plan 085's branch was based before `936e1d4` and edited the same file. After cherry-picking, two things had to be re-checked explicitly: that the identity filter had not come back, and that the test `936e1d4` deleted had not been resurrected. Neither had — but `git` would not have complained if they had. After merging any long-running branch, re-verify the fixes that landed while it ran.
+
+**fdroidserver's `repo_icon` is relative to its working directory, not `repo/icons/`.** `config.yml` says `repo_icon: icon.png`; `index.py` checks `os.path.exists("icon.png")` in `data/fdroid/` and, when it is missing, writes a QR-code placeholder over `repo/icons/icon.png` on **every** run — so a file dropped into `repo/icons/` is silently replaced. Its warning text (`repo_icon "repo/icons/icon.png" does not exist`) names the wrong path, which is what plan 073 recorded. Verified in fdroidserver 2.4.5 source; the pinned master build is assumed to match.
 
 **Release variants share every obvious word.** A job must match exactly one asset per platform, and variants often share every obvious word. NeoFreeBird v7.0.0 ships `orionblur-NFB-BHTwitter-sideloaded-Twitter_7.0.0_12.28.1.ipa` and `…-sideloaded-X_7.0.0_12.28.1.ipa`, so `*.ipa`, `*Twitter*.ipa` and `*sideloaded*.ipa` all match both. Key the glob on the part that differs and leave the version out: `*-sideloaded-Twitter_*.ipa`. The error now lists the matching names.
 

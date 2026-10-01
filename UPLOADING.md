@@ -8,44 +8,71 @@ sections 1–3 document the older session-cookie routes the admin UI uses.
 ## 0. Token + `/api/publish` (recommended)
 
 Create a token in the admin page: **Source** tab → *API tokens*. It is shown
-once; only its SHA-256 is stored. A token can publish and read
-(`/api/publish`, `/api/android/apps`, `/api/android/status`); it cannot delete
-apps, change settings, or manage tokens. Revoke it on the same page.
+once; only its SHA-256 is stored. A token can publish, edit app details and
+read (`/api/publish`, `/api/app-details`, `/api/android/apps`,
+`/api/android/status`); it cannot delete apps, change settings, or manage
+tokens. Optionally **limit it to named apps** (bundle IDs / package names —
+anything else answers `403`) and give it an **expiry** in days. Revoke it on
+the same page.
 
 ```bash
 # upload a file (field name: file; ipaFile/apkFile also accepted)
 curl -fsS -H "Authorization: Bearer $FEATHER_TOKEN" \
-  -F file=@MyApp.ipa \
-  -F name="My App" -F developerName="Me" -F description="What it does" \
+  -F file=@app-release.apk \
+  -F name="DAVKeep" -F developerName="Me" -F summary="CardDAV contacts sync" \
+  -F description="Longer text…" -F license="GPL-3.0-only" \
+  -F sourceCode="https://github.com/me/davkeep" -F categories="Connectivity,Sync" \
+  -F whatsNew="$(cat changelogs/42.txt)" \
   https://apps.example.com/api/publish
 
 # or have Feather download it
 curl -fsS -H "Authorization: Bearer $FEATHER_TOKEN" -H "Content-Type: application/json" \
-  -d '{"url": "https://example.com/builds/app-release.apk"}' \
+  -d '{"url": "https://example.com/builds/app-release.apk", "whatsNew": "Bug fixes"}' \
   https://apps.example.com/api/publish
 ```
 
 | Field | Default | Notes |
 |---|---|---|
 | `file` or `url` | — | exactly one; `.ipa` or `.apk` (detected from the archive, not the name) |
-| `name`, `developerName`, `description` | from the file / `Unknown` | applied only when the app is **created**; existing apps keep theirs |
+| `whatsNew` | — | this version's release notes (≤4000). iOS: the version's `localizedDescription`. Android: `metadata/<pkg>/en-US/changelogs/<versionCode>.txt`; F-Droid clients show the newest version's notes |
+| `name` (≤50), `developerName` (≤100), `summary` (≤80), `description` (≤4000) | from the file / `Unknown` | app details — applied only when the app is **created**; change them later with `/api/app-details`. iOS uses `summary` as the subtitle. With no `summary`, the first line of `description` is used |
+| `license`, `website`, `sourceCode` (http(s) URLs), `categories` (comma list or array, ≤10) | — | Android only (F-Droid metadata); sent for an iOS app they come back as a warning |
 | `createIfMissing` | `true` | `false` refuses (404) an app that is not already published |
 
 Response (`200`):
 
 ```json
-{"success": true, "platform": "ios", "id": "com.example.app", "version": "2.1",
- "build": "45", "added": true, "created": false, "name": "My App",
- "downloadURL": "https://apps.example.com/ipas/com.example.app/2.1.ipa", "size": 6125156,
- "message": "Version added successfully"}
+{"success": true, "platform": "android", "id": "org.example.davkeep", "version": "1.4",
+ "build": 42, "added": true, "created": false, "name": "DAVKeep", "pending": true,
+ "downloadURL": "https://apps.example.com/fdroid/repo/org.example.davkeep_42.apk",
+ "warnings": [], "message": "Added org.example.davkeep versionCode 42; …"}
 ```
+
+**Read `warnings`.** They report what was accepted but not ideal: a
+**debuggable APK** (published, because fdroidserver only warns — set
+`APK_REJECT_DEBUGGABLE=true` on the server to refuse them), app details sent
+for an app that already exists (ignored), and Android-only fields sent for
+iOS.
 
 `added: false` means that exact version was already published (a safe retry).
 Android responses carry `"pending": true`: the APK is stored, and it appears in
 the F-Droid index after the sidecar's next rebuild. Errors are
 `{"success": false, "error": "..."}` with `400` (not a valid IPA/APK, bad
-field), `401` (missing/revoked token), `404` (`createIfMissing: false`), or
-`413` (an upload over `MAX_CONTENT_LENGTH`; an oversized `url` download is a `400`).
+field), `401` (missing, revoked or expired token), `403` (token limited to
+other apps), `404` (`createIfMissing: false`), or `413` (an upload over
+`MAX_CONTENT_LENGTH`; an oversized `url` download is a `400`).
+
+### Changing an existing app's details
+
+```bash
+curl -fsS -H "Authorization: Bearer $FEATHER_TOKEN" -H "Content-Type: application/json" \
+  -d '{"id": "org.example.davkeep", "summary": "CardDAV contacts sync", "license": "GPL-3.0-only"}' \
+  https://apps.example.com/api/app-details
+```
+
+`id` is the bundle ID or package; the same detail fields as above; only the
+fields sent change. Returns the updated app (iOS) or F-Droid metadata
+(Android, `pending: true` until the next index rebuild).
 
 ### MCP server for agents
 
@@ -64,7 +91,8 @@ those two env vars). Tools:
 
 | Tool | Does |
 |---|---|
-| `publish_app` | `path` (local file, streamed) or `url`; optional `name`, `developer_name`, `description`, `create_if_missing` |
+| `publish_app` | `path` (local file, streamed) or `url`; optional `whats_new`, `create_if_missing`, and the app details `name`, `developer_name`, `summary`, `description`, `license`, `website`, `source_code`, `categories` (used when the app is created) |
+| `update_app` | `id` plus any of the app-detail fields; only those change |
 | `list_apps` | `platform`: `ios`, `android` or `all` |
 | `get_app` | by bundle ID or package |
 | `repo_status` | F-Droid subscribe URL, fingerprint, last index build, rejected APKs |

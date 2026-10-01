@@ -82,8 +82,10 @@ A branch is not done until CI is green on it.
    - `requires_auth` means an admin session only.
    - `requires_publish` means a session **or** an API token.
 
-   Tokens may publish and read; they must never reach delete, settings,
-   token-management or restore routes. When you add a route, choose the tier
+   Tokens may publish, edit app details and read; they must never reach
+   delete, settings, token-management or restore routes. A token limited to
+   named apps must be checked with `_token_may_touch(id)` in every route
+   that writes an app. When you add a route, choose the tier
    deliberately. `tests/test_publish_api.py` pins the current boundaries.
 6. **Optional features default off.** A new compose service gets
    `profiles:`, and new behaviour gets a default-off env flag. A pull must
@@ -128,8 +130,11 @@ A human creates an API token for you in the admin UI (**Source** tab →
   ```
 
   It provides these tools:
-  - `publish_app` takes a `path` or a `url`, and optionally `name`,
-    `developer_name`, `description` and `create_if_missing`.
+  - `publish_app` takes a `path` or a `url`, and optionally `whats_new`
+    (release notes), `create_if_missing`, and app details (`name`,
+    `developer_name`, `summary`, `description`, `license`, `website`,
+    `source_code`, `categories`) that apply when the app is created.
+  - `update_app` changes an existing app's details.
   - `list_apps`
   - `get_app`
   - `repo_status`
@@ -140,8 +145,10 @@ A human creates an API token for you in the admin UI (**Source** tab →
   ```
 
   It accepts `.ipa` or `.apk`, and the platform is detected from the file.
-  The response has `added`, `created`, `id`, `version` and `downloadURL`.
+  The response has `added`, `created`, `id`, `version`, `downloadURL` and
+  `warnings` (read them: a debuggable APK is published with a warning).
   `added: false` means that version was already there, so retries are safe.
+  `POST /api/app-details` changes an existing app's details.
 
 Android publishes answer `pending: true`: the APK becomes installable after
 the F-Droid sidecar's next index rebuild (`repo_status` shows the last one).

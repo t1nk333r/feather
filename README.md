@@ -216,6 +216,7 @@ Everything is set in `.env`; [`.env.example`](./.env.example) explains every var
 | `PORT` / `WAITRESS_THREADS` | `5000` / `8` | One process only — see [Operating notes](#operating-notes). |
 | `MAX_CONTENT_LENGTH` | 2 GiB | Upload size cap. |
 | `STORAGE_BACKEND` / `ICON_STORAGE_BACKEND` / `APK_STORAGE_BACKEND` | `local` | See [Storage](#storage-local-disk-or-garages3). Needs `GARAGE_*`. |
+| `APK_REJECT_DEBUGGABLE` | `false` | Refuse debuggable APKs instead of publishing them with a warning. |
 | `FDROID_KEYSTORE_PASSWORD` | — | Required for the `android` profile. |
 | `FDROID_UPDATE_INTERVAL` / `FDROID_UPDATE_TIMEOUT` | `15` / `1800` | Seconds between rebuild checks / maximum length of one rebuild. |
 | `FEATHER_BASE_URL` / `FEATHER_ADMIN_PASSWORD` | — | How the cron importer and bot reach the app: `http://altstore-manager:5000`. |
@@ -255,7 +256,7 @@ docker compose run --rm --no-deps -T release-import    # dry run; summary shows 
 What the app does for you:
 
 - **Sign-in required** for every change. The session cookie is `HttpOnly` and `SameSite=Lax`.
-- **API tokens are publish-only.** A token can upload and read, never delete apps, change settings, or create tokens. Only a SHA-256 of each token is stored (`data/api-tokens.json`, mode 600); revoking takes effect on the next request.
+- **API tokens are publish-only.** A token can upload, edit app details and read, never delete apps, change settings, or create tokens. A token can be limited to named apps and given an expiry. Only a SHA-256 of each token is stored (`data/api-tokens.json`, mode 600); revoking takes effect on the next request.
 - **Login throttling:** 5 failed attempts per client per 60 s, then `429` with `Retry-After`; a successful login clears it. Behind a reverse proxy all clients share the proxy's address, so the limit is effectively global.
 - **Untrusted files are handled defensively.** IPA/APK metadata reads are size-capped before anything is decompressed (`Info.plist` ≤ 4 MB, `AndroidManifest.xml` ≤ 16 MB, oversized `resources.arsc` skipped, icon images ≤ 8 MB), so a zip bomb can't exhaust memory. App names and descriptions are always rendered as text.
 - **Headers:** `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`. Everything under `/fdroid/repo/` is sandboxed by CSP, because fdroidserver writes the repo name into its HTML unescaped.

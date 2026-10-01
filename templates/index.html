@@ -862,6 +862,17 @@
                     <label for="apiTokenName">Token name</label>
                     <input id="apiTokenName" required maxlength="80" placeholder="claude-agent, github-actions…">
                 </div>
+                <div class="news-row">
+                    <div class="form-group">
+                        <label for="apiTokenApps">Limit to apps <span class="optional">optional</span></label>
+                        <input id="apiTokenApps" placeholder="com.example.app, org.example.droid">
+                        <small class="field-hint">Bundle IDs / package names, comma-separated. Empty = any app.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="apiTokenDays">Expires after (days) <span class="optional">optional</span></label>
+                        <input id="apiTokenDays" type="number" min="1" max="3650" placeholder="never">
+                    </div>
+                </div>
                 <button type="submit" class="btn">Create token</button>
             </form>
             <div id="apiTokenNew" hidden role="status">
@@ -2101,7 +2112,7 @@
                 box.innerHTML = tokens.map(t => `
                     <div class="news-row" style="align-items:center; margin-bottom:8px;">
                         <div><strong>${escapeHtml(t.name)}</strong> <code>${escapeHtml(t.prefix)}…</code><br>
-                        <small class="field-hint">Created ${escapeHtml(t.created || '')} · last used ${escapeHtml(t.lastUsed || 'never')}</small></div>
+                        <small class="field-hint">${t.apps ? 'Only ' + escapeHtml(t.apps.join(', ')) : 'Any app'} · ${t.expires ? 'expires ' + escapeHtml(t.expires) : 'never expires'} · created ${escapeHtml(t.created || '')} · last used ${escapeHtml(t.lastUsed || 'never')}</small></div>
                         <button type="button" class="btn btn-secondary" data-token-id="${escapeHtml(t.id)}" onclick="revokeApiToken(this.dataset.tokenId)">Revoke</button>
                     </div>`).join('');
             } catch (error) {
@@ -2112,12 +2123,14 @@
         async function createApiToken(event) {
             event.preventDefault();
             const name = document.getElementById('apiTokenName').value.trim();
-            const response = await fetch('/api/tokens', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name})});
+            const apps = document.getElementById('apiTokenApps').value.trim();
+            const expiresInDays = document.getElementById('apiTokenDays').value.trim();
+            const response = await fetch('/api/tokens', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name, apps, expiresInDays})});
             const data = await response.json();
             if (!response.ok) { showToast(data.error || 'Could not create token', 'error'); return; }
             document.getElementById('apiTokenValue').value = data.token;
             document.getElementById('apiTokenNew').hidden = false;
-            document.getElementById('apiTokenName').value = '';
+            ['apiTokenName', 'apiTokenApps', 'apiTokenDays'].forEach(id => { document.getElementById(id).value = ''; });
             loadApiTokens();
         }
 

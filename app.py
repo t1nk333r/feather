@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, send_file, redirect, session, send_from_directory
+from flask import Flask, render_template, request, jsonify, send_file, redirect, session, send_from_directory, g
 import json
 import os
 import re
@@ -26,7 +26,7 @@ import yaml
 from PIL import Image
 from functools import wraps
 from botocore.exceptions import ClientError
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from werkzeug.utils import secure_filename
 from werkzeug.datastructures import FileStorage
@@ -157,6 +157,9 @@ ICON_STORAGE_BACKEND = os.environ.get("ICON_STORAGE_BACKEND", STORAGE_BACKEND)
 # read them to build and sign the index. With "garage" each APK is also
 # uploaded, byte-identical, and downloads are redirected to the bucket.
 APK_STORAGE_BACKEND = os.environ.get("APK_STORAGE_BACKEND", STORAGE_BACKEND)
+# Debuggable APKs are published with a warning by default (fdroidserver itself
+# only warns); set this to refuse them outright.
+APK_REJECT_DEBUGGABLE = os.environ.get("APK_REJECT_DEBUGGABLE", "false").strip().lower() in ("1", "true", "yes", "on")
 GARAGE_S3_ENDPOINT = os.environ.get("GARAGE_S3_ENDPOINT")
 GARAGE_S3_REGION = os.environ.get("GARAGE_S3_REGION", "garage")
 GARAGE_S3_ACCESS_KEY_ID = os.environ.get("GARAGE_S3_ACCESS_KEY_ID")
@@ -1684,6 +1687,10 @@ class SourceManager:
                     "size": file_size
                 }]
             }
+            if data.get('versionDescription'):
+                new_app['versions'][0]['localizedDescription'] = data['versionDescription']
+            if data.get('subtitle'):
+                new_app['subtitle'] = data['subtitle']
             permissions = data.get('appPermissions')
             if isinstance(permissions, dict) and permissions.get('privacy'):
                 new_app['appPermissions'] = {
@@ -1958,6 +1965,8 @@ class SourceManager:
                 "minOSVersion": min_os,
                 "size": file_size
             }
+            if version_data.get('localizedDescription'):
+                new_version['localizedDescription'] = version_data['localizedDescription']
         
             # Insert at the beginning (latest version first)
             app['versions'].insert(0, new_version)
@@ -2247,6 +2256,42 @@ class AndroidRepoManager:
         return {"added": added, "missing": missing}
 
     # --- reads ---------------------------------------------------------
+    def read_metadata(self, package):
+        return self._read_metadata(package)
+
+    def changelog_path(self, package, version_code):
+        """fdroidserver reads per-version release notes from
+        metadata/<package>/<locale>/changelogs/<versionCode>.txt."""
+        return os.path.join(FDROID_METADATA_DIR, package, "en-US", "changelogs", f"{int(version_code)}.txt")
+
+    def write_changelog(self, package, version_code, text):
+        if not ANDROID_PACKAGE_RE.match(package or ""):
+            raise ValueError(f"Invalid package name: {package!r}")
+        path = self.changelog_path(package, version_code)
+        with self._lock:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+            with os.fdopen(fd, "w") as f:
+                f.write(text.strip() + "\n")
+            os.replace(tmp_path, path)
+
+    def ensure_repo_icon(self):
+        """config.yml names `repo_icon: icon.png`, which fdroidserver resolves
+        against its working directory (data/fdroid/), not repo/icons/. Nothing
+        ever wrote it, so every rebuild replaced repo/icons/icon.png with a
+        QR-code placeholder. Install the Feather icon when none is there; an
+        operator's own data/fdroid/icon.png is never overwritten."""
+        dest = os.path.join(FDROID_DIR, "icon.png")
+        if os.path.exists(dest):
+            return False
+        try:
+            os.makedirs(FDROID_DIR, exist_ok=True)
+            shutil.copyfile(os.path.join(app.root_path, "static", "icon-512.png"), dest)
+            return True
+        except OSError as e:
+            logging.warning(f"Could not install the F-Droid repo icon: {e}")
+            return False
+
     def _read_metadata(self, package):
         path = self.metadata_path(package)
         if not os.path.exists(path):
@@ -2346,6 +2391,12 @@ class AndroidRepoManager:
                 "package": package,
                 "name": name,
                 "summary": summary,
+                "description": meta.get('Description', ''),
+                "authorName": meta.get('AuthorName', ''),
+                "license": meta.get('License', ''),
+                "website": meta.get('WebSite', ''),
+                "sourceCode": meta.get('SourceCode', ''),
+                "categories": meta.get('Categories') or [],
                 "versions": versions,
                 "pending": pending,
                 "mixed_signers": len(signers) > 1,
@@ -2621,6 +2672,7 @@ class AndroidRepoManager:
 
     def request_update(self):
         os.makedirs(FDROID_DIR, exist_ok=True)
+        self.ensure_repo_icon()
         open(FDROID_UPDATE_MARKER, 'a').close()
 
 
@@ -2758,40 +2810,67 @@ def _save_api_tokens(tokens):
 
 
 def _public_token(t):
-    return {k: t.get(k) for k in ("id", "name", "prefix", "created", "lastUsed")}
+    return {k: t.get(k) for k in ("id", "name", "prefix", "created", "lastUsed", "apps", "expires")}
 
 
-def _bearer_token_valid():
-    """True when the request carries a live `Authorization: Bearer ftr_...`."""
+def _bearer_token():
+    """The live token entry for `Authorization: Bearer ftr_...`, else None.
+    Expired tokens are refused like revoked ones."""
     header = request.headers.get("Authorization", "")
     scheme, _, supplied = header.partition(" ")
     supplied = supplied.strip()
     if scheme.lower() != "bearer" or not supplied.startswith(API_TOKEN_PREFIX):
-        return False
+        return None
     digest = _hash_token(supplied)
     with _api_tokens_lock:
         tokens = _load_api_tokens()
         match = next((t for t in tokens if hmac.compare_digest(t["hash"], digest)), None)
         if match is None:
-            return False
+            return None
         now = datetime.now(timezone.utc).replace(microsecond=0)
+        if match.get("expires") and _parse_utc(match["expires"]) <= now:
+            return None
         last = match.get("lastUsed")
         # Record use at most once a minute so a busy agent is not a write storm.
-        if not last or (now - datetime.fromisoformat(last.replace("Z", "+00:00"))).total_seconds() >= 60:
-            match["lastUsed"] = now.isoformat().replace("+00:00", "Z")
+        if not last or (now - _parse_utc(last)).total_seconds() >= 60:
+            match["lastUsed"] = _utc_iso(now)
             try:
                 _save_api_tokens(tokens)
             except OSError as e:
                 logging.warning(f"Could not record API token use: {e}")
-    return True
+    return match
+
+
+def _utc_iso(dt):
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def _parse_utc(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _token_may_touch(app_id):
+    """Sessions may touch anything; a token limited to `apps` only those IDs."""
+    token = g.get("api_token")
+    if token is None or not token.get("apps"):
+        return True
+    return app_id in token["apps"]
+
+
+def _scope_refusal(app_id):
+    return jsonify({"success": False, "id": app_id,
+                    "error": f"This token may only publish: {', '.join(g.api_token['apps'])}"}), 403
 
 
 def requires_publish(f):
     """Admin session OR a valid API token."""
     @wraps(f)
     def wrapper(*args, **kwargs):
-        if not session.get('authed') and not _bearer_token_valid():
-            return jsonify({"success": False, "error": "Authentication required"}), 401
+        g.api_token = None
+        if not session.get('authed'):
+            g.api_token = _bearer_token()
+            if g.api_token is None:
+                return jsonify({"success": False, "error": "Authentication required"}), 401
         return f(*args, **kwargs)
     return wrapper
 
@@ -3470,6 +3549,7 @@ def _inspect_apk(path):
         "min_sdk": inspection.min_sdk,
         "target_sdk": inspection.target_sdk,
         "app_name": inspection.app_name,
+        "debuggable": inspection.debuggable,
     }
 
 
@@ -5718,6 +5798,22 @@ def create_api_token():
     name = name.strip() if isinstance(name, str) else ""
     if not name or len(name) > 80:
         return jsonify({"success": False, "error": "name is required (at most 80 characters)"}), 400
+    apps = data.get('apps') or []
+    if isinstance(apps, str):
+        apps = [a.strip() for a in apps.replace('\n', ',').split(',') if a.strip()]
+    if (not isinstance(apps, list) or len(apps) > 100
+            or any(not isinstance(a, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,255}", a) for a in apps)):
+        return jsonify({"success": False, "error": "apps must be a list of bundle IDs / package names"}), 400
+    days = data.get('expiresInDays')
+    expires = None
+    if days not in (None, ""):
+        try:
+            days = int(days)
+        except (TypeError, ValueError):
+            days = 0
+        if not 1 <= days <= 3650:
+            return jsonify({"success": False, "error": "expiresInDays must be 1-3650"}), 400
+        expires = _utc_iso(datetime.now(timezone.utc).replace(microsecond=0) + timedelta(days=days))
     token = API_TOKEN_PREFIX + secrets.token_urlsafe(32)
     entry = {
         "id": uuid.uuid4().hex[:12],
@@ -5726,6 +5822,8 @@ def create_api_token():
         "prefix": token[:len(API_TOKEN_PREFIX) + 6],
         "created": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "lastUsed": None,
+        "apps": sorted(set(apps)) or None,
+        "expires": expires,
     }
     with _api_tokens_lock:
         tokens = _load_api_tokens()
@@ -5774,21 +5872,80 @@ def _truthy(value, default):
     return str(value).strip().lower() not in ("false", "0", "no", "off")
 
 
+# App-level fields an agent may set: (request key, max length). URLs are
+# checked separately. Categories may be a list or a comma-separated string.
+_DETAIL_FIELDS = (("name", 50), ("developerName", 100), ("summary", 80), ("description", 4000),
+                  ("license", 100), ("website", 2048), ("sourceCode", 2048))
+
+
+def _read_details(src):
+    """Validated app-detail fields present in a form or JSON body. Absent or
+    blank fields are left out, so an update never blanks what it wasn't sent."""
+    out = {}
+    for key, limit in _DETAIL_FIELDS:
+        value = src.get(key)
+        value = value.strip() if isinstance(value, str) else ""
+        if not value:
+            continue
+        if len(value) > limit:
+            raise ValueError(f"{key} must be at most {limit} characters")
+        if key in ("website", "sourceCode") and urlparse(value).scheme not in ("http", "https"):
+            raise ValueError(f"{key} must be an http(s) URL")
+        out[key] = value
+    cats = src.getlist("categories") if hasattr(src, "getlist") else src.get("categories")
+    if isinstance(cats, list) and len(cats) == 1 and isinstance(cats[0], str):
+        cats = cats[0]
+    if isinstance(cats, str):
+        cats = [c.strip() for c in cats.split(",") if c.strip()]
+    if cats:
+        if not isinstance(cats, list) or any(not isinstance(c, str) or len(c) > 50 for c in cats) or len(cats) > 10:
+            raise ValueError("categories must be up to 10 names of at most 50 characters")
+        out["categories"] = cats
+    return out
+
+
+def _derived_summary(details):
+    """F-Droid lists show Summary, not Description; an app created with only a
+    description would otherwise show a blank line under its name."""
+    if details.get("summary") or not details.get("description"):
+        return details.get("summary", "")
+    first = details["description"].strip().splitlines()[0].strip()
+    return first if len(first) <= 80 else first[:79].rstrip() + "…"
+
+
+def _android_fields(details):
+    mapping = {"name": "Name", "summary": "Summary", "description": "Description", "developerName": "AuthorName",
+               "website": "WebSite", "sourceCode": "SourceCode", "license": "License", "categories": "Categories"}
+    return {meta: details[key] for key, meta in mapping.items() if details.get(key)}
+
+
+def _ios_fields(details):
+    mapping = {"name": "name", "developerName": "developerName", "description": "localizedDescription",
+               "summary": "subtitle"}
+    return {meta: details[key] for key, meta in mapping.items() if details.get(key)}
+
+
 def _publish_ios(tmp_path, opts, base_url):
     try:
         inspection = inspect_ipa(tmp_path, "IPA")
     except IpaInspectionError as e:
         raise ValueError(str(e))
     bundle_id, version = inspection.bundle_identifier, inspection.version
+    if not _token_may_touch(bundle_id):
+        return _scope_refusal(bundle_id)
     result = {"platform": "ios", "id": bundle_id, "version": version,
-              "build": inspection.build_version, "created": False}
+              "build": inspection.build_version, "created": False, "warnings": []}
     existing = source_manager.get_app(bundle_id)
     if existing and any(isinstance(v, dict) and v.get('version') == version for v in existing.get('versions', [])):
-        return 200, {**result, "success": True, "added": False, "name": existing.get("name"),
-                     "message": f"Already present: {bundle_id} {version}"}
+        return jsonify({**result, "success": True, "added": False, "name": existing.get("name"),
+                        "message": f"Already present: {bundle_id} {version}"}), 200
     if not existing and not opts["createIfMissing"]:
-        return 404, {**result, "success": False,
-                     "error": f"{bundle_id} is not in the catalogue and createIfMissing is false"}
+        return jsonify({**result, "success": False,
+                        "error": f"{bundle_id} is not in the catalogue and createIfMissing is false"}), 404
+    details = opts["details"]
+    ignored = [k for k in details if k not in ("name", "developerName", "summary", "description")]
+    if ignored:
+        result["warnings"].append(f"iOS sources have no {', '.join(ignored)}; ignored")
 
     with open(tmp_path, "rb") as fh:
         fs = FileStorage(stream=fh, filename="app.ipa")
@@ -5797,60 +5954,88 @@ def _publish_ios(tmp_path, opts, base_url):
                 "version": version,
                 "buildVersion": inspection.build_version,
                 "minOSVersion": inspection.minimum_os_version,
+                "localizedDescription": opts["whatsNew"],
             }, ipa_file=fs, base_url=base_url)
         else:
             new_app = {
-                "name": opts["name"] or inspection.name or bundle_id,
+                "name": details.get("name") or inspection.name or bundle_id,
                 "bundleIdentifier": bundle_id,
-                "developerName": opts["developerName"] or "Unknown",
-                "localizedDescription": opts["description"],
+                "developerName": details.get("developerName") or "Unknown",
+                "localizedDescription": details.get("description", ""),
+                "subtitle": _derived_summary(details),
                 "version": version,
                 "buildVersion": inspection.build_version,
                 "minOSVersion": inspection.minimum_os_version,
+                "versionDescription": opts["whatsNew"],
             }
             if inspection.privacy:
                 new_app["appPermissions"] = {"entitlements": [], "privacy": inspection.privacy}
             ok, message = source_manager.add_app_manual(new_app, ipa_file=fs, base_url=base_url)
             result["created"] = ok
     if not ok:
-        return 400, {**result, "success": False, "error": message}
+        return jsonify({**result, "success": False, "error": message}), 400
+    if existing and details:
+        result["warnings"].append("App details are only set when an app is created; use update_app / "
+                                  "POST /api/app-details to change them")
 
     app_info = source_manager.get_app(bundle_id) or {}
     entry = next((v for v in app_info.get("versions", []) if v.get("version") == version), {})
     notify("add_version" if existing else "add_app",
            f"Published via API: {app_info.get('name', bundle_id)} ({bundle_id}) {version}\n{base_url}/source.json")
-    return 200, {**result, "success": True, "added": True, "name": app_info.get("name"),
-                 "downloadURL": entry.get("downloadURL"), "size": entry.get("size"), "message": message}
+    return jsonify({**result, "success": True, "added": True, "name": app_info.get("name"),
+                    "downloadURL": entry.get("downloadURL"), "size": entry.get("size"), "message": message}), 200
 
 
 def _publish_android(tmp_path, opts, base_url):
     info = _inspect_apk(tmp_path)
     package = info["package"]
+    if not _token_may_touch(package):
+        return _scope_refusal(package)
     result = {"platform": "android", "id": package, "version": info["version_name"],
-              "build": info["version_code"], "created": False}
+              "build": info["version_code"], "created": False, "warnings": []}
+    if info.get("debuggable"):
+        if APK_REJECT_DEBUGGABLE:
+            return jsonify({**result, "success": False,
+                            "error": "APK is debuggable (android:debuggable=true); upload a release build"}), 400
+        result["warnings"].append(
+            "APK is debuggable (android:debuggable=true): anyone with the device can read the app's private "
+            "data over adb. Publish a release build.")
     known = os.path.exists(android_repo.metadata_path(package))
     if not known and not opts["createIfMissing"]:
-        return 404, {**result, "success": False,
-                     "error": f"{package} is not in the repo and createIfMissing is false"}
+        return jsonify({**result, "success": False,
+                        "error": f"{package} is not in the repo and createIfMissing is false"}), 404
+    details = opts["details"]
     fields = {}
     if not known:
-        fields = android_repo.validate_metadata({
-            "Name": opts["name"] or None,
-            "AuthorName": opts["developerName"] or None,
-            "Description": opts["description"] or None,
-        })
+        fields = android_repo.validate_metadata(_android_fields({**details, "summary": _derived_summary(details)}))
+    already = os.path.exists(android_repo.apk_path(package, info["version_code"]))
+    if opts["whatsNew"] and not already:
+        # Written before the APK lands so the rebuild that publishes the
+        # version already sees its notes.
+        android_repo.write_changelog(package, info["version_code"], opts["whatsNew"])
     added, _ = android_repo.add_apk(tmp_path, expected_package=package)
     url = f"{base_url}/fdroid/repo/{android_repo.apk_filename(package, info['version_code'])}"
     if not added:
-        return 200, {**result, "success": True, "added": False, "downloadURL": url,
-                     "message": f"Already present: {package} versionCode {info['version_code']}"}
+        return jsonify({**result, "success": True, "added": False, "downloadURL": url,
+                        "message": f"Already present: {package} versionCode {info['version_code']}"}), 200
     if fields:
         android_repo.write_metadata(package, fields)
+    elif details:
+        result["warnings"].append("App details are only set when an app is created; use update_app / "
+                                  "POST /api/app-details to change them")
     notify("android_add_apk", f"Published via API: {package} {info['version_name']}")
-    return 200, {**result, "success": True, "added": True, "created": not known, "downloadURL": url,
-                 "pending": True, "name": opts["name"] or info.get("app_name"),
-                 "message": f"Added {package} versionCode {info['version_code']}; "
-                            "the F-Droid index rebuilds on the sidecar's next pass"}
+    return jsonify({**result, "success": True, "added": True, "created": not known, "downloadURL": url,
+                    "pending": True, "name": details.get("name") or info.get("app_name"),
+                    "message": f"Added {package} versionCode {info['version_code']}; "
+                               "the F-Droid index rebuilds on the sidecar's next pass"}), 200
+
+
+def _request_fields():
+    is_multipart = bool(request.content_type and 'multipart/form-data' in request.content_type)
+    src = request.form if is_multipart else (request.get_json(silent=True) or {})
+    if not hasattr(src, "get"):
+        raise ValueError("Expected a JSON object or multipart form")
+    return is_multipart, src
 
 
 @app.route('/api/publish', methods=['POST'])
@@ -5859,32 +6044,25 @@ def publish():
     """One call for agents and CI: upload (multipart `file`) or point at a
     `url` of an .ipa or .apk. Platform, bundle ID / package, and version come
     from the file itself. New apps are created unless createIfMissing=false;
-    name / developerName / description apply only when an app is created."""
+    app details apply only when an app is created (see /api/app-details)."""
     temp_path = None
     try:
-        is_multipart = bool(request.content_type and 'multipart/form-data' in request.content_type)
-        src = request.form if is_multipart else (request.get_json(silent=True) or {})
-        if not hasattr(src, "get"):
-            return jsonify({"success": False, "error": "Expected a JSON object or multipart form"}), 400
-
-        def text(key, limit):
-            value = src.get(key)
-            value = value.strip() if isinstance(value, str) else ""
-            if len(value) > limit:
-                raise ValueError(f"{key} must be at most {limit} characters")
-            return value
-
+        is_multipart, src = _request_fields()
+        whats_new = src.get("whatsNew")
+        whats_new = whats_new.strip() if isinstance(whats_new, str) else ""
+        if len(whats_new) > 4000:
+            raise ValueError("whatsNew must be at most 4000 characters")
         opts = {
-            "name": text("name", 50),
-            "developerName": text("developerName", 100),
-            "description": text("description", 4000),
+            "details": _read_details(src),
+            "whatsNew": whats_new,
             "createIfMissing": _truthy(src.get("createIfMissing"), True),
         }
         upload = None
         if is_multipart:
             upload = next((request.files[k] for k in ("file", "ipaFile", "apkFile")
                            if k in request.files and request.files[k].filename), None)
-        url = text("url", 2048)
+        url = src.get("url")
+        url = url.strip() if isinstance(url, str) else ""
 
         os.makedirs(UPLOAD_FOLDER, exist_ok=True)
         if upload is not None:
@@ -5893,8 +6071,8 @@ def publish():
             os.close(fd)
             upload.save(temp_path)
         elif url:
-            if urlparse(url).scheme not in ("http", "https"):
-                return jsonify({"success": False, "error": "url must be http(s)"}), 400
+            if len(url) > 2048 or urlparse(url).scheme not in ("http", "https"):
+                return jsonify({"success": False, "error": "url must be an http(s) URL"}), 400
             filename = os.path.basename(urlparse(url).path)
             temp_path = _download_to_temp(url, ".upload")
         else:
@@ -5903,10 +6081,8 @@ def publish():
         platform = _sniff_platform(temp_path, filename)
         if platform is None:
             return jsonify({"success": False, "error": "Not an .ipa or .apk"}), 400
-        base_url = resolve_base_url()
         publisher = _publish_ios if platform == "ios" else _publish_android
-        status, body = publisher(temp_path, opts, base_url)
-        return jsonify(body), status
+        return publisher(temp_path, opts, resolve_base_url())
     except ValueError as e:
         return jsonify({"success": False, "error": str(e)}), 400
     except Exception as e:
@@ -5918,6 +6094,44 @@ def publish():
                 os.remove(temp_path)
             except OSError:
                 pass
+
+
+@app.route('/api/app-details', methods=['POST'])
+@requires_publish
+def update_app_details():
+    """Change an existing app's details (iOS or Android, found by `id`).
+    Only the fields sent are changed."""
+    try:
+        _is_multipart, src = _request_fields()
+        app_id = src.get("id")
+        app_id = app_id.strip() if isinstance(app_id, str) else ""
+        if not app_id:
+            return jsonify({"success": False, "error": "id is required"}), 400
+        if not _token_may_touch(app_id):
+            return _scope_refusal(app_id)
+        details = _read_details(src)
+        if not details:
+            return jsonify({"success": False, "error": "Nothing to update"}), 400
+        warnings = []
+        if source_manager.get_app(app_id):
+            ignored = [k for k in details if k not in ("name", "developerName", "summary", "description")]
+            if ignored:
+                warnings.append(f"iOS sources have no {', '.join(ignored)}; ignored")
+            ok, message = source_manager.update_app(app_id, _ios_fields(details), base_url=resolve_base_url())
+            if not ok:
+                return jsonify({"success": False, "error": message}), 400
+            return jsonify({"success": True, "platform": "ios", "id": app_id, "warnings": warnings,
+                            "app": source_manager.get_app(app_id)})
+        if ANDROID_PACKAGE_RE.match(app_id) and os.path.exists(android_repo.metadata_path(app_id)):
+            android_repo.write_metadata(app_id, _android_fields(details))
+            return jsonify({"success": True, "platform": "android", "id": app_id, "warnings": warnings,
+                            "pending": True, "metadata": android_repo.read_metadata(app_id)})
+        return jsonify({"success": False, "error": f"No app with id {app_id!r}"}), 404
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error updating app details via API: {e}")
+        return jsonify({"success": False, "error": "Update failed"}), 500
 
 
 @app.route('/fdroid/repo/<path:filename>')

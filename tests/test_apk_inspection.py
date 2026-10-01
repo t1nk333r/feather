@@ -19,7 +19,7 @@ class _FakeApk:
 
     def __init__(self, package="com.example.app", version_code="42",
                  version_name="4.2", min_sdk=21, target_sdk=34,
-                 app_name="Demo", valid=True, signed=True):
+                 app_name="Demo", valid=True, signed=True, debuggable=None):
         self.package = package
         self.version_code = version_code
         self.version_name = version_name
@@ -28,6 +28,11 @@ class _FakeApk:
         self._app_name = app_name
         self._valid = valid
         self._signed = signed
+        self._debuggable = debuggable
+
+    def get_attribute_value(self, tag, attribute):
+        assert (tag, attribute) == ("application", "debuggable")
+        return self._debuggable
 
     def is_valid_APK(self):
         return self._valid
@@ -213,3 +218,11 @@ def test_extract_apk_icon_none_without_rasters_and_never_raises(tmp_path):
     assert extract_apk_icon(path) is None
     (tmp_path / "d.apk").write_bytes(b"garbage")
     assert extract_apk_icon(tmp_path / "d.apk") is None
+
+
+@pytest.mark.parametrize("value,expected", [(None, False), ("false", False), ("true", True), (True, True)])
+def test_debuggable_flag(tmp_path, monkeypatch, value, expected):
+    _patch_apk(monkeypatch, debuggable=value)
+    path = tmp_path / "a.apk"
+    path.write_bytes(b"x")
+    assert inspect_apk(str(path)).debuggable is expected

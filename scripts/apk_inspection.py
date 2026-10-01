@@ -37,6 +37,17 @@ class ApkInspection:
     min_sdk: str = None
     target_sdk: str = None
     app_name: str = None
+    debuggable: bool = False
+
+
+def _is_debuggable(apk):
+    """android:debuggable="true" on <application>. fdroidserver only warns
+    about it and publishes anyway, so the uploader has to be told here."""
+    try:
+        value = apk.get_attribute_value("application", "debuggable")
+    except Exception:
+        return False
+    return str(value).strip().lower() in ("true", "1", "-1")
 
 
 def inspect_apk(path, label="APK"):
@@ -84,6 +95,7 @@ def inspect_apk(path, label="APK"):
         min_sdk=apk.get_min_sdk_version(),
         target_sdk=apk.get_target_sdk_version(),
         app_name=(apk.get_app_name() if read_label else None) or package,
+        debuggable=_is_debuggable(apk),
     )
 
 

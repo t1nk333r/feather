@@ -27,7 +27,7 @@ import uuid
 from urllib.parse import quote, urlparse
 
 SERVER_NAME = "feather"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "1.1.0"
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 TIMEOUT = float(os.environ.get("FEATHER_TIMEOUT", "600"))
 
@@ -38,19 +38,46 @@ TOOLS = [
             "Publish an iOS .ipa or Android .apk to Feather. Give either a local file `path` "
             "or a public `url` Feather should download. Platform, bundle ID / package and "
             "version are read from the file. New apps are created unless create_if_missing "
-            "is false; name, developer_name and description apply only to new apps. "
-            "Publishing a version that already exists is a no-op (added=false)."
+            "is false; the app details (name, summary, description, licence, links, "
+            "categories) apply only when the app is created -- use update_app afterwards. "
+            "whats_new is this version's release notes. Publishing a version that already "
+            "exists is a no-op (added=false). Check `warnings` in the result."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Local path to an .ipa or .apk"},
                 "url": {"type": "string", "description": "http(s) URL of an .ipa or .apk"},
-                "name": {"type": "string", "description": "Display name for a new app (max 50)"},
-                "developer_name": {"type": "string", "description": "Developer for a new app"},
-                "description": {"type": "string", "description": "Description for a new app"},
+                "name": {"type": "string", "description": "Display name (max 50)"},
+                "developer_name": {"type": "string", "description": "Developer / author (max 100)"},
+                "summary": {"type": "string", "description": "One-line summary (max 80); iOS subtitle"},
+                "description": {"type": "string", "description": "Full description (max 4000)"},
+                "license": {"type": "string", "description": "SPDX licence, e.g. GPL-3.0-only (Android only)"},
+                "website": {"type": "string", "description": "http(s) URL (Android only)"},
+                "source_code": {"type": "string", "description": "http(s) URL of the source repo (Android only)"},
+                "categories": {"type": "array", "items": {"type": "string"}, "description": "Android only"},
+                "whats_new": {"type": "string", "description": "Release notes for this version"},
                 "create_if_missing": {"type": "boolean", "default": True},
             },
+        },
+    },
+    {
+        "name": "update_app",
+        "description": "Change an existing app's details by bundle ID or package. Only the fields given change.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Bundle ID (iOS) or package name (Android)"},
+                "name": {"type": "string", "description": "Display name (max 50)"},
+                "developer_name": {"type": "string", "description": "Developer / author (max 100)"},
+                "summary": {"type": "string", "description": "One-line summary (max 80); iOS subtitle"},
+                "description": {"type": "string", "description": "Full description (max 4000)"},
+                "license": {"type": "string", "description": "SPDX licence, e.g. GPL-3.0-only (Android only)"},
+                "website": {"type": "string", "description": "http(s) URL (Android only)"},
+                "source_code": {"type": "string", "description": "http(s) URL of the source repo (Android only)"},
+                "categories": {"type": "array", "items": {"type": "string"}, "description": "Android only"},
+            },
+            "required": ["id"],
         },
     },
     {
@@ -162,14 +189,34 @@ class Feather:
         })
 
 
+_DETAIL_ARGS = (("name", "name"), ("developer_name", "developerName"), ("summary", "summary"),
+                ("description", "description"), ("license", "license"), ("website", "website"),
+                ("source_code", "sourceCode"))
+
+
+def _detail_fields(args):
+    fields = {field: args[arg] for arg, field in _DETAIL_ARGS if args.get(arg)}
+    if args.get("categories"):
+        cats = args["categories"]
+        fields["categories"] = ",".join(cats) if isinstance(cats, list) else str(cats)
+    return fields
+
+
+def _update(feather, args):
+    app_id = (args.get("id") or "").strip()
+    if not app_id:
+        raise FeatherError("`id` is required")
+    return feather.request("POST", "/api/app-details", body=json.dumps({"id": app_id, **_detail_fields(args)}),
+                           headers={"Content-Type": "application/json"})
+
+
 def _publish(feather, args):
     path, url = args.get("path"), args.get("url")
     if bool(path) == bool(url):
         raise FeatherError("Give exactly one of `path` or `url`")
-    fields = {}
-    for arg, field in (("name", "name"), ("developer_name", "developerName"), ("description", "description")):
-        if args.get(arg):
-            fields[field] = args[arg]
+    fields = _detail_fields(args)
+    if args.get("whats_new"):
+        fields["whatsNew"] = args["whats_new"]
     if "create_if_missing" in args:
         fields["createIfMissing"] = "true" if args["create_if_missing"] else "false"
     if url:
@@ -218,6 +265,7 @@ def _get(feather, args):
 
 HANDLERS = {
     "publish_app": _publish,
+    "update_app": _update,
     "list_apps": _list,
     "get_app": _get,
     "repo_status": lambda feather, _args: feather.request("GET", "/api/android/status"),

@@ -286,3 +286,163 @@ def test_mcp_server_reports_bad_token(authed_client, live_server, tmp_path):
                          "params": {"name": "publish_app", "arguments": {"path": str(ipa)}}}])
     assert out[0]["result"]["isError"] is True
     assert "401" in out[0]["result"]["content"][0]["text"]
+
+
+# --- agent feedback round: scopes, expiry, details, notes, debuggable --------
+
+def test_scoped_token_only_publishes_its_apps(authed_client, tmp_path):
+    tok = authed_client.post("/api/tokens", json={"name": "one-app", "apps": "com.agent.mine"}).get_json()
+    assert tok["apps"] == ["com.agent.mine"]
+    anon = _anon(authed_client)
+    ok = anon.post("/api/publish", headers=_bearer(tok["token"]), content_type="multipart/form-data",
+                   data={"file": (io.BytesIO(_minimal_ipa("com.agent.mine", "1.0")), "a.ipa")})
+    assert ok.status_code == 200, ok.get_json()
+    other = anon.post("/api/publish", headers=_bearer(tok["token"]), content_type="multipart/form-data",
+                      data={"file": (io.BytesIO(_minimal_ipa("com.example.app", "9.9")), "a.ipa")})
+    assert other.status_code == 403 and "com.agent.mine" in other.get_json()["error"]
+    versions = json.loads((tmp_path / "source.json").read_text())["apps"][0]["versions"]
+    assert [v["version"] for v in versions] == ["1.0.0"]
+    assert not (tmp_path / "ipas" / "com.example.app").exists()
+    assert anon.post("/api/app-details", headers=_bearer(tok["token"]),
+                     json={"id": "com.example.app", "name": "Hijacked"}).status_code == 403
+
+
+def test_scoped_token_refuses_other_apk(authed_client, tmp_path, monkeypatch):
+    _fake_apk(monkeypatch, authed_client.app_module)
+    tok = authed_client.post("/api/tokens", json={"name": "s", "apps": ["org.other"]}).get_json()["token"]
+    resp = _anon(authed_client).post("/api/publish", headers=_bearer(tok), content_type="multipart/form-data",
+                                     data={"file": (io.BytesIO(b"a"), "a.apk")})
+    assert resp.status_code == 403
+    assert not (tmp_path / "fdroid" / "repo" / "org.example.agent_7.apk").exists()
+
+
+def test_expired_token_is_refused(authed_client, tmp_path):
+    body = authed_client.post("/api/tokens", json={"name": "short", "expiresInDays": 1}).get_json()
+    assert body["expires"]
+    anon = _anon(authed_client)
+    assert anon.get("/api/android/apps", headers=_bearer(body["token"])).status_code == 200
+    tokens = json.loads((tmp_path / "api-tokens.json").read_text())
+    tokens[0]["expires"] = "2020-01-01T00:00:00Z"
+    (tmp_path / "api-tokens.json").write_text(json.dumps(tokens))
+    assert anon.get("/api/android/apps", headers=_bearer(body["token"])).status_code == 401
+
+
+def test_token_create_validates_scope_and_expiry(authed_client):
+    for bad in ({"name": "x", "apps": "bad id!"}, {"name": "x", "apps": [1]},
+                {"name": "x", "expiresInDays": 0}, {"name": "x", "expiresInDays": "soon"},
+                {"name": "x", "expiresInDays": 4000}):
+        assert authed_client.post("/api/tokens", json=bad).status_code == 400, bad
+
+
+def test_publish_apk_full_details_and_release_notes(authed_client, tmp_path, monkeypatch):
+    _fake_apk(monkeypatch, authed_client.app_module)
+    resp = authed_client.post("/api/publish", content_type="multipart/form-data", data={
+        "file": (io.BytesIO(b"a"), "a.apk"), "name": "DAVKeep", "developerName": "t1nk",
+        "description": "Keeps your contacts in sync with any CardDAV server.\nMore text.",
+        "license": "GPL-3.0-only", "sourceCode": "https://github.com/example/davkeep",
+        "website": "https://example.com", "categories": "Connectivity, Sync",
+        "whatsNew": "First release."})
+    body = resp.get_json()
+    assert resp.status_code == 200 and body["warnings"] == [], body
+    import yaml
+    meta = yaml.safe_load((tmp_path / "fdroid" / "metadata" / "org.example.agent.yml").read_text())
+    assert meta["Summary"] == "Keeps your contacts in sync with any CardDAV server."
+    assert meta["License"] == "GPL-3.0-only" and meta["SourceCode"] == "https://github.com/example/davkeep"
+    assert meta["WebSite"] == "https://example.com" and meta["Categories"] == ["Connectivity", "Sync"]
+    assert meta["AuthorName"] == "t1nk" and meta["Description"].startswith("Keeps your contacts")
+    notes = tmp_path / "fdroid" / "metadata" / "org.example.agent" / "en-US" / "changelogs" / "7.txt"
+    assert notes.read_text() == "First release.\n"
+    listed = authed_client.get("/api/android/apps").get_json()[0]
+    assert listed["summary"].startswith("Keeps") and listed["license"] == "GPL-3.0-only"
+
+
+def test_publish_rejects_bad_detail_fields(authed_client):
+    for bad in ({"website": "javascript:alert(1)"}, {"sourceCode": "ftp://x"}, {"summary": "s" * 81},
+                {"whatsNew": "w" * 4001}, {"categories": ",".join(["c"] * 11)}):
+        resp = authed_client.post("/api/publish", content_type="multipart/form-data",
+                                  data={"file": (io.BytesIO(b"a"), "a.apk"), **bad})
+        assert resp.status_code == 400, bad
+
+
+def test_details_on_existing_app_warn_and_do_not_change(authed_client, tmp_path, monkeypatch):
+    body = authed_client.post("/api/publish", content_type="multipart/form-data", data={
+        "file": (io.BytesIO(_minimal_ipa("com.example.app", "2.0")), "a.ipa"),
+        "name": "Renamed", "whatsNew": "Bug fixes"}).get_json()
+    assert body["added"] is True and any("update_app" in w for w in body["warnings"])
+    app = json.loads((tmp_path / "source.json").read_text())["apps"][0]
+    assert app["name"] == "Example App"
+    assert app["versions"][0]["localizedDescription"] == "Bug fixes"
+
+
+def test_publish_new_ipa_sets_subtitle_and_version_notes(authed_client, tmp_path):
+    authed_client.post("/api/publish", content_type="multipart/form-data", data={
+        "file": (io.BytesIO(_minimal_ipa("com.agent.notes", "1.0")), "a.ipa"),
+        "summary": "Short line", "license": "MIT", "whatsNew": "Hello"})
+    app = next(a for a in json.loads((tmp_path / "source.json").read_text())["apps"]
+               if a["bundleIdentifier"] == "com.agent.notes")
+    assert app["subtitle"] == "Short line"
+    assert app["versions"][0]["localizedDescription"] == "Hello"
+
+
+def test_app_details_updates_ios_and_android(authed_client, tmp_path, monkeypatch):
+    tok = _token(authed_client)["token"]
+    anon = _anon(authed_client)
+    resp = anon.post("/api/app-details", headers=_bearer(tok), json={
+        "id": "com.example.app", "name": "New Name", "summary": "Sub", "license": "MIT"})
+    body = resp.get_json()
+    assert resp.status_code == 200 and body["platform"] == "ios"
+    assert body["app"]["name"] == "New Name" and body["app"]["subtitle"] == "Sub"
+    assert body["app"]["developerName"] == "Example Dev"          # untouched
+    assert any("license" in w for w in body["warnings"])
+
+    _fake_apk(monkeypatch, authed_client.app_module)
+    authed_client.post("/api/publish", content_type="multipart/form-data",
+                       data={"file": (io.BytesIO(b"a"), "a.apk"), "name": "Droid"})
+    resp = anon.post("/api/app-details", headers=_bearer(tok), json={
+        "id": "org.example.agent", "description": "Now described", "license": "Apache-2.0"})
+    meta = resp.get_json()["metadata"]
+    assert meta["Description"] == "Now described" and meta["License"] == "Apache-2.0" and meta["Name"] == "Droid"
+
+    assert anon.post("/api/app-details", headers=_bearer(tok), json={"id": "nope.app", "name": "x"}).status_code == 404
+    assert anon.post("/api/app-details", headers=_bearer(tok), json={"id": "com.example.app"}).status_code == 400
+    assert anon.post("/api/app-details", json={"id": "com.example.app", "name": "x"}).status_code == 401
+
+
+def test_debuggable_apk_warns_by_default_and_can_be_refused(authed_client, tmp_path, monkeypatch):
+    module = authed_client.app_module
+    _fake_apk(monkeypatch, module, {**FAKE_APK, "debuggable": True})
+    body = authed_client.post("/api/publish", content_type="multipart/form-data",
+                              data={"file": (io.BytesIO(b"a"), "a.apk")}).get_json()
+    assert body["added"] is True and any("debuggable" in w for w in body["warnings"])
+
+    _fake_apk(monkeypatch, module, {**FAKE_APK, "version_code": 8, "debuggable": True})
+    monkeypatch.setattr(module, "APK_REJECT_DEBUGGABLE", True)
+    resp = authed_client.post("/api/publish", content_type="multipart/form-data",
+                              data={"file": (io.BytesIO(b"b"), "b.apk")})
+    assert resp.status_code == 400 and "debuggable" in resp.get_json()["error"]
+    assert not (tmp_path / "fdroid" / "repo" / "org.example.agent_8.apk").exists()
+
+
+def test_repo_icon_installed_once_and_never_overwritten(authed_client, tmp_path):
+    module = authed_client.app_module
+    icon = tmp_path / "fdroid" / "icon.png"
+    module.android_repo.request_update()
+    assert icon.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    icon.write_bytes(b"operator's own icon")
+    module.android_repo.request_update()
+    assert icon.read_bytes() == b"operator's own icon"
+
+
+def test_mcp_update_app_tool(authed_client, live_server, tmp_path):
+    tok = _token(authed_client, "agent")["token"]
+    env = {**os.environ, "FEATHER_URL": live_server, "FEATHER_TOKEN": tok}
+    out, err = _mcp(env, [
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "update_app", "arguments": {
+            "id": "com.example.app", "description": "From MCP", "summary": "Tagline"}}},
+    ])
+    by_id = {m["id"]: m for m in out}
+    assert "update_app" in {t["name"] for t in by_id[1]["result"]["tools"]}, err
+    assert by_id[2]["result"]["isError"] is False, by_id[2]
+    app = json.loads((tmp_path / "source.json").read_text())["apps"][0]
+    assert app["localizedDescription"] == "From MCP" and app["subtitle"] == "Tagline"
