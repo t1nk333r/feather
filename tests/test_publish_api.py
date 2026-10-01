@@ -433,6 +433,21 @@ def test_repo_icon_installed_once_and_never_overwritten(authed_client, tmp_path)
     assert icon.read_bytes() == b"operator's own icon"
 
 
+def test_stale_published_repo_icon_is_removed(authed_client, tmp_path):
+    """Current fdroidserver keeps an existing repo/icons/icon.png, so the QR
+    placeholder from earlier runs must be removed for the real icon to land;
+    an up-to-date copy must be left alone (no rebuild churn)."""
+    module = authed_client.app_module
+    published = tmp_path / "fdroid" / "repo" / "icons" / "icon.png"
+    published.parent.mkdir(parents=True, exist_ok=True)
+    published.write_bytes(b"qr placeholder")
+    module.android_repo.request_update()
+    assert not published.exists()
+    published.write_bytes((tmp_path / "fdroid" / "icon.png").read_bytes())   # what fdroid copies
+    module.android_repo.request_update()
+    assert published.exists()
+
+
 def test_mcp_update_app_tool(authed_client, live_server, tmp_path):
     tok = _token(authed_client, "agent")["token"]
     env = {**os.environ, "FEATHER_URL": live_server, "FEATHER_TOKEN": tok}
@@ -446,3 +461,44 @@ def test_mcp_update_app_tool(authed_client, live_server, tmp_path):
     assert by_id[2]["result"]["isError"] is False, by_id[2]
     app = json.loads((tmp_path / "source.json").read_text())["apps"][0]
     assert app["localizedDescription"] == "From MCP" and app["subtitle"] == "Tagline"
+
+
+def test_version_route_is_public_and_reports_build(client, monkeypatch):
+    assert client.get("/api/version").get_json() == {"version": "dev"}
+    monkeypatch.setenv("FEATHER_VERSION", "b5252ec")
+    assert client.get("/api/version").get_json() == {"version": "b5252ec"}
+
+
+def test_release_notes_for_published_versions(authed_client, tmp_path, monkeypatch):
+    tok = _token(authed_client)["token"]
+    anon = _anon(authed_client)
+    resp = anon.post("/api/app-details", headers=_bearer(tok),
+                     json={"id": "com.example.app", "version": "1.0.0", "whatsNew": "Late notes"})
+    assert resp.status_code == 200, resp.get_json()
+    v = json.loads((tmp_path / "source.json").read_text())["apps"][0]["versions"][0]
+    assert v["localizedDescription"] == "Late notes" and v["size"] == 1234
+    assert anon.post("/api/app-details", headers=_bearer(tok),
+                     json={"id": "com.example.app", "version": "9.9", "whatsNew": "x"}).status_code == 404
+    assert anon.post("/api/app-details", headers=_bearer(tok),
+                     json={"id": "com.example.app", "whatsNew": "x"}).status_code == 400
+
+    _fake_apk(monkeypatch, authed_client.app_module)
+    authed_client.post("/api/publish", content_type="multipart/form-data", data={"file": (io.BytesIO(b"a"), "a.apk")})
+    marker = tmp_path / "fdroid" / ".update-requested"
+    marker.unlink()
+    resp = anon.post("/api/app-details", headers=_bearer(tok),
+                     json={"id": "org.example.agent", "version": "7", "whatsNew": "Android notes"})
+    assert resp.status_code == 200, resp.get_json()
+    notes = tmp_path / "fdroid" / "metadata" / "org.example.agent" / "en-US" / "changelogs" / "7.txt"
+    assert notes.read_text() == "Android notes\n" and marker.exists()
+    assert anon.post("/api/app-details", headers=_bearer(tok),
+                     json={"id": "org.example.agent", "version": "8", "whatsNew": "x"}).status_code == 404
+
+
+def test_mcp_repo_status_reports_server_version(authed_client, live_server):
+    tok = _token(authed_client)["token"]
+    env = {**os.environ, "FEATHER_URL": live_server, "FEATHER_TOKEN": tok}
+    out, err = _mcp(env, [{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"name": "repo_status", "arguments": {}}}])
+    status = json.loads(out[0]["result"]["content"][0]["text"])
+    assert status["server_version"] == "dev", err

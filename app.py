@@ -1980,6 +1980,21 @@ class SourceManager:
                 return False, "Failed to add version"
             return True, " ".join(filter(None, ["Version added successfully", getattr(self, 'ipa_warning', None)]))
     
+    def set_version_notes(self, bundle_identifier, version, text):
+        """Set one published version's release notes (AltStore shows a
+        version's localizedDescription as "what's new"). The binary and every
+        other field are untouched."""
+        with self._lock:
+            source_data = self.load_source()
+            app = next((a for a in (source_data or {}).get('apps', []) if a.get('bundleIdentifier') == bundle_identifier), None)
+            if app is None:
+                return False, "App not found"
+            entry = next((v for v in app.get('versions', []) if isinstance(v, dict) and v.get('version') == version), None)
+            if entry is None:
+                return False, f"Version {version} not found"
+            entry['localizedDescription'] = text
+            return (True, "Release notes updated") if self.save_source(source_data) else (False, "Failed to save source data")
+
     def update_version(self, bundle_identifier, version, version_data, ipa_file=None, download_from_url=False, base_url=None):
         """Update a specific version of an app"""
         with self._lock:
@@ -2276,21 +2291,31 @@ class AndroidRepoManager:
             os.replace(tmp_path, path)
 
     def ensure_repo_icon(self):
-        """config.yml names `repo_icon: icon.png`, which fdroidserver resolves
-        against its working directory (data/fdroid/), not repo/icons/. Nothing
-        ever wrote it, so every rebuild replaced repo/icons/icon.png with a
-        QR-code placeholder. Install the Feather icon when none is there; an
-        operator's own data/fdroid/icon.png is never overwritten."""
-        dest = os.path.join(FDROID_DIR, "icon.png")
-        if os.path.exists(dest):
-            return False
+        """Make the next rebuild publish data/fdroid/icon.png as the repo icon.
+
+        config.yml names `repo_icon: icon.png`, which fdroidserver resolves
+        against its working directory (data/fdroid/). Nothing ever wrote it,
+        so fdroidserver generated a QR-code placeholder at repo/icons/icon.png
+        -- and current fdroidserver only copies the real icon when that file
+        does not exist yet, so the placeholder outlives any fix. Install the
+        Feather icon when data/fdroid/icon.png is missing (an operator's own
+        file is never overwritten), and remove a published repo icon that
+        differs from it so the rebuild copies it afresh."""
+        src = os.path.join(FDROID_DIR, "icon.png")
+        published = os.path.join(FDROID_REPO_DIR, "icons", "icon.png")
         try:
-            os.makedirs(FDROID_DIR, exist_ok=True)
-            shutil.copyfile(os.path.join(app.root_path, "static", "icon-512.png"), dest)
-            return True
+            if not os.path.exists(src):
+                os.makedirs(FDROID_DIR, exist_ok=True)
+                shutil.copyfile(os.path.join(app.root_path, "static", "icon-512.png"), src)
+            if os.path.exists(published):
+                with open(src, "rb") as want, open(published, "rb") as have:
+                    stale = want.read() != have.read()
+                if stale:
+                    os.remove(published)
+                    return True
         except OSError as e:
             logging.warning(f"Could not install the F-Droid repo icon: {e}")
-            return False
+        return False
 
     def _read_metadata(self, package):
         path = self.metadata_path(package)
@@ -2879,6 +2904,13 @@ def requires_publish(f):
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/api/version')
+def version():
+    """Public: the commit the running image was built from (CI passes it as
+    FEATHER_VERSION). The way to check a deploy -- route probes stop working
+    once the probed route exists in both images."""
+    return jsonify({"version": os.environ.get("FEATHER_VERSION", "dev")})
 
 @app.route('/store')
 def store_preview():
@@ -6110,10 +6142,25 @@ def update_app_details():
         if not _token_may_touch(app_id):
             return _scope_refusal(app_id)
         details = _read_details(src)
-        if not details:
+        whats_new = src.get("whatsNew")
+        whats_new = whats_new.strip() if isinstance(whats_new, str) else ""
+        notes_version = src.get("version")
+        notes_version = str(notes_version).strip() if notes_version not in (None, "") else ""
+        if len(whats_new) > 4000:
+            raise ValueError("whatsNew must be at most 4000 characters")
+        if whats_new and not notes_version:
+            raise ValueError("version is required with whatsNew (iOS version string or Android versionCode)")
+        if not details and not whats_new:
             return jsonify({"success": False, "error": "Nothing to update"}), 400
         warnings = []
         if source_manager.get_app(app_id):
+            if whats_new:
+                ok, message = source_manager.set_version_notes(app_id, notes_version, whats_new)
+                if not ok:
+                    return jsonify({"success": False, "error": message}), 404
+            if not details:
+                return jsonify({"success": True, "platform": "ios", "id": app_id, "warnings": warnings,
+                                "app": source_manager.get_app(app_id)})
             ignored = [k for k in details if k not in ("name", "developerName", "summary", "description")]
             if ignored:
                 warnings.append(f"iOS sources have no {', '.join(ignored)}; ignored")
@@ -6123,7 +6170,15 @@ def update_app_details():
             return jsonify({"success": True, "platform": "ios", "id": app_id, "warnings": warnings,
                             "app": source_manager.get_app(app_id)})
         if ANDROID_PACKAGE_RE.match(app_id) and os.path.exists(android_repo.metadata_path(app_id)):
-            android_repo.write_metadata(app_id, _android_fields(details))
+            if whats_new:
+                if not notes_version.isdigit() or not os.path.exists(android_repo.apk_path(app_id, int(notes_version))):
+                    return jsonify({"success": False,
+                                    "error": f"versionCode {notes_version} of {app_id} is not published"}), 404
+                android_repo.write_changelog(app_id, int(notes_version), whats_new)
+            if details:
+                android_repo.write_metadata(app_id, _android_fields(details))
+            else:
+                android_repo.request_update()
             return jsonify({"success": True, "platform": "android", "id": app_id, "warnings": warnings,
                             "pending": True, "metadata": android_repo.read_metadata(app_id)})
         return jsonify({"success": False, "error": f"No app with id {app_id!r}"}), 404

@@ -64,7 +64,7 @@ A branch is not done until CI is green on it.
 1. **Public routes stay unauthenticated:**
    - `/source.json`, `/ipas/…`, `/icons/…`, `/qr`
    - `/fdroid/repo/…`, `/fdroid/qr`
-   - `/store`, `/api/apps`, `/api/app/<id>`
+   - `/store`, `/api/apps`, `/api/app/<id>`, `/api/version`
 
    Phones and F-Droid clients send no credentials; gating any of these breaks
    every subscriber.

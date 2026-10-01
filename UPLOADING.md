@@ -71,7 +71,9 @@ curl -fsS -H "Authorization: Bearer $FEATHER_TOKEN" -H "Content-Type: applicatio
 ```
 
 `id` is the bundle ID or package; the same detail fields as above; only the
-fields sent change. Returns the updated app (iOS) or F-Droid metadata
+fields sent change. To add release notes to a version that is already
+published, send `whatsNew` with `version` (iOS version string, Android
+versionCode) — the binary is untouched. Returns the updated app (iOS) or F-Droid metadata
 (Android, `pending: true` until the next index rebuild).
 
 ### MCP server for agents
@@ -92,10 +94,10 @@ those two env vars). Tools:
 | Tool | Does |
 |---|---|
 | `publish_app` | `path` (local file, streamed) or `url`; optional `whats_new`, `create_if_missing`, and the app details `name`, `developer_name`, `summary`, `description`, `license`, `website`, `source_code`, `categories` (used when the app is created) |
-| `update_app` | `id` plus any of the app-detail fields; only those change |
+| `update_app` | `id` plus any of the app-detail fields; only those change. `whats_new` + `version` sets notes on an already-published version |
 | `list_apps` | `platform`: `ios`, `android` or `all` |
 | `get_app` | by bundle ID or package |
-| `repo_status` | F-Droid subscribe URL, fingerprint, last index build, rejected APKs |
+| `repo_status` | `server_version` (the commit the server was built from), F-Droid subscribe URL, fingerprint, last index build, rejected APKs |
 
 ---
 

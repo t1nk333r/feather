@@ -13,7 +13,7 @@ A self-hosted iOS AltStore/Feather source plus a signed third-party F-Droid repo
 
 - `main` = the branch head after this merge. CI is GitHub Actions; a green `main` publishes `ghcr.io/t1nk333r/feather`, `feather-bot`, `feather-fdroid` (`:latest`, `:main`, `:sha-<short>`). Publishing uses `GHCR_PAT` if set, else `GITHUB_TOKEN` — each package already grants this repo write access.
 - The repo is **public**. History was rewritten on 2026-09-30 to drop private infrastructure details; keep it that way (no LAN IPs, hostnames, proxy addresses).
-- **Whether the latest `main` is deployed is unknown to the repo.** Check with the freshness probe under *Verifying a deployment* (`POST /api/publish` → 401 on a current image, 404 on a stale one).
+- **Whether the latest `main` is deployed is unknown to the repo.** Check with `curl https://<host>/api/version` — it reports the commit the image was built from (CI bakes it in; from the commit after `b5252ec` on). Route probes ("401 = new, 404 = old") stop working as soon as both images have the route; one wrongly certified a deploy on 2026-10-01.
 - The branch `claude/practical-wozniak-tn54z5` is the working branch for agent sessions. The proxy used by those sessions cannot delete remote branches; delete it in the GitHub UI if wanted.
 
 ## What changed on 2026-09-30
@@ -50,10 +50,13 @@ An agent published DAVKeep and nasplayer through the MCP server and reported bac
 - **Repo icon** was a QR-code placeholder: fdroidserver resolves `repo_icon: icon.png` relative to `data/fdroid/`, and nothing wrote it. The app now installs `static/icon-512.png` there once; an operator's own file is never overwritten.
 - **Repo description is empty** — that is an operator setting (Android tab → repo name/description), deliberately session-only. Set it.
 
+**Second round (same day), after the agent verified the deploy:** `update_app` and the signed index carried all DAVKeep fields. Two of my claims were wrong and are fixed: the repo icon stayed a QR code (see the repo-icon trap), and the "401 vs 404" deploy probe could not tell the two images apart (replaced by `GET /api/version`). Also added: release notes for already-published versions (`update_app` with `whats_new` + `version`), and `repo_status` reports `server_version`.
+
 ## Outstanding — operator tasks
 
 Last known state; none of these is visible from the repo, so verify before acting.
 
+0. **Decide nasplayer's release path** (blocks its next publish). The release build is signed with a different key (`CN=NAS Player F-Droid`) from the debug builds on the store, and ships two flavours (`fdroid`, `standard`) with separate keys. Recommended: publish the **`fdroid` flavour with the release key**, starting at a new versionCode (0.1.3 / 50 — 40 is taken by the debug build), then delete the debug versions in the Android tab so the app has one signer. Anyone with the debug build installs over it only after uninstalling — a one-time cost; staying on a debug key forever is worse.
 1. **Set the F-Droid repo name and description** (Android tab) — subscribers currently see an undescribed repo. Then fix DAVKeep's details via `update_app` or the UI if it was created before the summary fix.
 2. **Fix the NeoFreeBird job glob:** `*-sideloaded-Twitter_*.ipa` (or `*-sideloaded-X_*.ipa`). See the trap at the end.
 3. **Use the corrected `compose.yml`** delivered on 2026-09-30 (indentation under top-level `volumes:` had been lost — "volumes must be a mapping"; adds the `release-import` service, `fdroid-index` memory 2048m, `FDROID_UPDATE_TIMEOUT`).
@@ -146,7 +149,7 @@ Each of these cost real debugging time. They are the reason this file exists.
 
 **A cherry-picked branch can silently undo a fix made while it was running.** Plan 085's branch was based before `936e1d4` and edited the same file. After cherry-picking, two things had to be re-checked explicitly: that the identity filter had not come back, and that the test `936e1d4` deleted had not been resurrected. Neither had — but `git` would not have complained if they had. After merging any long-running branch, re-verify the fixes that landed while it ran.
 
-**fdroidserver's `repo_icon` is relative to its working directory, not `repo/icons/`.** `config.yml` says `repo_icon: icon.png`; `index.py` checks `os.path.exists("icon.png")` in `data/fdroid/` and, when it is missing, writes a QR-code placeholder over `repo/icons/icon.png` on **every** run — so a file dropped into `repo/icons/` is silently replaced. Its warning text (`repo_icon "repo/icons/icon.png" does not exist`) names the wrong path, which is what plan 073 recorded. Verified in fdroidserver 2.4.5 source; the pinned master build is assumed to match.
+**fdroidserver's repo icon: the source is relative to its working directory, and a placeholder sticks.** `config.yml` says `repo_icon: icon.png`, resolved against `data/fdroid/` (not `repo/icons/`, despite the warning text plan 073 recorded). When it is missing, fdroidserver writes a QR-code placeholder to `repo/icons/icon.png`. Behaviour then differs by version: 2.4.5 copies `icon.png` on every run, but the **pinned master build only copies when `repo/icons/icon.png` does not exist** (`copy_repo_icon`), so the placeholder survives installing a real icon. `b5252ec` assumed the 2.4.5 behaviour and the live repo kept its QR code; reported by an agent with the pinned image's own `copy_repo_icon`. `ensure_repo_icon` now also deletes a published icon that differs from `data/fdroid/icon.png` before each rebuild request. Lesson: check fdroidserver behaviour against the **pinned image**, not a PyPI release.
 
 **Release variants share every obvious word.** A job must match exactly one asset per platform, and variants often share every obvious word. NeoFreeBird v7.0.0 ships `orionblur-NFB-BHTwitter-sideloaded-Twitter_7.0.0_12.28.1.ipa` and `…-sideloaded-X_7.0.0_12.28.1.ipa`, so `*.ipa`, `*Twitter*.ipa` and `*sideloaded*.ipa` all match both. Key the glob on the part that differs and leave the version out: `*-sideloaded-Twitter_*.ipa`. The error now lists the matching names.
 
@@ -157,8 +160,8 @@ Each of these cost real debugging time. They are the reason this file exists.
 curl -sI https://feather.example.com/source.json | head -1        # 200
 curl -s https://feather.example.com/source.json | python3 -m json.tool | head -5
 
-# that the running image is actually fresh (404 = stale image, 401 = new route present)
-curl -s -o /dev/null -w '%{http_code}\n' -X POST https://feather.example.com/api/certificate/inspect
+# which commit is running (compare with `git rev-parse --short origin/main`); "dev" = not a CI image
+curl -s https://feather.example.com/api/version
 
 # local mode really enabled (the single most common regression)
 docker logs telegram-bot-api 2>&1 | head -2                        # must end with --local
@@ -166,9 +169,6 @@ docker logs telegram-bot-api 2>&1 | head -2                        # must end wi
 # storage backend
 curl -sI https://feather.example.com/ipas/<bundle>/<ver>.ipa | grep -i '^HTTP\|^location'
 # 302 + Location -> Garage;  200 + content-length -> local disk
-
-# agent API: 401 means the route exists (new image); 404 means a stale image
-curl -s -o /dev/null -w '%{http_code}\n' -X POST https://feather.example.com/api/publish
 
 # the worker
 docker logs --tail 30 ipa-ingest-bot                               # names missing vars if misconfigured

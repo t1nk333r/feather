@@ -37,4 +37,4 @@
 
 - No selected implementation plans remain pending. Plan 079 was rejected as already fixed; plans 067–078 and 080–087 are complete, and 086 is research that produced no code.
 - Deferred audit findings remain documented in `plans/README.md`; they are not authorized work until selected.
-- Deployment state is not tracked in the repo; see `plans/HANDOFF.md` → *Verifying a deployment* for the freshness probe.
+- Deployment state is not tracked in the repo; `GET /api/version` reports the running commit.

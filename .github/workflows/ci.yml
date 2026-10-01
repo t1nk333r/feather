@@ -79,7 +79,7 @@ jobs:
 
       - name: Build image
         run: |
-          docker build --label "$SOURCE_LABEL" \
+          docker build --label "$SOURCE_LABEL" --build-arg FEATHER_VERSION="$SHORT" \
             -t "$IMAGE:main" -t "$IMAGE:latest" -t "$IMAGE:sha-$SHORT" .
 
       - name: Smoke-test image
@@ -116,6 +116,10 @@ jobs:
             http://localhost:5000/qr
           docker exec feather-smoke curl -fsS -o /dev/null -w 'index        %{http_code}\n' \
             http://localhost:5000/
+          VERSION="$(docker exec feather-smoke curl -fsS http://localhost:5000/api/version)"
+          echo "version      $VERSION"
+          echo "$VERSION" | grep -q "\"$SHORT\"" \
+            || { echo "FAIL: /api/version does not report $SHORT"; exit 1; }
           docker logs feather-smoke
           docker stop feather-smoke
 

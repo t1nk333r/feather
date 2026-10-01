@@ -27,7 +27,7 @@ import uuid
 from urllib.parse import quote, urlparse
 
 SERVER_NAME = "feather"
-SERVER_VERSION = "1.1.0"
+SERVER_VERSION = "1.2.0"
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 TIMEOUT = float(os.environ.get("FEATHER_TIMEOUT", "600"))
 
@@ -63,11 +63,15 @@ TOOLS = [
     },
     {
         "name": "update_app",
-        "description": "Change an existing app's details by bundle ID or package. Only the fields given change.",
+        "description": ("Change an existing app's details by bundle ID or package. Only the fields given change. "
+                        "To add release notes to an already-published version, pass whats_new with version "
+                        "(iOS version string or Android versionCode)."),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "id": {"type": "string", "description": "Bundle ID (iOS) or package name (Android)"},
+                "whats_new": {"type": "string", "description": "Release notes for `version`"},
+                "version": {"type": "string", "description": "Version the notes belong to (iOS version / Android versionCode)"},
                 "name": {"type": "string", "description": "Display name (max 50)"},
                 "developer_name": {"type": "string", "description": "Developer / author (max 100)"},
                 "summary": {"type": "string", "description": "One-line summary (max 80); iOS subtitle"},
@@ -101,7 +105,8 @@ TOOLS = [
     },
     {
         "name": "repo_status",
-        "description": "Android F-Droid repo status: subscribe URL, fingerprint, last index build and rejected APKs.",
+        "description": ("Server build (server_version = git commit) and Android F-Droid repo status: subscribe URL, "
+                        "fingerprint, last index build and rejected APKs."),
         "inputSchema": {"type": "object", "properties": {}},
     },
 ]
@@ -206,7 +211,11 @@ def _update(feather, args):
     app_id = (args.get("id") or "").strip()
     if not app_id:
         raise FeatherError("`id` is required")
-    return feather.request("POST", "/api/app-details", body=json.dumps({"id": app_id, **_detail_fields(args)}),
+    body = {"id": app_id, **_detail_fields(args)}
+    if args.get("whats_new"):
+        body["whatsNew"] = args["whats_new"]
+        body["version"] = str(args.get("version") or "")
+    return feather.request("POST", "/api/app-details", body=json.dumps(body),
                            headers={"Content-Type": "application/json"})
 
 
@@ -268,7 +277,9 @@ HANDLERS = {
     "update_app": _update,
     "list_apps": _list,
     "get_app": _get,
-    "repo_status": lambda feather, _args: feather.request("GET", "/api/android/status"),
+    "repo_status": lambda feather, _args: {
+        "server_version": feather.request("GET", "/api/version", auth=False).get("version"),
+        **feather.request("GET", "/api/android/status")},
 }
 
 

@@ -35,6 +35,12 @@ RUN groupadd -r altstore && useradd -r -g altstore altstore \
 # Switch to non-root user
 USER altstore
 
+# The commit this image was built from, served at /api/version so a deploy
+# can be checked without guessing which routes the running image has.
+# Placed last: changing it per commit must not bust the layers above.
+ARG FEATHER_VERSION=dev
+ENV FEATHER_VERSION=$FEATHER_VERSION
+
 # Expose port
 EXPOSE 5000
 
