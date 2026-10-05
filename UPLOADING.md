@@ -59,8 +59,12 @@ Android responses carry `"pending": true`: the APK is stored, and it appears in
 the F-Droid index after the sidecar's next rebuild. Errors are
 `{"success": false, "error": "..."}` with `400` (not a valid IPA/APK, bad
 field), `401` (missing, revoked or expired token), `403` (token limited to
-other apps), `404` (`createIfMissing: false`), or `413` (an upload over
-`MAX_CONTENT_LENGTH`; an oversized `url` download is a `400`).
+other apps), `404` (`createIfMissing: false`), `413` (an upload over
+`MAX_CONTENT_LENGTH`; an oversized `url` download is a `400`), or `503` (the
+server could not store it — disk or Garage; retry). A version or bundle ID
+that would share a storage file name with an existing one (`2.0` / `2.0.`)
+is refused with `400` rather than overwriting it. A version older than the
+app's newest is stored but never becomes `versions[0]`.
 
 ### Changing an existing app's details
 
@@ -74,7 +78,9 @@ curl -fsS -H "Authorization: Bearer $FEATHER_TOKEN" -H "Content-Type: applicatio
 fields sent change. To add release notes to a version that is already
 published, send `whatsNew` with `version` (iOS version string, Android
 versionCode) — the binary is untouched. Returns the updated app (iOS) or F-Droid metadata
-(Android, `pending: true` until the next index rebuild).
+(Android, `pending: true` until the next index rebuild). When the same `id`
+exists on iOS **and** Android, send `platform: "ios"` or `"android"`; without
+it the call answers `409`.
 
 ### MCP server for agents
 
@@ -94,9 +100,9 @@ those two env vars). Tools:
 | Tool | Does |
 |---|---|
 | `publish_app` | `path` (local file, streamed) or `url` (downloaded on the agent's machine, then uploaded); optional `whats_new`, `create_if_missing`, and the app details `name`, `developer_name`, `summary`, `description`, `license`, `website`, `source_code`, `categories` (used when the app is created) |
-| `update_app` | `id` plus any of the app-detail fields; only those change. `whats_new` + `version` sets notes on an already-published version |
+| `update_app` | `id` (+ `platform` when the id exists on both) plus any of the app-detail fields; only those change. `whats_new` + `version` sets notes on an already-published version |
 | `list_apps` | `platform`: `ios`, `android` or `all` |
-| `get_app` | by bundle ID or package |
+| `get_app` | by bundle ID or package; an id on both platforms returns both (`platform: "both"`) |
 | `repo_status` | `server_version` (the commit the server was built from), F-Droid subscribe URL, fingerprint, last index build, rejected APKs |
 
 ---

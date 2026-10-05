@@ -87,8 +87,12 @@ def inspect_ipa(path, label="IPA"):
                 raise InspectionError(f"{safe_label}: top-level Info.plist is malformed")
     except InspectionError:
         raise
-    except (OSError, zipfile.BadZipFile):
-        raise InspectionError(f"{safe_label}: IPA archive could not be read")
+    except Exception as e:
+        # Not only OSError/BadZipFile: an unsupported method (Deflate64),
+        # corrupt deflate data (zlib.error) or an encrypted member
+        # (RuntimeError) escaped as a crash in callers that expect only
+        # InspectionError.
+        raise InspectionError(f"{safe_label}: IPA archive could not be read ({type(e).__name__})")
 
     if not isinstance(plist, dict):
         raise InspectionError(f"{safe_label}: top-level Info.plist is not a dictionary")

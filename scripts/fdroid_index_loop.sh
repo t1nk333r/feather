@@ -61,8 +61,11 @@ except Exception:
     pass
 if not isinstance(cfg, dict):
     cfg = {}
-def q(s):  # single-quoted YAML scalar
-    return "'" + str(s).replace("'", "''") + "'"
+def q(s):
+    # A JSON string is a valid YAML 1.2 double-quoted scalar. Single-quoted
+    # scalars broke on a description line starting with '---' or '...'
+    # (document markers) and on control characters: every rebuild failed.
+    return json.dumps(str(s), ensure_ascii=False)
 lines = [
   'repo_url: ' + q(cfg.get('repo_url') or os.environ.get('FDROID_REPO_URL') or 'http://localhost:7000/fdroid/repo'),
   'repo_name: ' + q(cfg.get('name') or 'Feather Android'),

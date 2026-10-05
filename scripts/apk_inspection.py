@@ -101,6 +101,21 @@ def _is_debuggable(apk):
 def inspect_apk(path, label="APK"):
     """Read identity and version out of an APK's binary AndroidManifest.
 
+    Raises only ApkInspectionError: pyaxmlparser can also raise
+    AssertionError, struct.error or its own BrokenAPKError on a truncated
+    resources.arsc or signing block, which callers treated as crashes."""
+    try:
+        return _inspect_apk(path, label)
+    except ApkInspectionError:
+        raise
+    except Exception as e:
+        safe_label = str(label or "APK").replace("\n", " ").replace("\r", " ")[:200]
+        raise ApkInspectionError(f"{safe_label}: Not a readable APK ({type(e).__name__})")
+
+
+def _inspect_apk(path, label="APK"):
+    """Read identity and version out of an APK's binary AndroidManifest.
+
     Returns an ApkInspection or raises ApkInspectionError with an
     operator-readable message. pyaxmlparser returns version_code as a
     *string*; it is converted here so callers never compare "10" < "9".

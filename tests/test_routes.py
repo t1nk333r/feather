@@ -677,6 +677,7 @@ def test_add_app_then_delete_app_round_trip(authed_client):
         "bundleIdentifier": "com.example.newapp",
         "developerName": "New Dev",
         "version": "1.0.0",
+        "downloadURL": "https://example.com/newapp-1.0.0.ipa",
     }
 
     resp = authed_client.post("/api/add-app", json=new_app)

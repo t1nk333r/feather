@@ -30,7 +30,7 @@ import uuid
 from urllib.parse import quote, urlparse
 
 SERVER_NAME = "feather"
-SERVER_VERSION = "1.3.0"
+SERVER_VERSION = "1.4.0"
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 TIMEOUT = float(os.environ.get("FEATHER_TIMEOUT", "600"))
 
@@ -73,6 +73,8 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "id": {"type": "string", "description": "Bundle ID (iOS) or package name (Android)"},
+                "platform": {"type": "string", "enum": ["ios", "android"],
+                             "description": "Required when the same id exists on both platforms"},
                 "whats_new": {"type": "string", "description": "Release notes for `version`"},
                 "version": {"type": "string", "description": "Version the notes belong to (iOS version / Android versionCode)"},
                 "name": {"type": "string", "description": "Display name (max 50)"},
@@ -99,10 +101,12 @@ TOOLS = [
     },
     {
         "name": "get_app",
-        "description": "Get one app by iOS bundle identifier or Android package name.",
+        "description": ("Get one app by iOS bundle identifier or Android package name. If the id exists "
+                        "on both platforms, both records are returned (platform: both)."),
         "inputSchema": {
             "type": "object",
-            "properties": {"id": {"type": "string"}},
+            "properties": {"id": {"type": "string"},
+                           "platform": {"type": "string", "enum": ["ios", "android"]}},
             "required": ["id"],
         },
     },
@@ -154,17 +158,25 @@ class Feather:
                 conn.request(method, self.prefix + path, body=body, headers=headers)
             resp = conn.getresponse()
             raw = resp.read()
-        except OSError as e:
-            raise FeatherError(f"Could not reach Feather at {self.parsed.geturl()}: {e}")
+        except (OSError, http.client.HTTPException, ValueError) as e:
+            raise FeatherError(f"Could not reach Feather at {self.parsed.geturl()}: {type(e).__name__}: {e}")
         finally:
             conn.close()
+        if 300 <= resp.status < 400:
+            # http.client never follows redirects; reporting the 3xx body as a
+            # result made a dropped upload look published.
+            raise FeatherError(f"HTTP {resp.status} redirect to {resp.getheader('Location') or '?'}; "
+                               "set FEATHER_URL to the final URL")
         try:
             data = json.loads(raw) if raw else {}
         except ValueError:
-            data = {"error": raw[:300].decode("utf-8", "replace")}
+            data = None
         if resp.status >= 400:
             msg = data.get("error") if isinstance(data, dict) else None
             raise FeatherError(f"HTTP {resp.status}: {msg or resp.reason}")
+        if data is None:
+            raise FeatherError(f"HTTP {resp.status} but the response is not JSON (a login page or proxy "
+                               f"in front of FEATHER_URL?): {raw[:200].decode('utf-8', 'replace')}")
         return data
 
     def publish_file(self, path, fields):
@@ -215,6 +227,8 @@ def _update(feather, args):
     if not app_id:
         raise FeatherError("`id` is required")
     body = {"id": app_id, **_detail_fields(args)}
+    if args.get("platform"):
+        body["platform"] = str(args["platform"])
     if args.get("whats_new"):
         body["whatsNew"] = args["whats_new"]
         body["version"] = str(args.get("version") or "")
@@ -302,18 +316,35 @@ def _list(feather, args):
 
 
 def _get(feather, args):
-    app_id = (args.get("id") or "").strip()
+    app_id = str(args.get("id") or "").strip()
     if not app_id:
         raise FeatherError("`id` is required")
+    platform = str(args.get("platform") or "").strip().lower()
+    found = {}
+    if platform in ("", "ios"):
+        try:
+            found["ios"] = feather.request("GET", "/api/app/" + quote(app_id, safe=""), auth=False)
+        except FeatherError as e:
+            if not str(e).startswith("HTTP 404"):
+                raise
+    if platform in ("", "android"):
+        for a in feather.request("GET", "/api/android/apps"):
+            if isinstance(a, dict) and a.get("package") == app_id:
+                found["android"] = a
+    if not found:
+        raise FeatherError(f"No app with id {app_id!r}")
+    if len(found) == 1:
+        (name, record), = found.items()
+        return {"platform": name, **record}
+    # The same ID on both platforms (common for cross-platform apps).
+    return {"platform": "both", **found}
+
+
+def _server_version(feather):
     try:
-        return {"platform": "ios", **feather.request("GET", "/api/app/" + quote(app_id, safe=""), auth=False)}
-    except FeatherError as e:
-        if not str(e).startswith("HTTP 404"):
-            raise
-    for a in feather.request("GET", "/api/android/apps"):
-        if a.get("package") == app_id:
-            return {"platform": "android", **a}
-    raise FeatherError(f"No app with id {app_id!r}")
+        return feather.request("GET", "/api/version", auth=False).get("version")
+    except FeatherError:
+        return "unknown (server predates /api/version)"
 
 
 HANDLERS = {
@@ -322,23 +353,34 @@ HANDLERS = {
     "list_apps": _list,
     "get_app": _get,
     "repo_status": lambda feather, _args: {
-        "server_version": feather.request("GET", "/api/version", auth=False).get("version"),
+        "server_version": _server_version(feather),
         **feather.request("GET", "/api/android/status")},
 }
+
+
+def _tool_error(text):
+    return {"content": [{"type": "text", "text": text}], "isError": True}
 
 
 def _call_tool(params):
     name = params.get("name")
     handler = HANDLERS.get(name)
     if handler is None:
-        return {"content": [{"type": "text", "text": f"Unknown tool: {name}"}], "isError": True}
+        return _tool_error(f"Unknown tool: {name}")
+    arguments = params.get("arguments") or {}
+    if not isinstance(arguments, dict):
+        return _tool_error("`arguments` must be an object")
     try:
         feather = Feather(os.environ.get("FEATHER_URL", ""), os.environ.get("FEATHER_TOKEN", ""))
-        result = handler(feather, params.get("arguments") or {})
+        result = handler(feather, arguments)
         is_error = isinstance(result, dict) and result.get("success") is False
         return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}], "isError": is_error}
     except FeatherError as e:
-        return {"content": [{"type": "text", "text": str(e)}], "isError": True}
+        return _tool_error(str(e))
+    except Exception as e:
+        # Anything else (bad argument types, a malformed FEATHER_URL port, an
+        # unexpected server shape) used to kill the stdio server mid-request.
+        return _tool_error(f"{type(e).__name__}: {e}")
 
 
 def handle(msg):
@@ -347,6 +389,8 @@ def handle(msg):
     if msg_id is None:
         return None
     params = msg.get("params") or {}
+    if not isinstance(params, dict):
+        return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32602, "message": "params must be an object"}}
     if method == "initialize":
         requested = params.get("protocolVersion")
         result = {
@@ -367,19 +411,31 @@ def handle(msg):
 
 
 def main():
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
+    # Bytes in, decoded as UTF-8 (the MCP stdio encoding): text-mode stdin
+    # uses the locale code page, which on Windows garbled non-ASCII
+    # arguments. Responses are ASCII JSON, so stdout needs no special care.
+    for raw in sys.stdin.buffer:
+        try:
+            line = raw.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            line = None
+        if line == "":
             continue
         try:
-            msg = json.loads(line)
+            msg = json.loads(line) if line is not None else None
+            if line is None:
+                raise ValueError("not UTF-8")
         except ValueError:
             response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}
         else:
             if not isinstance(msg, dict):
                 response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid request"}}
             else:
-                response = handle(msg)
+                try:
+                    response = handle(msg)
+                except Exception as e:
+                    response = {"jsonrpc": "2.0", "id": msg.get("id"),
+                                "error": {"code": -32603, "message": f"Internal error: {type(e).__name__}: {e}"}}
         if response is not None:
             sys.stdout.write(json.dumps(response) + "\n")
             sys.stdout.flush()

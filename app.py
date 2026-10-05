@@ -30,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from werkzeug.utils import secure_filename
 from werkzeug.datastructures import FileStorage
+from werkzeug.exceptions import HTTPException
 
 import sys
 _SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts")
@@ -169,6 +170,10 @@ ICON_STORAGE_BACKEND = _env("ICON_STORAGE_BACKEND", STORAGE_BACKEND)
 # read them to build and sign the index. With "garage" each APK is also
 # uploaded, byte-identical, and downloads are redirected to the bucket.
 APK_STORAGE_BACKEND = _env("APK_STORAGE_BACKEND", STORAGE_BACKEND)
+# Wall-clock cap for any URL download. requests' timeout bounds each socket
+# read, not the transfer: a server sending a byte every 299 s held a worker
+# thread -- and, on the admin add paths, the catalogue lock -- indefinitely.
+DOWNLOAD_DEADLINE_SECONDS = int(_env("DOWNLOAD_DEADLINE_SECONDS", "1800"))
 # Debuggable APKs are published with a warning by default (fdroidserver itself
 # only warns); set this to refuse them outright.
 APK_REJECT_DEBUGGABLE = _env("APK_REJECT_DEBUGGABLE", "false").strip().lower() in ("1", "true", "yes", "on")
@@ -183,10 +188,10 @@ GARAGE_KEY_PREFIX = _env("GARAGE_KEY_PREFIX", "ipas")
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-# SESSION_COOKIE_SECURE is intentionally left False: this deployment serves
-# plain HTTP on a private network, and setting it would prevent the cookie
-# from ever being stored. Set it to True as soon as TLS terminates in front.
-app.config["SESSION_COOKIE_SECURE"] = False
+# SESSION_COOKIE_SECURE defaults off: the app itself speaks plain HTTP and a
+# Secure cookie is never stored over HTTP. Behind a TLS proxy, set it on so
+# the admin cookie is never sent in clear text.
+app.config["SESSION_COOKIE_SECURE"] = _env("SESSION_COOKIE_SECURE", "false").strip().lower() in ("1", "true", "yes", "on")
 if SECRET_KEY:
     app.secret_key = SECRET_KEY
 else:
@@ -1114,6 +1119,43 @@ def _normalize_news_item(raw, source_data):
     return item
 
 
+_VERSION_NUMBER_RE = re.compile(r"\d+(?:\.\d+)*")
+
+
+def _version_key(version):
+    """Numeric key for ordering versions, or None when there is no number."""
+    match = _VERSION_NUMBER_RE.search(version or "") if isinstance(version, str) else None
+    return tuple(int(part) for part in match.group(0).split(".")) if match else None
+
+
+def _insert_version(versions, entry):
+    """Insert a version entry so versions[0] stays the newest. Clients treat
+    versions[0] as the latest build, so an older backport release imported
+    after a newer one must not land there. Versions without a number keep
+    the old "newest first by arrival" behaviour."""
+    new = _version_key(entry.get("version"))
+    if new is not None:
+        for index, existing in enumerate(versions):
+            current = _version_key(existing.get("version")) if isinstance(existing, dict) else None
+            if current is None or current <= new:
+                versions.insert(index, entry)
+                return index
+        versions.append(entry)
+        return len(versions) - 1
+    versions.insert(0, entry)
+    return 0
+
+
+def _is_http_url(value):
+    if not isinstance(value, str) or not value.strip():
+        return False
+    parsed = urlparse(value.strip())
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
+ALREADY_PRESENT = "already exists; nothing to add"
+
+
 class SourceManager:
     """Manages the AltSource data and file operations"""
     
@@ -1148,6 +1190,30 @@ class SourceManager:
         filename = f"{secure_filename(version)}.ipa"
         return os.path.join(bundle_folder, filename)
     
+    @staticmethod
+    def _storage_conflict(source_data, bundle_id, version):
+        """None, or why (bundle_id, version) cannot be stored safely.
+
+        IPA paths, Garage keys, icon folders and download URLs are built with
+        secure_filename(), which maps distinct strings to one name
+        ('com.app' / 'com.app.', '1.2.3+4' / '1.2.34'). The catalogue compares
+        raw strings, so a colliding ID or version looked new and overwrote
+        another entry's binary."""
+        bundle_key, version_key = secure_filename(bundle_id or ""), secure_filename(version or "")
+        if not bundle_key or not version_key:
+            return f"{bundle_id!r} {version!r} cannot be stored (empty file name after sanitising)"
+        for app in source_data.get("apps", []):
+            other = app.get("bundleIdentifier") or ""
+            if other != bundle_id:
+                if secure_filename(other) == bundle_key:
+                    return f"Bundle identifier {bundle_id!r} collides with existing app {other!r} in storage"
+                continue
+            for entry in app.get("versions", []):
+                existing = entry.get("version") if isinstance(entry, dict) else None
+                if existing and existing != version and secure_filename(existing) == version_key:
+                    return f"Version {version!r} collides with existing version {existing!r} in storage"
+        return None
+
     def check_ipa(self, source, bundle_id, label):
         """Refuse anything that is not a real IPA before it is stored.
 
@@ -1248,11 +1314,17 @@ class SourceManager:
 
             total = 0
             limit = app.config.get("MAX_CONTENT_LENGTH") or (2 * 1024 * 1024 * 1024)
+            deadline = time.monotonic() + DOWNLOAD_DEADLINE_SECONDS
             with open(filepath, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=1 << 20):
                     if not chunk:
                         continue
                     total += len(chunk)
+                    if time.monotonic() > deadline:
+                        f.close()
+                        os.remove(filepath)
+                        filepath = None
+                        raise ValueError(f"Download took longer than {DOWNLOAD_DEADLINE_SECONDS}s")
                     if total > limit:
                         f.close()
                         os.remove(filepath)
@@ -1343,11 +1415,17 @@ class SourceManager:
 
             total = 0
             limit = app.config.get("MAX_CONTENT_LENGTH") or (2 * 1024 * 1024 * 1024)
+            deadline = time.monotonic() + DOWNLOAD_DEADLINE_SECONDS
             with open(filepath, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=1 << 20):
                     if not chunk:
                         continue
                     total += len(chunk)
+                    if time.monotonic() > deadline:
+                        f.close()
+                        os.remove(filepath)
+                        filepath = None
+                        raise ValueError(f"Download took longer than {DOWNLOAD_DEADLINE_SECONDS}s")
                     if total > limit:
                         f.close()
                         os.remove(filepath)
@@ -1507,7 +1585,13 @@ class SourceManager:
                 return False, error, None
             current = self.load_source()
             issues = _scan_catalog_health(candidate)
-            blocking = [issue for issue in issues if issue.get('kind') in ('missing-ipa', 'not-a-zip', 'empty-or-nonpublic-downloadURL')]
+            # Only real artifact errors block. The scan also emits severity
+            # "info" notes under the same kinds (Garage cannot be ZIP-checked;
+            # a downloadURL on another host), which made every restore on
+            # Garage, or with an external URL, fail.
+            blocking = [issue for issue in issues
+                        if issue.get('severity') == 'error'
+                        and issue.get('kind') in ('missing-ipa', 'not-a-zip', 'empty-or-nonpublic-downloadURL')]
             if blocking and not allow_missing_artifacts:
                 return False, "Snapshot references missing or invalid IPA artifacts", None
             diff = _catalog_structural_diff(current or {}, candidate)
@@ -1650,15 +1734,25 @@ class SourceManager:
                         and existing_version.get('version') == version
                         for existing_version in existing_app.get('versions', [])
                     ):
-                        return True, f"Version {version} already exists; nothing to add"
+                        return True, f"Version {version} {ALREADY_PRESENT}"
+
+            conflict = self._storage_conflict(source_data, bundle_id, version)
+            if conflict:
+                return False, conflict
 
             download_url = data.get('downloadURL', '')
             icon_url = data.get('iconURL', '')
+            if not (ipa_file and allowed_file(ipa_file.filename)) and not _is_http_url(download_url):
+                # An empty or relative downloadURL makes AltStore reject the
+                # whole source, not just this app.
+                return False, "An IPA file or an http(s) download URL is required"
 
             existing_app = next((a for a in source_data.get('apps', []) if a.get('bundleIdentifier') == bundle_id), None)
             icon_supplied = bool(icon_file and allowed_icon_file(icon_file.filename)) or bool((icon_url or '').strip())
+            # An icon the uploader supplied always wins over one extracted
+            # from the IPA, for new and existing apps alike.
             if existing_app is not None:
-                self._icon_wanted = not self._has_real_icon(existing_app)
+                self._icon_wanted = not self._has_real_icon(existing_app) and not icon_supplied
             else:
                 self._icon_wanted = not icon_supplied
 
@@ -1690,11 +1784,12 @@ class SourceManager:
 
             # Handle icon file - upload, download, or use URL
             stored_icon_ext = None
+            user_icon_url = None
             if icon_file and allowed_icon_file(icon_file.filename):
                 # Upload icon file
                 stored_icon_ext = self.save_icon_file(icon_file, bundle_id)
                 if stored_icon_ext:
-                    icon_url = self.get_hosted_icon_url(bundle_id, stored_icon_ext, base_url)
+                    icon_url = user_icon_url = self.get_hosted_icon_url(bundle_id, stored_icon_ext, base_url)
                 else:
                     if stored_ipa:
                         self.delete_ipa_file(bundle_id, version)   # no orphan IPA without a catalog entry
@@ -1703,7 +1798,7 @@ class SourceManager:
                 # Download icon from URL
                 stored_icon_ext = self.download_icon_from_url(icon_url, bundle_id)
                 if stored_icon_ext:
-                    icon_url = self.get_hosted_icon_url(bundle_id, stored_icon_ext, base_url)
+                    icon_url = user_icon_url = self.get_hosted_icon_url(bundle_id, stored_icon_ext, base_url)
                 else:
                     if stored_ipa:
                         self.delete_ipa_file(bundle_id, version)   # no orphan IPA without a catalog entry
@@ -1750,10 +1845,13 @@ class SourceManager:
         
             if existing_index is not None:
                 # Update existing app with new version
-                source_data['apps'][existing_index]['versions'].insert(0, new_app['versions'][0])
+                _insert_version(source_data['apps'][existing_index].setdefault('versions', []), new_app['versions'][0])
                 source_data['apps'][existing_index]['addedDate'] = dates['feather_date']
-                if auto_icon_url:
-                    source_data['apps'][existing_index]['iconURL'] = auto_icon_url
+                # Point the catalogue at whichever icon was just stored;
+                # cleanup_variants below deletes every other extension, so
+                # leaving the old iconURL here served a 404.
+                if auto_icon_url or user_icon_url:
+                    source_data['apps'][existing_index]['iconURL'] = auto_icon_url or user_icon_url
                 logging.info(f"Updated app: {data['name']}")
             else:
                 # Add new app
@@ -1796,14 +1894,15 @@ class SourceManager:
                 for item in source_data.get('news') or []:
                     if isinstance(item, dict) and item.get('appID') == bundle_identifier:
                         del item['appID']
-                # Delete IPA files before save (Plan 011 behavior), but only
-                # delete the icon after the catalog removal is committed.
-                if app_to_delete:
-                    for version in app_to_delete.get('versions', []):
-                        self.delete_ipa_file(bundle_identifier, version.get('version', ''))
-
+                # Commit the catalogue first, then delete files (as
+                # delete_version does): a failed save must not leave the live
+                # catalogue pointing at IPAs that are already gone. A failed
+                # file delete afterwards leaves only an orphan.
                 success = self.save_source(source_data)
                 if success:
+                    if app_to_delete:
+                        for version in app_to_delete.get('versions', []):
+                            self.delete_ipa_file(bundle_identifier, version.get('version', ''))
                     self.delete_icon_file(bundle_identifier)
                 return success, "App deleted successfully" if success else "Failed to save source after deletion"
             else:
@@ -1974,9 +2073,14 @@ class SourceManager:
         
             version = version_data['version']
             if any(isinstance(v, dict) and v.get('version') == version for v in app.get('versions', [])):
-                return True, f"Version {version} already exists; nothing to add"
+                return True, f"Version {version} {ALREADY_PRESENT}"
+            conflict = self._storage_conflict(source_data, bundle_identifier, version)
+            if conflict:
+                return False, conflict
 
             download_url = version_data.get('downloadURL', '')
+            if not (ipa_file and allowed_file(ipa_file.filename)) and not _is_http_url(download_url):
+                return False, "An IPA file or an http(s) download URL is required"
             file_size = version_data.get('size', 0)
             self._icon_wanted = not self._has_real_icon(app)
         
@@ -2011,8 +2115,7 @@ class SourceManager:
             if version_data.get('localizedDescription'):
                 new_version['localizedDescription'] = version_data['localizedDescription']
         
-            # Insert at the beginning (latest version first)
-            app['versions'].insert(0, new_version)
+            _insert_version(app['versions'], new_version)
             app['addedDate'] = dates['feather_date']
             auto_icon_url, _ = self._store_extracted_icon(bundle_identifier, base_url)
             if auto_icon_url:
@@ -2547,7 +2650,22 @@ class AndroidRepoManager:
                 os.remove(tmp_path)
             raise
 
+    REPO_NAME_MAX = 100
+    REPO_DESCRIPTION_MAX = 2000
+
     def write_repo_config(self, name, description):
+        """Validated: the values end up in fdroidserver's config.yml, and one
+        it cannot parse makes every later rebuild fail."""
+        for field, value, limit in (("name", name, self.REPO_NAME_MAX),
+                                    ("description", description, self.REPO_DESCRIPTION_MAX)):
+            if not isinstance(value, str):
+                raise ValueError(f"{field} must be a string")
+            if len(value) > limit:
+                raise ValueError(f"{field} must be at most {limit} characters")
+            if any(ord(c) < 32 and c not in "\n\t" or ord(c) == 127 for c in value):
+                raise ValueError(f"{field} contains control characters")
+        name = name.strip() or "Feather Android"
+        description = description.strip()
         base = _safe_base_url()
         repo_url = (base.rstrip('/') + '/fdroid/repo') if base else self.repo_config().get('repo_url', '')
         cfg = {"name": name, "description": description, "repo_url": repo_url}
@@ -2647,6 +2765,10 @@ class AndroidRepoManager:
             raise ValueError(
                 f"APK package {package!r} does not match expected package {expected_package!r}"
             )
+        # Every ingest path (admin upload, Telegram, release importers,
+        # /api/publish) lands here, so the opt-in refusal lives here too.
+        if info.get("debuggable") and APK_REJECT_DEBUGGABLE:
+            raise ValueError("APK is debuggable (android:debuggable=true); upload a release build")
 
         dest = self.apk_path(package, info["version_code"])
         with self._lock:
@@ -2680,7 +2802,14 @@ class AndroidRepoManager:
                 os.remove(src_path)
 
         if not os.path.exists(self.metadata_path(package)):
-            self.write_metadata(package, {"Name": info["app_name"]})
+            # The label is the APK's own, unvalidated: one over the Name limit
+            # used to raise here, after the APK was already in repo/, leaving
+            # it with no metadata, no index rebuild and no icon.
+            name = (info.get("app_name") or package).strip() or package
+            limit = self._LIMITS["Name"]
+            if len(name) > limit:
+                name = name[:limit - 1].rstrip() + "…"
+            self.write_metadata(package, {"Name": name})
         if apk_storage is not None and not apk_storage.put(dest):
             logging.warning("APK %s kept on local disk only; Rebuild Index retries the Garage upload",
                             os.path.basename(dest))
@@ -2835,10 +2964,24 @@ def _record_login_failure(addr, now):
             _login_failures.clear()
 
 
+def _password_fingerprint():
+    return hmac.new(app.secret_key if isinstance(app.secret_key, bytes) else app.secret_key.encode(),
+                    ADMIN_PASSWORD.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def _session_authed():
+    """A signed session cookie is stateless, so it used to outlive a password
+    change. It now carries a fingerprint of ADMIN_PASSWORD: changing the
+    password (or SECRET_KEY) signs every existing session out."""
+    if not session.get('authed'):
+        return False
+    return hmac.compare_digest(str(session.get('pw', '')), _password_fingerprint())
+
+
 def requires_auth(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
-        if not session.get('authed'):
+        if not _session_authed():
             return jsonify({"success": False, "error": "Authentication required"}), 401
         return f(*args, **kwargs)
     return wrapper
@@ -2935,7 +3078,7 @@ def requires_publish(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         g.api_token = None
-        if not session.get('authed'):
+        if not _session_authed():
             g.api_token = _bearer_token()
             if g.api_token is None:
                 return jsonify({"success": False, "error": "Authentication required"}), 401
@@ -2979,6 +3122,7 @@ def login():
         with _login_failures_lock:
             _login_failures.pop(addr, None)
         session['authed'] = True
+        session['pw'] = _password_fingerprint()
         session.permanent = True
         return jsonify({"success": True})
     _record_login_failure(addr, now)
@@ -2992,7 +3136,7 @@ def logout():
 
 @app.route('/api/session')
 def session_status():
-    return jsonify({"authed": bool(session.get('authed'))})
+    return jsonify({"authed": _session_authed()})
 
 @app.route('/source.json')
 def serve_source():
@@ -5863,11 +6007,14 @@ def _download_to_temp(url, suffix):
         response.raise_for_status()
         total = 0
         limit = app.config.get("MAX_CONTENT_LENGTH") or (2 * 1024 * 1024 * 1024)
+        deadline = time.monotonic() + DOWNLOAD_DEADLINE_SECONDS
         with open(filepath, 'wb') as f:
             for chunk in response.iter_content(chunk_size=1 << 20):
                 if not chunk:
                     continue
                 total += len(chunk)
+                if time.monotonic() > deadline:
+                    raise ValueError(f"Download took longer than {DOWNLOAD_DEADLINE_SECONDS}s")
                 if total > limit:
                     raise ValueError(f"Download exceeded size limit of {limit} bytes")
                 f.write(chunk)
@@ -6074,8 +6221,15 @@ def _publish_ios(tmp_path, opts, base_url):
                 new_app["appPermissions"] = {"entitlements": [], "privacy": inspection.privacy}
             ok, message = source_manager.add_app_manual(new_app, ipa_file=fs, base_url=base_url)
             result["created"] = ok
+    if ok and ALREADY_PRESENT in message:
+        # A concurrent retry stored it first: same answer as the early check.
+        return jsonify({**result, "success": True, "added": False, "created": False,
+                        "message": f"Already present: {bundle_id} {version}"}), 200
     if not ok:
-        return jsonify({**result, "success": False, "error": message}), 400
+        # Save/load failures are the server's (disk, Garage); say so, so a
+        # client retries instead of treating it as a bad upload.
+        server_side = message.startswith(("Failed to save", "Failed to load", "Failed to download"))
+        return jsonify({**result, "success": False, "error": message}), 503 if server_side else 400
     if existing and details:
         result["warnings"].append("App details are only set when an app is created; use update_app / "
                                   "POST /api/app-details to change them")
@@ -6195,6 +6349,8 @@ def publish():
         return publisher(temp_path, opts, resolve_base_url())
     except ValueError as e:
         return jsonify({"success": False, "error": str(e)}), 400
+    except HTTPException:
+        raise                    # e.g. 413 RequestEntityTooLarge -> its own status
     except Exception as e:
         logging.error(f"Error publishing via API: {e}")
         return jsonify({"success": False, "error": "Publish failed"}), 500
@@ -6231,7 +6387,20 @@ def update_app_details():
         if not details and not whats_new:
             return jsonify({"success": False, "error": "Nothing to update"}), 400
         warnings = []
-        if source_manager.get_app(app_id):
+        platform = src.get("platform")
+        platform = platform.strip().lower() if isinstance(platform, str) else ""
+        if platform not in ("", "ios", "android"):
+            raise ValueError("platform must be 'ios' or 'android'")
+        on_ios = bool(source_manager.get_app(app_id))
+        on_android = bool(ANDROID_PACKAGE_RE.match(app_id)) and os.path.exists(android_repo.metadata_path(app_id))
+        if not platform and on_ios and on_android:
+            # Cross-platform apps often share one reverse-DNS ID; guessing
+            # silently sent every Android update to the iOS entry.
+            return jsonify({"success": False, "id": app_id,
+                            "error": f"{app_id} exists on iOS and Android; send platform 'ios' or 'android'"}), 409
+        if platform == "ios" and not on_ios or platform == "android" and not on_android:
+            return jsonify({"success": False, "error": f"No {platform} app with id {app_id!r}"}), 404
+        if on_ios and platform != "android":
             if whats_new:
                 ok, message = source_manager.set_version_notes(app_id, notes_version, whats_new)
                 if not ok:
@@ -6247,7 +6416,7 @@ def update_app_details():
                 return jsonify({"success": False, "error": message}), 400
             return jsonify({"success": True, "platform": "ios", "id": app_id, "warnings": warnings,
                             "app": source_manager.get_app(app_id)})
-        if ANDROID_PACKAGE_RE.match(app_id) and os.path.exists(android_repo.metadata_path(app_id)):
+        if on_android:
             if whats_new:
                 if not notes_version.isdigit() or not os.path.exists(android_repo.apk_path(app_id, int(notes_version))):
                     return jsonify({"success": False,
@@ -6262,6 +6431,8 @@ def update_app_details():
         return jsonify({"success": False, "error": f"No app with id {app_id!r}"}), 404
     except ValueError as e:
         return jsonify({"success": False, "error": str(e)}), 400
+    except HTTPException:
+        raise                    # e.g. 413 RequestEntityTooLarge -> its own status
     except Exception as e:
         logging.error(f"Error updating app details via API: {e}")
         return jsonify({"success": False, "error": "Update failed"}), 500
@@ -6386,6 +6557,8 @@ def android_add_apk():
             "package": result["package"],
             "versionCode": result["version_code"],
             "pending": True,
+            "warnings": ["APK is debuggable (android:debuggable=true): publish a release build"]
+                        if result.get("debuggable") else [],
         })
     except ValueError as e:
         return jsonify({"success": False, "error": str(e)}), 400
@@ -6466,6 +6639,8 @@ def android_repo_config():
         description = data.get('description', '')
         android_repo.write_repo_config(name, description)
         return jsonify({"success": True, "message": "Repository configuration updated"})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error updating Android repo config: {str(e)}")
         return jsonify({"success": False, "error": "Failed to update Android repo configuration"}), 400
@@ -6493,6 +6668,11 @@ def android_request_update():
         return jsonify({"success": False, "error": "Failed to request Android index update"}), 400
 
 
+@app.errorhandler(413)
+def too_large(error):
+    return jsonify({"success": False,
+                    "error": f"Upload is larger than MAX_CONTENT_LENGTH ({MAX_CONTENT_LENGTH} bytes)"}), 413
+
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({"error": "Endpoint not found"}), 404
@@ -6511,4 +6691,8 @@ if __name__ == '__main__':
     # without first externalizing the lock and ensuring only one process
     # owns the scheduler.
     from waitress import serve
-    serve(app, host='0.0.0.0', port=PORT, threads=int(_env("WAITRESS_THREADS", "8")))
+    serve(app, host='0.0.0.0', port=PORT, threads=int(_env("WAITRESS_THREADS", "8")),
+          # Waitress's own default (1 GiB) silently undercut MAX_CONTENT_LENGTH
+          # (2 GiB documented). Leave headroom for multipart framing; Flask
+          # enforces the real limit and answers 413 JSON.
+          max_request_body_size=MAX_CONTENT_LENGTH + 16 * 1024 * 1024)

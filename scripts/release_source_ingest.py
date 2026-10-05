@@ -1558,16 +1558,21 @@ def process_job(job, session, tokens, feather, state, apply, timeout, max_bytes,
     try:
         job_ok = True
         for candidate in candidates:
-            if candidate.platform == "android":
-                candidate_ok = _process_android_candidate(
+            process = _process_android_candidate if candidate.platform == "android" else _process_ios_candidate
+            try:
+                candidate_ok = process(
                     job, candidate, session, tokens, feather, state, apply,
                     timeout, max_bytes, summary, tmp_dir,
                 )
-            else:
-                candidate_ok = _process_ios_candidate(
-                    job, candidate, session, tokens, feather, state, apply,
-                    timeout, max_bytes, summary, tmp_dir,
-                )
+            except Exception as e:
+                # A network error mid-download, Feather restarting mid-upload,
+                # a non-JSON response or a malformed archive used to escape
+                # here and end the whole run: later jobs (and this job's other
+                # platform) were never processed, and no summary was printed.
+                logger.error("job %s: %s candidate failed: %s: %s", job.id, candidate.platform,
+                             type(e).__name__, _redact(str(e)))
+                summary.failed += 1
+                candidate_ok = False
             job_ok = job_ok and candidate_ok
         return job_ok
     finally:
