@@ -527,6 +527,11 @@ def handle_document(user_id, chat_id, document, config, bot, pending):
     file_id = document.get("file_id")
     thumbnail = document.get("thumbnail")
 
+    # A new forward always supersedes the previous one. Clearing only on a
+    # validation error left the old file pending when getFile or the mount
+    # check failed, and the user's next /add published that older file.
+    pending.pop(user_id, None)
+
     # Acknowledge before the blocking call: getFile can take minutes for a
     # large file in --local mode, and without this a slow download is
     # indistinguishable from a dead bot. A failed courtesy message must not

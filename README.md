@@ -144,9 +144,18 @@ By default everything is on local disk. With Garage (or any S3-compatible store)
 
 | Setting | Moves | Before switching |
 |---|---|---|
-| `STORAGE_BACKEND=garage` | IPAs (and icons, unless `ICON_STORAGE_BACKEND` says otherwise) | Run `scripts/migrate_ipas_to_garage.py` and `scripts/migrate_icons_to_garage.py` — dry run, then `--apply`. **Switching first makes existing apps uninstallable.** |
+| `STORAGE_BACKEND=garage` | IPAs (and icons, unless `ICON_STORAGE_BACKEND` says otherwise) | Run both migrations (below) — dry run, then `--apply`. **Switching first makes existing apps uninstallable.** |
 | `ICON_STORAGE_BACKEND=garage` | icons only | `scripts/migrate_icons_to_garage.py` |
 | `APK_STORAGE_BACKEND=garage` | APK **downloads** (defaults to `STORAGE_BACKEND`) | Nothing — then click **Rebuild Index** once to upload existing APKs. A failed upload keeps the APK published from local disk. |
+
+The migrations ship in the app image and read the same `.env`. Set the `GARAGE_*` variables first, keep `STORAGE_BACKEND=local` while migrating, and run them next to the live app (they only read `data/` and write to Garage):
+
+```bash
+docker compose run --rm altstore-manager python scripts/migrate_ipas_to_garage.py            # dry run
+docker compose run --rm altstore-manager python scripts/migrate_ipas_to_garage.py --apply
+docker compose run --rm altstore-manager python scripts/migrate_icons_to_garage.py --apply
+# then set STORAGE_BACKEND=garage in .env and: docker compose up -d
+```
 
 All three need the `GARAGE_*` variables, and the bucket must be **publicly readable** at `GARAGE_PUBLIC_BASE_URL` (Garage website access) — otherwise devices get 403s. To offload only APK traffic, set `APK_STORAGE_BACKEND=garage` and leave `STORAGE_BACKEND` alone.
 
@@ -189,7 +198,7 @@ Supports `owner/repo` on github.com and `namespace/project` on gitlab.com — no
 
 Forward an IPA or APK to your bot and confirm with `/add`. It runs against a self-hosted Bot API server (`telegram-bot-api`) because the cloud API caps downloads at 20 MB. Enable with `COMPOSE_PROFILES=telegram` once the `TELEGRAM_*` variables are set — the worker refuses to start without them.
 
-Notifications post catalog events to a chat: `add_app`, `add_version`, `delete_app`, `delete_version`, `android_add_apk`, `health_transition` (all except the last two are on by default).
+Notifications post catalog events to a chat. On by default: `add_app`, `add_version`, `delete_app`, `android_add_apk`. Opt-in via `TELEGRAM_NOTIFY_EVENTS`: `delete_version`, `health_transition`.
 
 ---
 

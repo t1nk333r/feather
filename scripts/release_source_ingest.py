@@ -1522,8 +1522,10 @@ def _process_android_candidate(job, candidate, session, tokens, feather, state, 
         "stage": "publish", "provider": candidate.provider,
         "project": candidate.project, "releaseId": candidate.release_id,
         "releaseTag": candidate.release_tag, "assetId": candidate.asset_id,
-        "assetName": candidate.asset_name, "package": inspection.package,
-        "versionCode": inspection.version_code, "versionName": inspection.version_name,
+        # Field names the server's import history keeps (it drops unknown
+        # keys); the in-app Android paths record the package the same way.
+        "assetName": candidate.asset_name, "bundleIdentifier": inspection.package,
+        "version": inspection.version_name, "buildVersion": str(inspection.version_code),
         "platform": "android", "sha256": sha256_hex,
     })
     return True

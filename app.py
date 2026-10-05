@@ -53,7 +53,10 @@ _DIAG_BUFFER = collections.deque(maxlen=200)
 def _redact_secret(text):
     """Never echo secret env VALUES into the diagnostics buffer (Hard Rule 4)."""
     s = text
-    for name in ("ADMIN_PASSWORD", "SECRET_KEY", "GARAGE_S3_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "GITLAB_TOKEN"):
+    # TELEGRAM_BOT_TOKEN is part of every Bot API URL, so a failed notify()
+    # logged it (requests puts the URL in its exception text).
+    for name in ("ADMIN_PASSWORD", "SECRET_KEY", "GARAGE_S3_SECRET_ACCESS_KEY", "GARAGE_S3_ACCESS_KEY_ID",
+                 "GITHUB_TOKEN", "GITLAB_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_API_HASH"):
         val = os.environ.get(name)
         if val and len(val) >= 4 and val in s:
             s = s.replace(val, "***REDACTED***")
@@ -4765,6 +4768,17 @@ def import_release():
             yield event(stage="publishing", platform="ios")
             history_stage = "publish"
             existing = source_manager.get_app(bundle_id)
+            if existing and any(isinstance(v, dict) and v.get("version") == version
+                                for v in existing.get("versions", [])):
+                # Same rule as auto-import: nothing is stored, so no "Imported"
+                # notification and no 'published' record -- provenance would
+                # otherwise credit this download for the binary already served.
+                history_status = "skipped"
+                history_message = f"Version {version} already present"
+                yield event(stage="done", platform="ios", success=True, skipped=True,
+                            message=f"{bundle_id} {version} is already published; nothing to import",
+                            bundleIdentifier=bundle_id, version=version)
+                return
             fs = FileStorage(stream=open(tmp_path, "rb"), filename=f"{secure_filename(version)}.ipa")
             if existing:
                 ok, message = source_manager.add_version(bundle_id, {
@@ -4822,7 +4836,11 @@ def import_release():
                 yield event(stage="error", platform="ios",
                             error=f"App {bundle_id} is not in the catalog. Tick 'create if missing' with a name + developer to add it.")
                 return
-            if ok:
+            if ok and ALREADY_PRESENT in message:
+                history_status = "skipped"          # a concurrent import stored it first
+                yield event(stage="done", platform="ios", success=True, skipped=True, message=message,
+                            bundleIdentifier=bundle_id, version=version)
+            elif ok:
                 notify("add_version", f"Imported {bundle_id} {version} from {provider}:{project}\n{base_url}/source.json")
                 history_status = "published"
                 yield event(stage="done", platform="ios", success=True, message=message, bundleIdentifier=bundle_id, version=version)

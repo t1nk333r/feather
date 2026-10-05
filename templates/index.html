@@ -913,7 +913,7 @@
                 </div>
                 <div class="form-group">
                     <label>Asset Pattern:</label>
-                    <input aria-label="Asset Pattern" type="text" name="assetGlob" value="*.ipa" placeholder="*.ipa — for both platforms, e.g. *.{ipa,apk} — or, in regex mode, .*arm64-v8a\.apk to pin one ABI">
+                    <input aria-label="Asset Pattern" type="text" name="assetGlob" value="*.ipa" placeholder="*.ipa — for both platforms use * (only .ipa/.apk assets are considered) — or, in regex mode, .*arm64-v8a\.apk to pin one ABI">
                     <small style="display: block; margin-top: 5px; color: var(--label-secondary); font-size: 0.85em;">Glob mode: a shell-style pattern like <code>*.apk</code>. Regex mode: a full-match regular expression, e.g. <code>.*arm64-v8a\.apk</code> to pin exactly one asset out of several.</small>
                 </div>
                 <div class="form-group">

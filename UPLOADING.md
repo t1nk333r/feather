@@ -130,9 +130,11 @@ body. **Never pass it as a command-line argument** — argv is world-readable vi
 A `200` from `/api/login` is not by itself proof of a usable session: check
 `/api/session` before uploading, or a later `401` will look like a broken route.
 
-There is no login rate limiting and no CSRF token (`SameSite=Lax` is the
-defence; see `plans/010-login-session-auth.md`). Treat the password as the whole
-of the authorisation story and scope it accordingly.
+Logins are throttled: 5 failed attempts per client address per 60 s, then
+`429` with `Retry-After`. Behind a reverse proxy every client shares the
+proxy's address, so a script that keeps failing locks out the admin UI too —
+prefer an API token (section 0) for unattended clients. There is no CSRF token
+(`SameSite=Lax` is the defence; see `plans/010-login-session-auth.md`).
 
 ## 2. The multipart contract
 

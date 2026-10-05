@@ -121,6 +121,12 @@ jobs:
             python -c "import app, pyaxmlparser, yaml, boto3, waitress; print('imports ok')" \
             | grep -q "imports ok"
           echo "ok: runtime dependencies import"
+          for m in migrate_ipas_to_garage migrate_icons_to_garage; do
+            docker run --rm -e ADMIN_PASSWORD=ci-smoke-test-not-a-real-password -e DATA_DIR=/tmp/feather-data \
+              "$IMAGE:main" python "scripts/$m.py" --help | grep -q -- "--apply" \
+              || { echo "FAIL: scripts/$m.py missing from the image or broken"; exit 1; }
+          done
+          echo "ok: Garage migration scripts ship in the image"
           docker run -d --rm --name feather-smoke \
             -e DATA_DIR=/tmp/feather-data \
             -e ADMIN_PASSWORD=ci-smoke-test-not-a-real-password "$IMAGE:main"

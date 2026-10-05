@@ -26,6 +26,9 @@ COPY scripts/ipa_inspection.py ./scripts/ipa_inspection.py
 COPY scripts/apk_inspection.py ./scripts/apk_inspection.py
 # Plan 087: app.py imports certificate_inspection at import time.
 COPY scripts/certificate_inspection.py ./scripts/certificate_inspection.py
+# The README's Garage switch runs these inside this image (dry run by default).
+COPY scripts/migrate_ipas_to_garage.py ./scripts/migrate_ipas_to_garage.py
+COPY scripts/migrate_icons_to_garage.py ./scripts/migrate_icons_to_garage.py
 
 # Create non-root user for security
 RUN groupadd -r altstore && useradd -r -g altstore altstore \

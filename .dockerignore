@@ -30,6 +30,13 @@
 # main image must ship it or the smoke stage fails on `python -c import app`.
 !scripts/certificate_inspection.py
 
+# One-shot local -> Garage migrations, run in the app container with
+# `docker compose run --rm altstore-manager python scripts/migrate_...`;
+# the README's storage switch depends on them and the deployment is
+# image-only, so they must ship in the main image.
+!scripts/migrate_ipas_to_garage.py
+!scripts/migrate_icons_to_garage.py
+
 # Dockerfile.fdroid needs this one script for the opt-in Android/F-Droid
 # sidecar (Plan 073) -- same rule, do NOT blanket-exclude scripts/
 !scripts/fdroid_index_loop.sh
