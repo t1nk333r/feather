@@ -1,7 +1,9 @@
 """Inspection of an APK's binary AndroidManifest via pyaxmlparser."""
 
 import re
+import struct
 import zipfile
+import zlib
 from dataclasses import dataclass
 
 
@@ -9,20 +11,66 @@ ANDROID_PACKAGE_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*
 
 # pyaxmlparser inflates AndroidManifest.xml and resources.arsc fully in
 # memory; a 1 MB APK with a bomb in resources.arsc otherwise costs ~2 GB.
+# The caps are checked against the real inflated size (_member_sizes).
 # The manifest is tiny in practice; resources.arsc is only read for the
 # app label, so an oversized one is skipped rather than rejected.
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_RESOURCES_BYTES = 64 * 1024 * 1024
 
 
+_SIZE_CAPS = {"AndroidManifest.xml": MAX_MANIFEST_BYTES, "resources.arsc": MAX_RESOURCES_BYTES}
+
+
+def _inflated_size(fh, info, cap):
+    """Bytes the member really inflates to, counted up to cap + 1.
+
+    zipfile itself stops at the declared size, so it cannot be used to
+    measure this; the raw stream is inflated here with a bounded output."""
+    fh.seek(info.header_offset)
+    local = fh.read(30)
+    if len(local) != 30 or local[:4] != b"PK\x03\x04":
+        raise ValueError("bad local header")
+    name_len, extra_len = struct.unpack("<HH", local[26:30])
+    fh.seek(info.header_offset + 30 + name_len + extra_len)
+    remaining = info.compress_size
+    if info.compress_type == zipfile.ZIP_STORED:
+        return remaining
+    if info.compress_type != zipfile.ZIP_DEFLATED:
+        return cap + 1                       # Android only uses stored/deflated
+    inflater = zlib.decompressobj(-zlib.MAX_WBITS)
+    total = 0
+    while total <= cap and not inflater.eof:
+        data = inflater.unconsumed_tail
+        if not data:
+            if remaining <= 0:
+                break
+            data = fh.read(min(1 << 20, remaining))
+            if not data:
+                break
+            remaining -= len(data)
+        total += len(inflater.decompress(data, cap + 1 - total))
+    return total
+
+
 def _member_sizes(path):
-    """Declared uncompressed sizes, or None when the zip is unreadable (let
-    pyaxmlparser produce its usual error)."""
+    """Real inflated sizes of the members pyaxmlparser reads whole, or None
+    when the zip is unreadable (let pyaxmlparser produce its usual error).
+
+    The declared size in the central directory is attacker-written: a 1 MB
+    APK declaring a 1000-byte manifest inflated to 2.1 GB inside pyaxmlparser.
+    A size above a cap means "too large", whatever the header claims."""
+    sizes = {}
     try:
-        with zipfile.ZipFile(path) as archive:
-            return {info.filename: info.file_size for info in archive.infolist()}
-    except (OSError, zipfile.BadZipFile, ValueError):
+        with zipfile.ZipFile(path) as archive, open(path, "rb") as fh:
+            for name, cap in _SIZE_CAPS.items():
+                try:
+                    info = archive.getinfo(name)
+                except KeyError:
+                    continue
+                sizes[name] = max(_inflated_size(fh, info, cap), info.file_size)
+    except (OSError, zipfile.BadZipFile, ValueError, zlib.error, struct.error):
         return None
+    return sizes
 
 
 class ApkInspectionError(RuntimeError):
@@ -158,9 +206,11 @@ def extract_apk_icon(path):
         with zipfile.ZipFile(path) as archive:
             names = archive.namelist()
             sizes = {i.filename: i.file_size for i in archive.infolist()}
+            real = _member_sizes(path)
             ordered = []
-            if (sizes.get("AndroidManifest.xml", 0) <= MAX_MANIFEST_BYTES
-                    and sizes.get("resources.arsc", 0) <= MAX_RESOURCES_BYTES):
+            if (real is not None
+                    and real.get("AndroidManifest.xml", 0) <= MAX_MANIFEST_BYTES
+                    and real.get("resources.arsc", 0) <= MAX_RESOURCES_BYTES):
                 try:
                     from pyaxmlparser import APK
                     apk = APK(path)

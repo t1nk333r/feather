@@ -266,7 +266,8 @@ What stays your job:
 
 - **TLS** at the reverse proxy — the app speaks plain HTTP on port 5000.
 - **Rate limiting uploads** and any wider abuse protection at the proxy.
-- **Download-from-URL** features fetch whatever an admin gives them, including LAN addresses. Nothing is published unless it's a valid IPA/APK, but treat the admin password accordingly.
+- **Download-from-URL** features fetch whatever an admin gives them, including LAN addresses. Nothing is published unless it's a valid IPA/APK, but treat the admin password accordingly. API tokens cannot use them: `/api/publish` refuses `url` from a token (the MCP server downloads on the agent's side instead).
+- **Uploaded binaries are untrusted.** IPA bundle IDs and versions are restricted to safe characters, APK size caps are checked against the real inflated size, and icon decoding is bounded (≤1024 px for Apple's CgBI format, ≤4096 px otherwise, stored at ≤512 px).
 
 The public, unauthenticated routes — clients fetch these without credentials, so they must stay public:
 

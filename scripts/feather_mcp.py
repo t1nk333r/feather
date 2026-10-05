@@ -21,13 +21,16 @@ import http.client
 import json
 import mimetypes
 import os
+import shutil
 import ssl
 import sys
+import tempfile
+import urllib.request
 import uuid
 from urllib.parse import quote, urlparse
 
 SERVER_NAME = "feather"
-SERVER_VERSION = "1.2.0"
+SERVER_VERSION = "1.3.0"
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 TIMEOUT = float(os.environ.get("FEATHER_TIMEOUT", "600"))
 
@@ -219,6 +222,39 @@ def _update(feather, args):
                            headers={"Content-Type": "application/json"})
 
 
+MAX_DOWNLOAD_BYTES = int(os.environ.get("FEATHER_MAX_DOWNLOAD_BYTES", str(2 * 1024 ** 3)))
+
+
+def _download(url):
+    """Stream `url` to a private temp dir; return the file path. The name
+    keeps the URL's file name so the server's extension fallback still works."""
+    if urlparse(url).scheme not in ("http", "https"):
+        raise FeatherError("url must be an http(s) URL")
+    workdir = tempfile.mkdtemp(prefix="feather-mcp-")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": f"feather-mcp/{SERVER_VERSION}"})
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            name = os.path.basename(urlparse(resp.geturl()).path) or "download.bin"
+            path = os.path.join(workdir, name.replace(os.sep, "_"))
+            total = 0
+            with open(path, "wb") as out:
+                while True:
+                    chunk = resp.read(1 << 20)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_DOWNLOAD_BYTES:
+                        raise FeatherError(f"Download is larger than {MAX_DOWNLOAD_BYTES} bytes")
+                    out.write(chunk)
+        return path
+    except FeatherError:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise
+    except (OSError, ValueError) as e:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise FeatherError(f"Could not download {url}: {e}")
+
+
 def _publish(feather, args):
     path, url = args.get("path"), args.get("url")
     if bool(path) == bool(url):
@@ -226,11 +262,19 @@ def _publish(feather, args):
     fields = _detail_fields(args)
     if args.get("whats_new"):
         fields["whatsNew"] = args["whats_new"]
-    if "create_if_missing" in args:
-        fields["createIfMissing"] = "true" if args["create_if_missing"] else "false"
+    if args.get("create_if_missing") is not None:
+        flag = args["create_if_missing"]
+        if isinstance(flag, str):
+            flag = flag.strip().lower() not in ("false", "0", "no", "off", "")
+        fields["createIfMissing"] = "true" if flag else "false"
     if url:
-        return feather.request("POST", "/api/publish", body=json.dumps({"url": url, **fields}),
-                               headers={"Content-Type": "application/json"})
+        # The server refuses `url` from API tokens (it would let a token make
+        # the server fetch internal hosts), so download here and upload.
+        tmp = _download(url)
+        try:
+            return feather.publish_file(tmp, fields)
+        finally:
+            shutil.rmtree(os.path.dirname(tmp), ignore_errors=True)
     path = os.path.expanduser(path)
     if not os.path.isfile(path):
         raise FeatherError(f"No such file: {path}")

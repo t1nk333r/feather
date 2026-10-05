@@ -43,6 +43,15 @@ class IpaInspection:
         return "unknown"
 
 
+# Identity strings end up in URLs, file names and the admin UI. Apple allows
+# letters, digits, "." and "-" in a bundle ID; "_" is tolerated because real
+# patched builds use it. Versions in the wild include "408.1.0_TH" and
+# "1.0 (2)". Quotes, angle brackets, slashes and control characters are never
+# legitimate and are refused before anything is stored.
+BUNDLE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
+VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._+()~-]{0,63}$")
+
+
 def _clean_optional(value):
     if not isinstance(value, (str, int, float)):
         return None
@@ -92,6 +101,11 @@ def inspect_ipa(path, label="IPA"):
         raise InspectionError(
             f"{safe_label}: IPA plist is missing a bundle identifier or version"
         )
+    if not BUNDLE_ID_RE.match(bundle_identifier):
+        raise InspectionError(f"{safe_label}: IPA declares an invalid bundle identifier: {bundle_identifier[:80]!r}")
+    for field, value in (("version", version), ("build version", build_version)):
+        if not VERSION_RE.match(value):
+            raise InspectionError(f"{safe_label}: IPA declares an invalid {field}: {value[:80]!r}")
 
     platforms_raw = plist.get("CFBundleSupportedPlatforms")
     if isinstance(platforms_raw, list):

@@ -52,6 +52,16 @@ An agent published DAVKeep and nasplayer through the MCP server and reported bac
 
 **Second round (same day), after the agent verified the deploy:** `update_app` and the signed index carried all DAVKeep fields. Two of my claims were wrong and are fixed: the repo icon stayed a QR code (see the repo-icon trap), and the "401 vs 404" deploy probe could not tell the two images apart (replaced by `GET /api/version`). Also added: release notes for already-published versions (`update_app` with `whats_new` + `version`), and `repo_status` reports `server_version`.
 
+### Audit (2026-10-02, at `59f8fe4`)
+
+A workflow audit (9 dimensions, each finding checked by a code-reading refuter and a reproducer) confirmed 60 findings, 33 after dedup. Three planned gap areas (Garage maintenance routes, UI-vs-API contract, health monitor) and the synthesis step were cut off by a usage limit and **were not audited**.
+
+**Fixed (security batch, #1-#6):** stored XSS via IPA identity in inline admin handlers (data-* attributes + identity validation in `inspect_ipa`); token-triggered server-side fetches (`url` refused for tokens, MCP downloads locally); APK zip-bomb caps now measure the real inflated size; CgBI/icon decoding bounded; GitLab token only sent to GitLab; auto-import enforces the configured bundleIdentifier. Also fixed on the way: emoji-first app names breaking the Apps tab; MCP `create_if_missing: "false"`.
+
+**Still open, deployment breakers:** blank `.env.example` keys crash or silently override defaults (`int('')` on `PORT=`); `compose.yml`'s `${FDROID_KEYSTORE_PASSWORD:?}` fails every compose command without Android; local IPA/icon URL downloads fail with EXDEV across the `ipas/`/`icons/` bind mounts; nested bind mounts are created root-owned on first `up`.
+
+**Still open, correctness:** secure_filename collisions between distinct IDs/versions; Waitress 1 GiB body cap vs documented 2 GiB (oversize -> 500); APK label >50 chars half-publishes; repo description YAML escaping can break every rebuild (**avoid lines starting with `---`/`...`**); `APK_REJECT_DEBUGGABLE` only on `/api/publish`; app-details can't reach an Android app sharing an iOS ID; restore blocked on Garage/external URLs; Add App on an existing ID deletes the live icon; empty downloadURL publishable; backport releases become versions[0]; one network error aborts the cron run; sessions not revocable; root-owned bind mounts; MCP 3xx/non-JSON treated as success, non-FeatherError kills the server, Windows stdin encoding; URL downloads lack an overall deadline. Plus 8 low items (diagnostics shows the Telegram token, docs drift, etc.).
+
 ## Outstanding — operator tasks
 
 Last known state; none of these is visible from the repo, so verify before acting.

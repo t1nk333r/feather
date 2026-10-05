@@ -3335,8 +3335,14 @@ def _decode_cgbi_png(data):
     width, height, bit_depth, color_type = struct.unpack(">IIBB", ihdr[:10])
     if bit_depth != 8 or color_type != 6:
         raise ValueError(f"unsupported CgBI IHDR (bit_depth={bit_depth}, color_type={color_type})")
+    # The pixel loops below are pure Python and run under the catalogue lock;
+    # an attacker-declared 8192x8192 icon cost 76 s of CPU and 1.1 GB. Apple
+    # icons are at most 1024x1024.
+    if not (0 < width <= CGBI_MAX_SIDE and 0 < height <= CGBI_MAX_SIDE):
+        raise ValueError(f"CgBI icon {width}x{height} exceeds {CGBI_MAX_SIDE}px")
 
-    raw = zlib.decompress(bytes(idat), -zlib.MAX_WBITS)
+    expected = (width * 4 + 1) * height
+    raw = zlib.decompressobj(-zlib.MAX_WBITS).decompress(bytes(idat), expected + 1)
 
     bpp = 4
     stride = width * bpp
@@ -3402,8 +3408,27 @@ def _decode_cgbi_png(data):
     return Image.frombytes("RGBA", (width, height), bytes(out))
 
 
+CGBI_MAX_SIDE = 1024
+ICON_MAX_SIDE = 4096       # refuse to decode anything larger (decompression bomb)
+ICON_STORED_SIDE = 512     # what is stored and served; matches the APK path
+
+
+def _open_icon(raw):
+    """Decode an untrusted icon image, refusing oversized dimensions before
+    any pixel data is inflated (Image.open only reads the header)."""
+    img = Image.open(io.BytesIO(raw))
+    if img.size[0] > ICON_MAX_SIDE or img.size[1] > ICON_MAX_SIDE:
+        raise ValueError(f"icon {img.size[0]}x{img.size[1]} is implausibly large")
+    img.load()
+    return img
+
+
 def _save_temp_png(img):
-    """Save a PIL Image as a standard PNG to a new temp file and return its path."""
+    """Save a PIL Image as a standard PNG (at most ICON_STORED_SIDE square)
+    to a new temp file and return its path."""
+    if img.size[0] > ICON_STORED_SIDE or img.size[1] > ICON_STORED_SIDE:
+        img = img.copy()
+        img.thumbnail((ICON_STORED_SIDE, ICON_STORED_SIDE))
     fd, path = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix=".png")
     os.close(fd)
     img.save(path, format="PNG")
@@ -3457,9 +3482,7 @@ def _extract_ipa_icon(ipa_path):
                 for name in names:
                     if "/" not in name and name.lower() == wanted:
                         try:
-                            img = Image.open(io.BytesIO(_zip_read_capped(zf, name)))
-                            img.load()
-                            return _save_temp_png(img)
+                            return _save_temp_png(_open_icon(_zip_read_capped(zf, name)))
                         except Exception:
                             pass
 
@@ -3547,9 +3570,7 @@ def _extract_ipa_icon(ipa_path):
 
             # 5. A minority of IPAs ship standard (non-CgBI) PNGs here.
             try:
-                img = Image.open(io.BytesIO(raw))
-                img.load()
-                return _save_temp_png(img)
+                return _save_temp_png(_open_icon(raw))
             except Exception:
                 pass
 
@@ -3948,6 +3969,12 @@ def _run_auto_import_ios_candidate(job_obj, job, base_url, session_req, tokens, 
             tmp_path, candidate.asset_name, job_obj, candidate)
         bundle_id = inspection.bundle_identifier
         version = inspection.version
+        # A configured bundleIdentifier is a check, as in the one-off import
+        # and the cron importer: an upstream IPA claiming another app's ID
+        # must not become a new version of that other app.
+        if job_obj.bundle_identifier and bundle_id != job_obj.bundle_identifier:
+            raise ValueError(f"IPA bundle id {bundle_id} does not match the job's bundleIdentifier "
+                             f"({job_obj.bundle_identifier}); not published")
         detected_name = inspection.name
         preflight = {
             "platform": inspection.platform,
@@ -6103,6 +6130,14 @@ def publish():
             os.close(fd)
             upload.save(temp_path)
         elif url:
+            if g.get("api_token") is not None:
+                # A server-side fetch on a token's behalf would let any token
+                # holder -- including an app-scoped one -- reach hosts only the
+                # server can see (LAN, localhost, metadata endpoints) and read
+                # back what answered. Tokens upload; the MCP server downloads
+                # `url` on the agent's machine and uploads it.
+                return jsonify({"success": False, "error": "url is not accepted with an API token; "
+                                "download the file and upload it (the MCP server does this for you)"}), 400
             if len(url) > 2048 or urlparse(url).scheme not in ("http", "https"):
                 return jsonify({"success": False, "error": "url must be an http(s) URL"}), 400
             filename = os.path.basename(urlparse(url).path)

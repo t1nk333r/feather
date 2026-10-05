@@ -25,15 +25,15 @@ curl -fsS -H "Authorization: Bearer $FEATHER_TOKEN" \
   -F whatsNew="$(cat changelogs/42.txt)" \
   https://apps.example.com/api/publish
 
-# or have Feather download it
-curl -fsS -H "Authorization: Bearer $FEATHER_TOKEN" -H "Content-Type: application/json" \
-  -d '{"url": "https://example.com/builds/app-release.apk", "whatsNew": "Bug fixes"}' \
-  https://apps.example.com/api/publish
+# `url` (Feather downloads the file) works only with an admin session: a
+# server-side fetch on a token's behalf would let a token reach hosts only
+# the server can see. With a token, upload the file; the MCP server's
+# publish_app does that for you when given a url.
 ```
 
 | Field | Default | Notes |
 |---|---|---|
-| `file` or `url` | — | exactly one; `.ipa` or `.apk` (detected from the archive, not the name) |
+| `file` or `url` | — | exactly one; `.ipa` or `.apk` (detected from the archive, not the name). `url` is refused (400) with an API token — upload instead |
 | `whatsNew` | — | this version's release notes (≤4000). iOS: the version's `localizedDescription`. Android: `metadata/<pkg>/en-US/changelogs/<versionCode>.txt`; F-Droid clients show the newest version's notes |
 | `name` (≤50), `developerName` (≤100), `summary` (≤80), `description` (≤4000) | from the file / `Unknown` | app details — applied only when the app is **created**; change them later with `/api/app-details`. iOS uses `summary` as the subtitle. With no `summary`, the first line of `description` is used |
 | `license`, `website`, `sourceCode` (http(s) URLs), `categories` (comma list or array, ≤10) | — | Android only (F-Droid metadata); sent for an iOS app they come back as a warning |
@@ -93,7 +93,7 @@ those two env vars). Tools:
 
 | Tool | Does |
 |---|---|
-| `publish_app` | `path` (local file, streamed) or `url`; optional `whats_new`, `create_if_missing`, and the app details `name`, `developer_name`, `summary`, `description`, `license`, `website`, `source_code`, `categories` (used when the app is created) |
+| `publish_app` | `path` (local file, streamed) or `url` (downloaded on the agent's machine, then uploaded); optional `whats_new`, `create_if_missing`, and the app details `name`, `developer_name`, `summary`, `description`, `license`, `website`, `source_code`, `categories` (used when the app is created) |
 | `update_app` | `id` plus any of the app-detail fields; only those change. `whats_new` + `version` sets notes on an already-published version |
 | `list_apps` | `platform`: `ios`, `android` or `all` |
 | `get_app` | by bundle ID or package |

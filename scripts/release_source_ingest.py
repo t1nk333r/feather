@@ -89,6 +89,7 @@ class FeatherAuthError(RuntimeError):
 
 GITHUB_API_BASE = "https://api.github.com"
 GITLAB_API_BASE = "https://gitlab.com/api/v4"
+GITLAB_AUTH_HOST = (urlparse(GITLAB_API_BASE).hostname or "").lower()
 GITHUB_API_VERSION = "2026-03-10"
 
 # Ceiling, not a delay -- a fast transfer returns immediately. Overridable
@@ -670,7 +671,9 @@ def gitlab_select_candidate(job, releases, now=None):
                 asset_name=link.get("name") or "",
                 declared_size=None,
                 download_url=url,
-                auth_host=host,
+                # The credential belongs to the GitLab instance, not to
+                # whatever host the release link points at.
+                auth_host=GITLAB_AUTH_HOST,
                 release_body=release.get("description") or "",
                 platform=platform,
             ))
@@ -796,6 +799,14 @@ def stream_download(
             headers["PRIVATE-TOKEN"] = token
 
     current_url = candidate.download_url
+    # Provider credentials go only to the provider's own host (auth_host),
+    # and never again once a redirect has left the first host. A GitLab
+    # release link may point at any allowedDownloadHosts host; sending
+    # PRIVATE-TOKEN there handed the operator's PAT to a third party.
+    auth_host = (getattr(candidate, "auth_host", "") or "").lower()
+    first_host = (urlparse(current_url).hostname or "").lower()
+    if first_host != auth_host:
+        headers = {k: v for k, v in headers.items() if k not in ("Authorization", "PRIVATE-TOKEN")}
     current_headers = dict(headers)
     hops = 0
     resp = None

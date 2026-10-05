@@ -2415,7 +2415,7 @@
             }
 
             appsList.innerHTML = apps.map(app => {
-                const firstLetter = (app.name || 'App').charAt(0).toUpperCase();
+                const firstLetter = escapeHtml((Array.from(app.name || 'App')[0] || 'A').toUpperCase());
                 const iconUrl = app.iconURL || '';
                 // Create SVG data URI as fallback
                 const svgFallback = `data:image/svg+xml,${encodeURIComponent(`<svg width="60" height="60" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="60" fill="#c6371c"/><text x="50%" y="50%" font-family="Arial" font-size="24" fill="#ffffff" text-anchor="middle" dy=".3em">${firstLetter}</text></svg>`)}`;
@@ -2423,7 +2423,7 @@
                     <div class="app-card">
                         <div class="app-header">
                             <div class="app-header-with-icon">
-                                <img src="${escapeHtml(iconUrl || svgFallback)}" alt="${escapeHtml(app.name)}" class="app-icon" onerror="this.onerror=null; this.src='${svgFallback}'">
+                                <img src="${escapeHtml(iconUrl || svgFallback)}" alt="${escapeHtml(app.name)}" class="app-icon" data-fallback="${escapeHtml(svgFallback)}" onerror="this.onerror=null; this.src=this.dataset.fallback">
                                 <div class="app-info">
                                     <h3>${escapeHtml(app.name)}</h3>
                                     <p><strong>Bundle ID:</strong> ${escapeHtml(app.bundleIdentifier)}</p>
@@ -2436,8 +2436,8 @@
                                 </div>
                             </div>
                             <div class="btn-group">
-                                <button class="btn btn-secondary" onclick="editApp('${escapeHtml(app.bundleIdentifier)}')">Edit</button>
-                                <button class="btn btn-danger" onclick="deleteApp('${escapeHtml(app.bundleIdentifier)}')">Delete</button>
+                                <button class="btn btn-secondary" data-arg="${escapeHtml(app.bundleIdentifier)}" onclick="editApp(this.dataset.arg)">Edit</button>
+                                <button class="btn btn-danger" data-arg="${escapeHtml(app.bundleIdentifier)}" onclick="deleteApp(this.dataset.arg)">Delete</button>
                             </div>
                         </div>
                         <p>${escapeHtml(app.localizedDescription?.substring(0, 150) || 'No description available')}${app.localizedDescription?.length > 150 ? '...' : ''}</p>
@@ -2541,7 +2541,7 @@
                 
                 // Set app icon
                 const iconImg = document.getElementById('editAppIcon');
-                const firstLetter = (app.name || 'App').charAt(0).toUpperCase();
+                const firstLetter = escapeHtml((Array.from(app.name || 'App')[0] || 'A').toUpperCase());
                 const svgFallback = `data:image/svg+xml,${encodeURIComponent(`<svg width="60" height="60" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="60" fill="#c6371c"/><text x="50%" y="50%" font-family="Arial" font-size="24" fill="#ffffff" text-anchor="middle" dy=".3em">${firstLetter}</text></svg>`)}`;
                 const iconUrl = app.iconURL || svgFallback;
                 iconImg.src = iconUrl;
@@ -2602,14 +2602,14 @@
                             <div style="margin-bottom: 10px;">
                                 <input type="file" class="version-ipa-file" data-version="${escapeHtml(version.version)}" accept=".ipa" style="margin-bottom: 8px; width: 100%;">
                                 <div style="display: flex; align-items: center; gap: 8px; margin-top: 10px;">
-                                    <input type="checkbox" class="version-download-from-url" data-version="${escapeHtml(version.version)}" onchange="toggleVersionDownloadMethod('${escapeHtml(version.version)}')" style="width: auto; margin: 0; cursor: pointer;">
+                                    <input type="checkbox" class="version-download-from-url" data-version="${escapeHtml(version.version)}" data-arg="${escapeHtml(version.version)}" onchange="toggleVersionDownloadMethod(this.dataset.arg)" style="width: auto; margin: 0; cursor: pointer;">
                                     <label style="margin: 0; font-weight: normal; cursor: pointer; user-select: none; font-size: 0.9em;">Use URL instead</label>
                                 </div>
                             </div>
                             <input type="url" class="version-ipa-url" data-version="${escapeHtml(version.version)}" placeholder="https://example.com/app.ipa" style="display: none; width: 100%; margin-top: 8px;">
                         </div>
-                        <button type="button" class="btn" style="margin-top: 10px; padding: 8px 16px; font-size: 0.9em;" onclick="updateVersion('${escapeHtml(version.version)}', this)">Update Version</button>
-                        <button type="button" class="btn btn-danger" style="margin-top: 10px; margin-left: 10px; padding: 8px 16px; font-size: 0.9em;" onclick="deleteVersion('${escapeHtml(version.version)}', this)">Delete Version</button>
+                        <button type="button" class="btn" style="margin-top: 10px; padding: 8px 16px; font-size: 0.9em;" data-arg="${escapeHtml(version.version)}" onclick="updateVersion(this.dataset.arg, this)">Update Version</button>
+                        <button type="button" class="btn btn-danger" style="margin-top: 10px; margin-left: 10px; padding: 8px 16px; font-size: 0.9em;" data-arg="${escapeHtml(version.version)}" onclick="deleteVersion(this.dataset.arg, this)">Delete Version</button>
                     </div>
                 </div>
             `;
@@ -3090,7 +3090,7 @@
                         return `
                             <div style="display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-top: 1px solid var(--separator);">
                                 <span>${escapeHtml(v.versionName || String(v.versionCode))} (${v.versionCode}) &middot; ${sizeText} &middot; ${badge}</span>
-                                <button class="btn btn-danger" style="padding: 6px 12px; font-size: 0.85em;" onclick="deleteAndroidVersion('${escapeHtml(app.package)}', ${v.versionCode})">Delete</button>
+                                <button class="btn btn-danger" style="padding: 6px 12px; font-size: 0.85em;" data-arg="${escapeHtml(app.package)}" onclick="deleteAndroidVersion(this.dataset.arg, ${v.versionCode})">Delete</button>
                             </div>
                         `;
                     }).join('');
@@ -3112,7 +3112,7 @@
                                 </div>
                                 </div>
                                 <div class="btn-group">
-                                    <button class="btn btn-danger" onclick="deleteAndroidApp('${escapeHtml(app.package)}')">Delete App</button>
+                                    <button class="btn btn-danger" data-arg="${escapeHtml(app.package)}" onclick="deleteAndroidApp(this.dataset.arg)">Delete App</button>
                                 </div>
                             </div>
                             ${versionsHtml}
@@ -3375,15 +3375,15 @@
                                     <strong>Last run:</strong> ${escapeHtml(lastRun)}
                                 </div>
                                 <label style="display: flex; align-items: center; gap: 8px; margin: 10px 0 0; font-weight: normal; font-size: 0.9em; cursor: pointer; user-select: none;">
-                                    <input type="checkbox" ${job.enabled ? 'checked' : ''} style="width: auto; margin: 0; cursor: pointer;" onchange="toggleAutoImportJobEnabled('${escapeHtml(job.id)}', this)">
+                                    <input type="checkbox" ${job.enabled ? 'checked' : ''} style="width: auto; margin: 0; cursor: pointer;" data-arg="${escapeHtml(job.id)}" onchange="toggleAutoImportJobEnabled(this.dataset.arg, this)">
                                     Enabled
                                 </label>
                             </div>
                             <div class="btn-group">
-                                <button class="btn btn-secondary" onclick="runAutoImport('${escapeHtml(job.id)}', this)">Run Now</button>
-                                <button class="btn btn-secondary" onclick="showJobImportHistory('${escapeHtml(job.id)}', this)">Import history</button>
-                                <button class="btn btn-secondary" onclick="editAutoImportJob('${escapeHtml(job.id)}')">Edit</button>
-                                <button class="btn btn-danger" onclick="deleteAutoImportJob('${escapeHtml(job.id)}')">Delete</button>
+                                <button class="btn btn-secondary" data-arg="${escapeHtml(job.id)}" onclick="runAutoImport(this.dataset.arg, this)">Run Now</button>
+                                <button class="btn btn-secondary" data-arg="${escapeHtml(job.id)}" onclick="showJobImportHistory(this.dataset.arg, this)">Import history</button>
+                                <button class="btn btn-secondary" data-arg="${escapeHtml(job.id)}" onclick="editAutoImportJob(this.dataset.arg)">Edit</button>
+                                <button class="btn btn-danger" data-arg="${escapeHtml(job.id)}" onclick="deleteAutoImportJob(this.dataset.arg)">Delete</button>
                             </div>
                         </div>
                         <div class="import-history" style="display:none; margin-top:12px;"></div>
