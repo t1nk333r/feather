@@ -60,9 +60,27 @@ jobs:
           echo "requirements.txt: $REQ   Dockerfile.bot: $BOT"
           [ "$REQ" = "$BOT" ] || { echo "FAIL: requests pins have drifted"; exit 1; }
 
+  compose:
+    name: compose.yml + .env.example render
+    runs-on: ubuntu-latest
+    # The README Quick start is `cp .env.example .env` + three values. Compose
+    # interpolates every service before filtering by profile, so a required
+    # variable in an opt-in service breaks every command for everyone.
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          set -eu
+          cp .env.example .env
+          sed -i 's/^ADMIN_PASSWORD=.*/ADMIN_PASSWORD=ci/' .env
+          docker compose config --services | tee /tmp/services
+          grep -qx altstore-manager /tmp/services
+          if grep -qx fdroid-index /tmp/services; then echo "FAIL: opt-in service active by default"; exit 1; fi
+          COMPOSE_PROFILES=android FDROID_KEYSTORE_PASSWORD=ci docker compose config --services | grep -qx fdroid-index
+          echo "ok: renders without Android, and with the android profile"
+
   images:
     name: Images (build, smoke, publish on main)
-    needs: [test, pin-drift]
+    needs: [test, pin-drift, compose]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -122,6 +140,20 @@ jobs:
             || { echo "FAIL: /api/version does not report $SHORT"; exit 1; }
           docker logs feather-smoke
           docker stop feather-smoke
+          # Blank keys from `cp .env.example .env` reach the container as
+          # empty strings (docker --env-file behaves like compose env_file);
+          # the app must treat them as unset, not crash on int('').
+          grep -v '^ADMIN_PASSWORD=' .env.example > /tmp/ci.env
+          echo 'ADMIN_PASSWORD=ci-smoke-test-not-a-real-password' >> /tmp/ci.env
+          docker run -d --rm --name feather-envfile --env-file /tmp/ci.env "$IMAGE:main"
+          for i in $(seq 1 30); do
+            if docker exec feather-envfile curl -fsS -o /dev/null http://localhost:5000/source.json; then break; fi
+            sleep 1
+          done
+          docker exec feather-envfile curl -fsS -o /dev/null http://localhost:5000/source.json \
+            || { docker logs feather-envfile; echo "FAIL: app did not start with the shipped .env.example"; exit 1; }
+          echo "ok: starts with the blank keys of .env.example"
+          docker stop feather-envfile
 
       - name: Build bot image
         run: |

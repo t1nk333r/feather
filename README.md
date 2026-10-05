@@ -48,8 +48,8 @@ Everything runs with Docker Compose. Android, Telegram and the cron importer are
 cp .env.example .env
 # set at least ADMIN_PASSWORD, SECRET_KEY and PUBLIC_BASE_URL (e.g. https://apps.example.com)
 
-mkdir -p data
-sudo chown -R 999:999 data      # the container runs as uid 999; a fresh bind mount is root-owned
+mkdir -p data/ipas data/icons data/fdroid   # compose mounts these separately; create them now,
+sudo chown -R 999:999 data      # or Docker creates them as root and the app cannot start (it runs as uid 999)
 
 docker compose pull
 docker compose up -d
@@ -57,7 +57,7 @@ docker compose up -d
 
 Open `http://<host>:7000`, sign in with `ADMIN_PASSWORD`, and add an app. Put a TLS reverse proxy in front before exposing it to the internet.
 
-> Skipping the `chown` is the most common first-run failure: the app starts, but every write fails with `PermissionError`.
+> Skipping the `mkdir`/`chown` is the most common first-run failure: `PermissionError` at startup (a root-owned `data/fdroid`) or on every write. Fix with `sudo chown -R 999:999 data` and `docker compose up -d`.
 
 ## Subscribing devices
 

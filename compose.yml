@@ -122,8 +122,11 @@ services:
   # /fdroid/repo/. Runs as root INSIDE the container by necessity (the
   # upstream image is not usable by any other uid); it has no ports and
   # its only mount is this one directory.
-  # FDROID_KEYSTORE_PASSWORD is required only when the android profile is
-  # active; Compose fails early with a clear message when it is missing.
+  # FDROID_KEYSTORE_PASSWORD is needed only with the android profile. It is
+  # NOT written as ${VAR:?...}: Compose interpolates every service before it
+  # filters by profile, so a required variable here broke every compose
+  # command on deployments without Android. The sidecar itself refuses to
+  # start without it and names the variable (fdroid_index_loop.sh).
   fdroid-index:
     profiles: ["android"]
     image: ghcr.io/t1nk333r/feather-fdroid:latest
@@ -134,7 +137,7 @@ services:
     depends_on:
       - altstore-manager
     environment:
-      - FDROID_KEYSTORE_PASSWORD=${FDROID_KEYSTORE_PASSWORD:?FDROID_KEYSTORE_PASSWORD must be set in .env}
+      - FDROID_KEYSTORE_PASSWORD=${FDROID_KEYSTORE_PASSWORD:-}
       - FDROID_UPDATE_INTERVAL=${FDROID_UPDATE_INTERVAL:-15}
       - FDROID_UPDATE_TIMEOUT=${FDROID_UPDATE_TIMEOUT:-1800}
       - FDROID_REPO_URL=${PUBLIC_BASE_URL:-}/fdroid/repo

@@ -77,7 +77,19 @@ logging.getLogger().addHandler(_ring_handler)
 app = Flask(__name__)
 
 # Configuration
-DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
+def _env(name, default=None):
+    """os.environ.get, except that a blank value counts as unset.
+
+    `cp .env.example .env` ships keys like `PORT=`; Compose passes those into
+    the container as empty strings, which os.environ.get returns instead of
+    the default -- int('') crashed startup, and blank TELEGRAM_NOTIFY_EVENTS,
+    ICON/APK_STORAGE_BACKEND or GARAGE_S3_REGION silently replaced their
+    documented defaults."""
+    value = os.environ.get(name)
+    return default if value is None or value.strip() == "" else value
+
+
+DATA_DIR = _env("DATA_DIR", "/app/data")
 SOURCE_FILE = os.path.join(DATA_DIR, "source.json")
 UPLOAD_FOLDER = os.path.join(DATA_DIR, "uploads")
 IPA_FOLDER = os.path.join(DATA_DIR, "ipas")
@@ -120,53 +132,53 @@ ICON_MIME_TYPES = {
 }
 
 # Environment-driven configuration
-SECRET_KEY = os.environ.get("SECRET_KEY")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")
+SECRET_KEY = _env("SECRET_KEY")
+ADMIN_PASSWORD = _env("ADMIN_PASSWORD")
 if not ADMIN_PASSWORD:
     raise RuntimeError(
         "ADMIN_PASSWORD is not set. Refusing to start with unauthenticated "
         "admin routes. Set it in .env (compose.yml loads it via env_file)."
     )
-PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL")
-PORT = int(os.environ.get("PORT", "5000"))
-MAX_CONTENT_LENGTH = int(os.environ.get("MAX_CONTENT_LENGTH", 2 * 1024 * 1024 * 1024))
+PUBLIC_BASE_URL = _env("PUBLIC_BASE_URL")
+PORT = int(_env("PORT", "5000"))
+MAX_CONTENT_LENGTH = int(_env("MAX_CONTENT_LENGTH", 2 * 1024 * 1024 * 1024))
 
 # Added by plan 014 -- optional Telegram notification on catalog changes.
 # Disabled unless both TELEGRAM_BOT_TOKEN and TELEGRAM_NOTIFY_CHAT_ID are
 # set; see notify() below. TELEGRAM_BOT_TOKEN and BOT_API_BASE_URL are
 # shared with plan 013's bot ingest script where that has landed --
 # neither is redeclared in .env.example for this plan.
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_NOTIFY_CHAT_ID = os.environ.get("TELEGRAM_NOTIFY_CHAT_ID")
-TELEGRAM_API_BASE = os.environ.get("BOT_API_BASE_URL", "https://api.telegram.org")
+TELEGRAM_BOT_TOKEN = _env("TELEGRAM_BOT_TOKEN")
+TELEGRAM_NOTIFY_CHAT_ID = _env("TELEGRAM_NOTIFY_CHAT_ID")
+TELEGRAM_API_BASE = _env("BOT_API_BASE_URL", "https://api.telegram.org")
 TELEGRAM_NOTIFY_EVENTS = set(
     event.strip()
-    for event in os.environ.get("TELEGRAM_NOTIFY_EVENTS", "add_app,add_version,delete_app,android_add_apk").split(",")
+    for event in _env("TELEGRAM_NOTIFY_EVENTS", "add_app,add_version,delete_app,android_add_apk").split(",")
     if event.strip()
 )
 
 # IPA storage backend (Plan 011). Defaults to "local" -- today's behaviour,
 # unchanged -- so merging this is a no-op until the flag is deliberately
 # flipped. See GarageIpaStorage below for the "refuse to start" validation.
-STORAGE_BACKEND = os.environ.get("STORAGE_BACKEND", "local")
+STORAGE_BACKEND = _env("STORAGE_BACKEND", "local")
 # Icons can use a different backend than IPAs (e.g. IPAs on Garage, icons on
 # local disk at /app/data/icons). Defaults to STORAGE_BACKEND for backward
 # compatibility, so existing single-backend deployments are unaffected.
-ICON_STORAGE_BACKEND = os.environ.get("ICON_STORAGE_BACKEND", STORAGE_BACKEND)
+ICON_STORAGE_BACKEND = _env("ICON_STORAGE_BACKEND", STORAGE_BACKEND)
 # APKs always keep a local copy in data/fdroid/repo -- fdroidserver must
 # read them to build and sign the index. With "garage" each APK is also
 # uploaded, byte-identical, and downloads are redirected to the bucket.
-APK_STORAGE_BACKEND = os.environ.get("APK_STORAGE_BACKEND", STORAGE_BACKEND)
+APK_STORAGE_BACKEND = _env("APK_STORAGE_BACKEND", STORAGE_BACKEND)
 # Debuggable APKs are published with a warning by default (fdroidserver itself
 # only warns); set this to refuse them outright.
-APK_REJECT_DEBUGGABLE = os.environ.get("APK_REJECT_DEBUGGABLE", "false").strip().lower() in ("1", "true", "yes", "on")
-GARAGE_S3_ENDPOINT = os.environ.get("GARAGE_S3_ENDPOINT")
-GARAGE_S3_REGION = os.environ.get("GARAGE_S3_REGION", "garage")
-GARAGE_S3_ACCESS_KEY_ID = os.environ.get("GARAGE_S3_ACCESS_KEY_ID")
-GARAGE_S3_SECRET_ACCESS_KEY = os.environ.get("GARAGE_S3_SECRET_ACCESS_KEY")
-GARAGE_BUCKET = os.environ.get("GARAGE_BUCKET")
-GARAGE_PUBLIC_BASE_URL = os.environ.get("GARAGE_PUBLIC_BASE_URL")
-GARAGE_KEY_PREFIX = os.environ.get("GARAGE_KEY_PREFIX", "ipas")
+APK_REJECT_DEBUGGABLE = _env("APK_REJECT_DEBUGGABLE", "false").strip().lower() in ("1", "true", "yes", "on")
+GARAGE_S3_ENDPOINT = _env("GARAGE_S3_ENDPOINT")
+GARAGE_S3_REGION = _env("GARAGE_S3_REGION", "garage")
+GARAGE_S3_ACCESS_KEY_ID = _env("GARAGE_S3_ACCESS_KEY_ID")
+GARAGE_S3_SECRET_ACCESS_KEY = _env("GARAGE_S3_SECRET_ACCESS_KEY")
+GARAGE_BUCKET = _env("GARAGE_BUCKET")
+GARAGE_PUBLIC_BASE_URL = _env("GARAGE_PUBLIC_BASE_URL")
+GARAGE_KEY_PREFIX = _env("GARAGE_KEY_PREFIX", "ipas")
 
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
 app.config["SESSION_COOKIE_HTTPONLY"] = True
@@ -354,6 +366,37 @@ def _classify_storage_error(e):
     return "error", code
 
 
+def _move_file(src, dest):
+    """os.replace that also works across mounts.
+
+    compose.yml mounts ./data/ipas, ./data/icons and ./data/fdroid as their
+    own bind mounts beside ./data, and rename(2) never crosses a mount, so a
+    temp file in data/uploads cannot be renamed into them (EXDEV): every
+    IPA/icon download-from-URL failed on the default deployment. Fall back
+    to copy + fsync + atomic replace inside the destination directory."""
+    try:
+        os.replace(src, dest)
+        return
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+    fd, staged = tempfile.mkstemp(dir=os.path.dirname(dest) or ".", prefix=f".{os.path.basename(dest)}.", suffix=".part")
+    os.close(fd)
+    try:
+        shutil.copyfile(src, staged)
+        with open(staged, "rb") as copied:
+            os.fsync(copied.fileno())
+        os.replace(staged, dest)
+        staged = None
+    finally:
+        if staged and os.path.exists(staged):
+            try:
+                os.remove(staged)
+            except OSError:
+                pass
+    os.remove(src)
+
+
 class LocalIpaStorage:
     """IPA storage on local disk -- today's behaviour, unchanged.
 
@@ -390,7 +433,7 @@ class LocalIpaStorage:
             if hasattr(src, "save"):
                 src.save(filepath)
             else:
-                os.replace(src, filepath)
+                _move_file(src, filepath)
             file_size = get_file_size(filepath)
             logging.info(f"Saved IPA file: {filepath} ({file_size} bytes)")
             return file_size
@@ -726,7 +769,7 @@ class LocalIconStorage:
             if hasattr(src, "save"):
                 src.save(temporary)
             else:
-                os.replace(src, temporary)
+                _move_file(src, temporary)
             os.replace(temporary, destination)
             temporary = None
             return True
@@ -2910,7 +2953,7 @@ def version():
     """Public: the commit the running image was built from (CI passes it as
     FEATHER_VERSION). The way to check a deploy -- route probes stop working
     once the probed route exists in both images."""
-    return jsonify({"version": os.environ.get("FEATHER_VERSION", "dev")})
+    return jsonify({"version": _env("FEATHER_VERSION", "dev")})
 
 @app.route('/store')
 def store_preview():
@@ -4288,7 +4331,7 @@ def _run_all_enabled_jobs(base_url):
     data = load_auto_import()
     jobs = [j for j in data.get('jobs', []) if j.get('enabled', True)]
     session_req = requests.Session()
-    tokens = {"github": os.environ.get("GITHUB_TOKEN"), "gitlab": os.environ.get("GITLAB_TOKEN")}
+    tokens = {"github": _env("GITHUB_TOKEN"), "gitlab": _env("GITLAB_TOKEN")}
     results = {}
     for job in jobs:
         try:
@@ -4476,8 +4519,8 @@ def inspect_import_release():
     try:
         job = _release_job_from_payload(payload, job_id="ui-inspect")
         tokens = {
-            "github": os.environ.get("GITHUB_TOKEN"),
-            "gitlab": os.environ.get("GITLAB_TOKEN"),
+            "github": _env("GITHUB_TOKEN"),
+            "gitlab": _env("GITLAB_TOKEN"),
         }
         releases = release_ingest.inspect_release_assets(
             job, requests.Session(), tokens, timeout=30, limit=5
@@ -4762,7 +4805,7 @@ def import_release():
     def run():
         try:
             job = _release_job_from_payload(payload)
-            tokens = {"github": os.environ.get("GITHUB_TOKEN"), "gitlab": os.environ.get("GITLAB_TOKEN")}
+            tokens = {"github": _env("GITHUB_TOKEN"), "gitlab": _env("GITLAB_TOKEN")}
             session_req = requests.Session()
             yield event(stage="resolving")
             candidates = release_ingest.select_candidate(job, session_req, tokens, timeout=30)
@@ -4927,7 +4970,7 @@ def auto_import_run():
         payload = request.get_json(silent=True) or {}
         job_id = (payload.get('id') or '').strip()
         base_url = resolve_base_url()
-        tokens = {"github": os.environ.get("GITHUB_TOKEN"), "gitlab": os.environ.get("GITLAB_TOKEN")}
+        tokens = {"github": _env("GITHUB_TOKEN"), "gitlab": _env("GITLAB_TOKEN")}
         if job_id:
             data = load_auto_import()
             job = next((j for j in data.get('jobs', []) if j.get('id') == job_id), None)
@@ -6468,4 +6511,4 @@ if __name__ == '__main__':
     # without first externalizing the lock and ensuring only one process
     # owns the scheduler.
     from waitress import serve
-    serve(app, host='0.0.0.0', port=PORT, threads=int(os.environ.get("WAITRESS_THREADS", "8")))
+    serve(app, host='0.0.0.0', port=PORT, threads=int(_env("WAITRESS_THREADS", "8")))
