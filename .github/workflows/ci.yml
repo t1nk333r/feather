@@ -179,6 +179,31 @@ jobs:
           fi
           echo "ok: refuses to run unconfigured, names the missing variables"
 
+      - name: Mirror fdroid base image
+        # Dockerfile.fdroid builds FROM our GHCR copy of the upstream digest:
+        # GitLab deletes the previous digest on every weekly rebuild, which
+        # broke three pins in a row. Copy it while upstream still has it;
+        # --preserve-digests fails rather than produce a different digest.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          BASE="$(grep -oP '^FROM \K\S+' Dockerfile.fdroid)"
+          DIGEST="${BASE#*@}"
+          case "$BASE" in ghcr.io/t1nk333r/feather-fdroid-base@sha256:*) ;; *)
+            echo "FAIL: Dockerfile.fdroid must build FROM ghcr.io/t1nk333r/feather-fdroid-base@sha256:..."; exit 1;; esac
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "$GITHUB_TOKEN" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+          if skopeo inspect --raw "docker://$BASE" >/dev/null 2>&1; then
+            echo "ok: mirror already has $DIGEST"
+          else
+            skopeo copy --preserve-digests \
+              "docker://registry.gitlab.com/fdroid/docker-executable-fdroidserver@$DIGEST" \
+              "docker://ghcr.io/t1nk333r/feather-fdroid-base:${DIGEST#sha256:}"
+            skopeo inspect --raw "docker://$BASE" >/dev/null
+            echo "ok: mirrored $DIGEST from upstream"
+          fi
+
       - name: Build fdroid image
         run: |
           docker build -f Dockerfile.fdroid --label "$SOURCE_LABEL" \

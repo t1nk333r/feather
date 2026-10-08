@@ -1,19 +1,24 @@
 # Plan 073: the fdroid-index sidecar. The official fdroidserver image plus
 # one loop script. Runs as root by necessity -- see scripts/fdroid_index_loop.sh.
-# Pinned by digest because the upstream `master` tag is mutable. Refresh by
-# rerunning the real-APK init/update spike, then recording the new digest and
-# fdroid version here. GitLab purges old digests when `master` is rebuilt --
-# the 2026-08-28 pin (e5853810) vanished on 2026-09-19 and broke the build.
-# The 2026-09-19 pin (63d73424, fdroid 3cbbe810) was purged in turn and
-# answered MANIFEST_UNKNOWN on 2026-09-30.
-# This pin: tag: master as of 2026-09-30. The image config (and so its
-# revision label) could not be fetched from the review environment; master
-# HEAD was a35fdfdd (2026-09-14). The real-APK spike was run 2026-09-30 with
-# fdroidserver 3cbbe810 AND a35fdfdd from source, driving this repo's loop
-# script and AndroidRepoManager.add_apk: new apps and newer versions publish
-# into index-v1/v2 + entry.jar; unsigned APKs are skipped and bad-signature
-# APKs archived, both with exit 0 (see `rejected` in last-update.json).
-FROM registry.gitlab.com/fdroid/docker-executable-fdroidserver@sha256:e13f368211de9fc7ebbe321858f23cb619f0155277b9b8b52e2027e2cb9318ba
+# Pinned by digest because the upstream `master` tag is mutable -- and built
+# FROM this repo's own GHCR copy of that digest, because GitLab rebuilds
+# `master` every Sunday and deletes the previous digest: three pins in a row
+# (e5853810, 63d73424, e13f3682) vanished within days and broke every build.
+# CI's "Mirror fdroid base image" step copies
+#   registry.gitlab.com/fdroid/docker-executable-fdroidserver@<digest>
+# to ghcr.io/t1nk333r/feather-fdroid-base with skopeo --preserve-digests, so
+# the digest below is the upstream image byte for byte. To refresh: put the
+# new upstream digest here (while upstream still has it) and push; CI mirrors
+# it before building. Record the fdroidserver revision and what changed.
+#
+# This pin: upstream master rebuilt 2026-10-04 (scheduled pipeline), which
+# clones fdroidserver master = c21c177f (2026-10-01). The only change since
+# a35fdfdd -- the revision the 2026-09-30 real-APK spike ran against (new
+# apps and newer versions publish into index-v1/v2 + entry.jar; unsigned
+# APKs skipped, bad-signature APKs archived, both exit 0) -- is a docstring
+# in fdroidserver/__main__.py. The image config itself could not be fetched
+# from the review environment (GitLab's blob CDN is blocked there).
+FROM ghcr.io/t1nk333r/feather-fdroid-base@sha256:75f6b88ef13a63fc5c49aa4c4dde35607c4a364d22cf57d534aa75c54effa56d
 COPY scripts/fdroid_index_loop.sh /usr/local/bin/fdroid-index-loop
 RUN chmod 755 /usr/local/bin/fdroid-index-loop
 WORKDIR /repo
