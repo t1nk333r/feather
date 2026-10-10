@@ -80,10 +80,15 @@ services:
       - altstore-manager
     env_file:
       - .env
+    environment:
+      - TELEGRAM_PENDING_DB=/var/lib/feather-bot/pending.sqlite3
     volumes:
       # Read-only: the worker reads files the API server wrote. It has no
       # business modifying that directory.
       - telegram-bot-api-data:/var/lib/telegram-bot-api:ro
+      # Persistent storage for pending Telegram uploads (sqlite3 db).
+      # Survives bot restarts so /add doesn't lose the pending file.
+      - ./data/telegram-pending:/var/lib/feather-bot
     restart: unless-stopped
 
   # Plan 029: one-shot GitHub/GitLab release importer, launched by host
