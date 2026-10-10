@@ -203,6 +203,8 @@ Before enabling Telegram, create `data/telegram-pending` and give it ownership
 `101:101` with mode `0700`, matching the worker's Compose user. A new forward
 replaces that user's previous pending upload; forwarding with no pending upload
 is valid. `/add` clears the persisted entry only after successful publication.
+Detected IPA metadata, including build version and minimum iOS version, is
+restored with the pending upload so a post-restart `/add` keeps those values.
 
 Notifications post catalog events to a chat. On by default: `add_app`, `add_version`, `delete_app`, `android_add_apk`. Opt-in via `TELEGRAM_NOTIFY_EVENTS`: `delete_version`, `health_transition`.
 

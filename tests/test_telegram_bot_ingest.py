@@ -1284,3 +1284,53 @@ def test_pending_store_pop_removes_only_selected_persisted_upload(tmp_path):
     assert pending.pop(ALLOWED_USER_ID, None) == selected
     assert pending == {OTHER_USER_ID: retained}
     assert ingest.PendingStore(str(pending_path)) == {OTHER_USER_ID: retained}
+
+
+def test_pending_ipa_can_be_published_after_reopening_store(tmp_path):
+    config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
+    ipa_path = write_ipa_with_plists(
+        tmp_path / "example.ipa",
+        {
+            "Payload/App.app/Info.plist": {
+                "CFBundleIdentifier": "com.example.app",
+                "CFBundleShortVersionString": "1.2",
+                "CFBundleVersion": "42",
+                "CFBundleDisplayName": "Example",
+                "MinimumOSVersion": "15.0",
+                "CFBundleSupportedPlatforms": ["iPhoneOS"],
+                "UIDeviceFamily": [1, 2],
+                "NSCameraUsageDescription": "Scan a code",
+            }
+        },
+    )
+    pending_path = tmp_path / "pending.sqlite3"
+    pending = ingest.PendingStore(str(pending_path))
+    bot = FakeBotAPI(get_file_result={"file_path": str(ipa_path)})
+    session = _FakeSession({"success": True, "message": "ok"})
+    feather = ingest.FeatherClient(session, "http://feather", "test-password")
+    update = document_update(ALLOWED_USER_ID)
+    update["message"]["document"].update(
+        file_name=ipa_path.name, file_size=ipa_path.stat().st_size
+    )
+
+    ingest.handle_update(update, config, bot, feather, pending)
+    restored = ingest.PendingStore(str(pending_path))
+    inspection = restored[ALLOWED_USER_ID]["inspection"]
+    assert inspection == pending[ALLOWED_USER_ID]["inspection"]
+    assert inspection.platform == "ios"
+    assert inspection.privacy["NSCameraUsageDescription"] == "Scan a code"
+
+    ingest.handle_update(
+        text_update(ALLOWED_USER_ID, "/add"), config, bot, feather, restored
+    )
+
+    publish = next(
+        kwargs for _, url, kwargs in session.calls if url.endswith("/api/add-version")
+    )
+    assert publish["data"] == {
+        "bundleIdentifier": "com.example.app",
+        "version": "1.2",
+        "buildVersion": "42",
+        "minOSVersion": "15.0",
+    }
+    assert ingest.PendingStore(str(pending_path)) == {}

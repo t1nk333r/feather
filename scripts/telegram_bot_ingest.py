@@ -41,13 +41,14 @@ import sys
 import time
 import traceback
 import zipfile
+from dataclasses import asdict
 
 import requests
 
 try:
-    from .ipa_inspection import InspectionError, inspect_ipa
+    from .ipa_inspection import InspectionError, IpaInspection, inspect_ipa
 except ImportError:  # direct execution from scripts/
-    from ipa_inspection import InspectionError, inspect_ipa
+    from ipa_inspection import InspectionError, IpaInspection, inspect_ipa
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -146,9 +147,23 @@ class PendingStore(dict):
                 "SELECT user_id, payload FROM pending"
             ).fetchall()
         for user_id, payload in rows:
-            self[int(user_id)] = json.loads(payload)
+            value = json.loads(payload)
+            inspection = value.get("inspection")
+            if inspection is not None:
+                inspection["supported_platforms"] = tuple(
+                    inspection.get("supported_platforms", ())
+                )
+                inspection["device_families"] = tuple(
+                    inspection.get("device_families", ())
+                )
+                value["inspection"] = IpaInspection(**inspection)
+            self[int(user_id)] = value
 
     def _persist(self, user_id, value):
+        payload = dict(value)
+        inspection = payload.get("inspection")
+        if isinstance(inspection, IpaInspection):
+            payload["inspection"] = asdict(inspection)
         with self._connect() as conn:
             conn.execute(
                 """
@@ -156,7 +171,7 @@ class PendingStore(dict):
                 VALUES(?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET payload = excluded.payload
                 """,
-                (int(user_id), json.dumps(value, separators=(",", ":"))),
+                (int(user_id), json.dumps(payload, separators=(",", ":"))),
             )
 
     def _delete(self, user_id):
