@@ -198,6 +198,12 @@ Supports `owner/repo` on github.com and `namespace/project` on gitlab.com — no
 
 Forward an IPA or APK to your bot and confirm with `/add`. It runs against a self-hosted Bot API server (`telegram-bot-api`) because the cloud API caps downloads at 20 MB. Enable with `COMPOSE_PROFILES=telegram` once the `TELEGRAM_*` variables are set — the worker refuses to start without them.
 
+Pending uploads survive worker restarts in `data/telegram-pending/pending.sqlite3`.
+Before enabling Telegram, create `data/telegram-pending` and give it ownership
+`101:101` with mode `0700`, matching the worker's Compose user. A new forward
+replaces that user's previous pending upload; forwarding with no pending upload
+is valid. `/add` clears the persisted entry only after successful publication.
+
 Notifications post catalog events to a chat. On by default: `add_app`, `add_version`, `delete_app`, `android_add_apk`. Opt-in via `TELEGRAM_NOTIFY_EVENTS`: `delete_version`, `health_transition`.
 
 ---

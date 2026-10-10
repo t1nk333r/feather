@@ -1171,7 +1171,8 @@ def test_apk_document_is_staged_for_confirmation(tmp_path):
     apk_path = write_minimal_apk(tmp_path / "com.x8bit.bitwarden.apk")
     bot = FakeBotAPI(get_file_result={"file_path": str(apk_path)})
     feather = FakeAndroidFeatherClient()
-    pending = {}
+    pending_path = tmp_path / "pending.sqlite3"
+    pending = ingest.PendingStore(str(pending_path))
     update = document_update(ALLOWED_USER_ID)
     update["message"]["document"]["file_name"] = apk_path.name
     update["message"]["document"]["file_size"] = apk_path.stat().st_size
@@ -1179,6 +1180,8 @@ def test_apk_document_is_staged_for_confirmation(tmp_path):
     ingest.handle_update(update, config, bot, feather, pending)
 
     assert pending[ALLOWED_USER_ID]["artifact_type"] == "apk"
+    restored = ingest.PendingStore(str(pending_path))
+    assert restored[ALLOWED_USER_ID] == pending[ALLOWED_USER_ID]
     assert feather.login_calls == 0
     assert any("Send /add" in text for _, text in bot.sent_messages)
 
@@ -1248,3 +1251,36 @@ def test_feather_client_posts_apk_to_android_endpoint(tmp_path):
     assert method == "POST"
     assert url == "http://feather/api/android/add-apk"
     assert kwargs["files"]["apkFile"][0] == "bitwarden.apk"
+
+
+@pytest.mark.parametrize("default", [None, False, 0, "fallback"])
+def test_pending_store_pop_missing_key_returns_explicit_default(tmp_path, default):
+    pending_path = tmp_path / "pending.sqlite3"
+    pending = ingest.PendingStore(str(pending_path))
+    retained = {"path": "/shared/retained.ipa"}
+    pending[OTHER_USER_ID] = retained
+
+    assert pending.pop(ALLOWED_USER_ID, default) is default
+    assert ingest.PendingStore(str(pending_path)) == {OTHER_USER_ID: retained}
+
+
+def test_pending_store_pop_without_default_raises_for_missing_key(tmp_path):
+    pending = ingest.PendingStore(str(tmp_path / "pending.sqlite3"))
+
+    with pytest.raises(KeyError) as error:
+        pending.pop(ALLOWED_USER_ID)
+
+    assert error.value.args == (ALLOWED_USER_ID,)
+
+
+def test_pending_store_pop_removes_only_selected_persisted_upload(tmp_path):
+    pending_path = tmp_path / "pending.sqlite3"
+    pending = ingest.PendingStore(str(pending_path))
+    selected = {"path": "/shared/selected.ipa"}
+    retained = {"path": "/shared/retained.ipa"}
+    pending[ALLOWED_USER_ID] = selected
+    pending[OTHER_USER_ID] = retained
+
+    assert pending.pop(ALLOWED_USER_ID, None) == selected
+    assert pending == {OTHER_USER_ID: retained}
+    assert ingest.PendingStore(str(pending_path)) == {OTHER_USER_ID: retained}

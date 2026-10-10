@@ -107,6 +107,9 @@ class FeatherAuthError(RuntimeError):
     """
 
 
+_MISSING = object()
+
+
 class PendingStore(dict):
     """Persistent pending upload state keyed by Telegram user id.
 
@@ -168,12 +171,12 @@ class PendingStore(dict):
         super().__delitem__(user_id)
         self._delete(user_id)
 
-    def pop(self, key, default=None):
+    def pop(self, key, default=_MISSING):
         if key in self:
             value = super().pop(key)
             self._delete(key)
             return value
-        if default is not None:
+        if default is not _MISSING:
             return default
         raise KeyError(key)
 
