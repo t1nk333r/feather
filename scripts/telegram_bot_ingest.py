@@ -36,6 +36,7 @@ import logging
 import os
 import plistlib
 import re
+import sqlite3
 import sys
 import time
 import traceback
@@ -64,6 +65,7 @@ REQUIRED_VARS = [
     "FEATHER_ADMIN_PASSWORD",
 ]
 
+DEFAULT_PENDING_DB = "/var/lib/feather-bot/pending.sqlite3"
 USAGE_HINT = "Send:  /add <bundleIdentifier> <version> [name]"
 NOT_A_FILE_REPLY = (
     "That isn't a file. Forward an IPA or APK, then send /add."
@@ -103,6 +105,82 @@ class FeatherAuthError(RuntimeError):
     missing FEATHER_ADMIN_PASSWORD is the most likely first failure and a
     generic error would send someone hunting in the wrong place.
     """
+
+
+class PendingStore(dict):
+    """Persistent pending upload state keyed by Telegram user id.
+
+    The bot's in-memory `pending` dict was lost on process restarts, which
+    made `/add` fail with "No pending file" after a restart even though the
+    operator had just forwarded the IPA. This keeps the pending set in a
+    SQLite database so the bot can recover the last upload after a restart.
+    """
+
+    def __init__(self, db_path=None):
+        self.db_path = db_path or os.environ.get("TELEGRAM_PENDING_DB") or DEFAULT_PENDING_DB
+        os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
+        self._init_db()
+        super().__init__()
+        self._load()
+
+    def _connect(self):
+        return sqlite3.connect(self.db_path)
+
+    def _init_db(self):
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pending (
+                    user_id INTEGER PRIMARY KEY,
+                    payload TEXT NOT NULL
+                )
+                """
+            )
+
+    def _load(self):
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT user_id, payload FROM pending"
+            ).fetchall()
+        for user_id, payload in rows:
+            self[int(user_id)] = json.loads(payload)
+
+    def _persist(self, user_id, value):
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO pending(user_id, payload)
+                VALUES(?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET payload = excluded.payload
+                """,
+                (int(user_id), json.dumps(value, separators=(",", ":"))),
+            )
+
+    def _delete(self, user_id):
+        with self._connect() as conn:
+            conn.execute("DELETE FROM pending WHERE user_id = ?", (int(user_id),))
+
+    def __setitem__(self, user_id, value):
+        super().__setitem__(user_id, value)
+        self._persist(user_id, value)
+
+    def __delitem__(self, user_id):
+        super().__delitem__(user_id)
+        self._delete(user_id)
+
+    def pop(self, key, default=None):
+        if key in self:
+            value = super().pop(key)
+            self._delete(key)
+            return value
+        if default is not None:
+            return default
+        raise KeyError(key)
+
+    def clear(self):
+        super().clear()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM pending")
 
 
 def _redact(text, *secrets):
@@ -221,6 +299,7 @@ def load_config(env=None):
         getfile_timeout = DEFAULT_GETFILE_TIMEOUT
 
     default_developer = env.get("TELEGRAM_DEFAULT_DEVELOPER") or "Unknown"
+    pending_db = env.get("TELEGRAM_PENDING_DB") or DEFAULT_PENDING_DB
 
     return {
         "telegram_api_id": env["TELEGRAM_API_ID"],
@@ -233,6 +312,7 @@ def load_config(env=None):
         "feather_admin_password": env["FEATHER_ADMIN_PASSWORD"],
         "bot_api_getfile_timeout": getfile_timeout,
         "telegram_default_developer": default_developer,
+        "telegram_pending_db": pending_db,
     }
 
 
@@ -849,7 +929,7 @@ def run(config):
     feather = FeatherClient(
         requests.Session(), config["feather_base_url"], config["feather_admin_password"]
     )
-    pending = {}
+    pending = PendingStore(config["telegram_pending_db"])
 
     logger.info(
         "telegram ingest bot starting; allowlist has %d user id(s)",
