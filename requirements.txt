@@ -2,6 +2,7 @@ Flask==2.3.3
 Flask-Limiter==3.5.0
 qrcode[pil]==7.4.2
 requests==2.31.0
+requests-toolbelt==1.0.0
 Werkzeug==2.3.7
 pillow==11.3.0
 boto3==1.43.68

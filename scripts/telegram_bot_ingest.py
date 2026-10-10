@@ -44,6 +44,7 @@ import zipfile
 from dataclasses import asdict
 
 import requests
+from requests_toolbelt.multipart.encoder import MultipartEncoder
 
 try:
     from .ipa_inspection import InspectionError, IpaInspection, inspect_ipa
@@ -533,17 +534,20 @@ class FeatherClient:
         resp.raise_for_status()
 
     def add_version(self, bundle_id, version, path):
-        # Stream the upload -- requests streams file objects, never loads
-        # the whole IPA into memory.
+        # MultipartEncoder reads bounded chunks; requests' files= buffers
+        # the entire multipart body before sending it.
         with open(path, "rb") as fh:
-            files = {"ipaFile": (os.path.basename(path), fh)}
             data = {"bundleIdentifier": bundle_id, "version": version}
             if self._inspection is not None:
                 data["buildVersion"] = self._inspection.build_version
                 if self._inspection.minimum_os_version:
                     data["minOSVersion"] = self._inspection.minimum_os_version
+            data["ipaFile"] = (os.path.basename(path), fh)
+            encoder = MultipartEncoder(fields=data)
             resp = self.session.post(
-                f"{self.base_url}/api/add-version", data=data, files=files
+                f"{self.base_url}/api/add-version",
+                data=encoder,
+                headers={"Content-Type": encoder.content_type},
             )
         if resp.status_code == 401:
             raise FeatherAuthError("feather /api/add-version returned 401")
@@ -561,7 +565,6 @@ class FeatherClient:
         # icon_file on the floor; /api/update-app is the endpoint that
         # accepts one (see set_icon).
         with open(path, "rb") as fh:
-            files = {"ipaFile": (os.path.basename(path), fh)}
             data = {
                 "bundleIdentifier": bundle_id,
                 "version": version,
@@ -574,8 +577,12 @@ class FeatherClient:
                     data["minOSVersion"] = self._inspection.minimum_os_version
                 if self._inspection.privacy:
                     data["privacy"] = json.dumps(self._inspection.privacy)
+            data["ipaFile"] = (os.path.basename(path), fh)
+            encoder = MultipartEncoder(fields=data)
             resp = self.session.post(
-                f"{self.base_url}/api/add-app", data=data, files=files
+                f"{self.base_url}/api/add-app",
+                data=encoder,
+                headers={"Content-Type": encoder.content_type},
             )
         if resp.status_code == 401:
             raise FeatherAuthError("feather /api/add-app returned 401")
@@ -587,9 +594,13 @@ class FeatherClient:
     def add_apk(self, path):
         """Stream an APK to Feather; the server owns manifest inspection."""
         with open(path, "rb") as fh:
-            files = {"apkFile": (os.path.basename(path), fh)}
+            encoder = MultipartEncoder(
+                fields={"apkFile": (os.path.basename(path), fh)}
+            )
             resp = self.session.post(
-                f"{self.base_url}/api/android/add-apk", files=files
+                f"{self.base_url}/api/android/add-apk",
+                data=encoder,
+                headers={"Content-Type": encoder.content_type},
             )
         if resp.status_code == 401:
             raise FeatherAuthError("feather /api/android/add-apk returned 401")
@@ -606,10 +617,13 @@ class FeatherClient:
         # hand-chosen icon is never reverted by a later forward. Callers
         # must treat any failure here as non-fatal to the publish.
         with open(path, "rb") as fh:
-            files = {"iconFile": (os.path.basename(path), fh)}
             data = {"bundleIdentifier": bundle_id}
+            data["iconFile"] = (os.path.basename(path), fh)
+            encoder = MultipartEncoder(fields=data)
             resp = self.session.post(
-                f"{self.base_url}/api/update-app", data=data, files=files
+                f"{self.base_url}/api/update-app",
+                data=encoder,
+                headers={"Content-Type": encoder.content_type},
             )
         if resp.status_code == 401:
             raise FeatherAuthError("feather /api/update-app returned 401")

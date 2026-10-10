@@ -1,19 +1,25 @@
 """Tests for the Telegram forward-to-bot ingest worker (Plan 013).
 
-No test in this file touches the network, Telegram, or Docker -- updates
-and getFile responses are canned dicts, and the Bot API / feather HTTP
-clients are hand-rolled fakes that just record calls, following the
-FakeS3Client pattern in tests/test_storage.py. BOT_API_FILE_ROOT points at
-pytest's tmp_path instead of a real shared volume.
+No test contacts Telegram, Docker, or an external service. Most HTTP
+clients are hand-rolled fakes; upload contract tests use a loopback HTTP
+server that decodes the multipart body as Feather does. BOT_API_FILE_ROOT
+points at pytest's tmp_path instead of a real shared volume.
 
 See plans/013-telegram-bot-ingest.md's test plan for the eight cases below.
 """
 
+import builtins
 import gzip
+import hashlib
+import json
 import plistlib
+import threading
+from types import SimpleNamespace
 import zipfile
 
 import pytest
+from werkzeug.serving import make_server
+from werkzeug.wrappers import Request, Response
 
 from scripts import telegram_bot_ingest as ingest
 
@@ -108,6 +114,106 @@ class _FakeSession:
     def post(self, url, **kwargs):
         self.calls.append(("POST", url, kwargs))
         return _FakeResponse(self.payload)
+
+
+@pytest.fixture
+def feather_http():
+    """Decode real HTTP requests, not Requests' implementation kwargs."""
+    calls = []
+    replies = {}
+
+    def app(environ, start_response):
+        request = Request(environ)
+        call = {"path": request.path, "method": request.method}
+        if request.path == "/api/login":
+            call["json"] = request.get_json()
+        else:
+            call["fields"] = request.form.to_dict()
+            call["files"] = {}
+            for field, upload in request.files.items():
+                digest = hashlib.sha256()
+                size = 0
+                for chunk in iter(lambda: upload.stream.read(64 * 1024), b""):
+                    digest.update(chunk)
+                    size += len(chunk)
+                call["files"][field] = {
+                    "filename": upload.filename,
+                    "sha256": digest.hexdigest(),
+                    "size": size,
+                }
+            call["cookie"] = request.cookies.get("feather_session")
+            call["client_header"] = request.headers.get("X-Test-Client")
+            call["content_length"] = request.content_length
+            call["content_type"] = request.mimetype
+        calls.append(call)
+        status, payload = replies.get(
+            request.path, (200, {"success": True, "message": "ok"})
+        )
+        response = Response(
+            json.dumps(payload), status=status, content_type="application/json"
+        )
+        if request.path == "/api/login" and status == 200:
+            response.set_cookie("feather_session", "test-session")
+        request.close()
+        return response(environ, start_response)
+
+    server = make_server("127.0.0.1", 0, app)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield SimpleNamespace(
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            calls=calls,
+            replies=replies,
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+@pytest.fixture
+def http_feather_client(feather_http):
+    with ingest.requests.Session() as session:
+        session.trust_env = False
+        session.headers["X-Test-Client"] = "bot-regression"
+        yield ingest.FeatherClient(session, feather_http.base_url, "test-password")
+
+
+@pytest.fixture
+def bounded_upload_reads(monkeypatch):
+    """Fail on whole-file or oversized reads, including during preparation."""
+    readers = []
+
+    class Reader:
+        def __init__(self, file):
+            self.file = file
+            self.read_sizes = []
+
+        def __getattr__(self, name):
+            return getattr(self.file, name)
+
+        def read(self, size=-1):
+            assert 0 <= size <= 1024 * 1024, "upload must use bounded file reads"
+            self.read_sizes.append(size)
+            return self.file.read(size)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self.file.__exit__(*args)
+
+    def guarded_open(path, mode="r", *args, **kwargs):
+        file = builtins.open(path, mode, *args, **kwargs)
+        if mode != "rb":
+            return file
+        reader = Reader(file)
+        readers.append(reader)
+        return reader
+
+    monkeypatch.setattr(ingest, "open", guarded_open, raising=False)
+    return readers
 
 
 class FakeFeatherClient:
@@ -1229,28 +1335,6 @@ def test_apk_document_without_manifest_is_rejected(tmp_path):
     assert any("AndroidManifest.xml" in text for _, text in bot.sent_messages)
 
 
-def test_feather_client_posts_apk_to_android_endpoint(tmp_path):
-    apk_path = write_minimal_apk(tmp_path / "bitwarden.apk")
-    session = _FakeSession(
-        {
-            "success": True,
-            "added": True,
-            "message": "Added com.x8bit.bitwarden version 42",
-            "package": "com.x8bit.bitwarden",
-            "versionCode": 42,
-        }
-    )
-    feather = ingest.FeatherClient(session, "http://feather", "password")
-
-    ok, message, payload = feather.add_apk(str(apk_path))
-
-    assert ok is True
-    assert "com.x8bit.bitwarden" in message
-    assert payload["versionCode"] == 42
-    method, url, kwargs = session.calls[0]
-    assert method == "POST"
-    assert url == "http://feather/api/android/add-apk"
-    assert kwargs["files"]["apkFile"][0] == "bitwarden.apk"
 
 
 @pytest.mark.parametrize("default", [None, False, 0, "fallback"])
@@ -1286,7 +1370,10 @@ def test_pending_store_pop_removes_only_selected_persisted_upload(tmp_path):
     assert ingest.PendingStore(str(pending_path)) == {OTHER_USER_ID: retained}
 
 
-def test_pending_ipa_can_be_published_after_reopening_store(tmp_path):
+@pytest.mark.parametrize("outcome", ["version", "create", "failure"])
+def test_pending_ipa_can_be_published_after_reopening_store(
+    tmp_path, feather_http, http_feather_client, bounded_upload_reads, outcome
+):
     config = ingest.load_config(make_env(BOT_API_FILE_ROOT=str(tmp_path)))
     ipa_path = write_ipa_with_plists(
         tmp_path / "example.ipa",
@@ -1303,12 +1390,28 @@ def test_pending_ipa_can_be_published_after_reopening_store(tmp_path):
             }
         },
     )
+    thumb_path = tmp_path / "thumb.jpg"
+    thumb_path.write_bytes(b"test thumbnail bytes")
     pending_path = tmp_path / "pending.sqlite3"
     pending = ingest.PendingStore(str(pending_path))
-    bot = FakeBotAPI(get_file_result={"file_path": str(ipa_path)})
-    session = _FakeSession({"success": True, "message": "ok"})
-    feather = ingest.FeatherClient(session, "http://feather", "test-password")
-    update = document_update(ALLOWED_USER_ID)
+    retained = {"path": "/shared/another-operator.ipa"}
+    pending[OTHER_USER_ID] = retained
+    bot = FakeBotAPI(
+        get_file_results={
+            "file123": {"file_path": str(ipa_path)},
+            "thumb": {"file_path": str(thumb_path)},
+        }
+    )
+    feather = http_feather_client
+    if outcome != "version":
+        feather_http.replies["/api/add-version"] = (
+            400,
+            {
+                "success": False,
+                "error": "App not found" if outcome == "create" else "Storage unavailable",
+            },
+        )
+    update = document_update(ALLOWED_USER_ID, thumbnail={"file_id": "thumb"})
     update["message"]["document"].update(
         file_name=ipa_path.name, file_size=ipa_path.stat().st_size
     )
@@ -1324,13 +1427,157 @@ def test_pending_ipa_can_be_published_after_reopening_store(tmp_path):
         text_update(ALLOWED_USER_ID, "/add"), config, bot, feather, restored
     )
 
-    publish = next(
-        kwargs for _, url, kwargs in session.calls if url.endswith("/api/add-version")
-    )
-    assert publish["data"] == {
+    assert feather_http.calls[0]["json"] == {"password": "test-password"}
+    publish = feather_http.calls[1]
+    assert publish["path"] == "/api/add-version"
+    assert publish["fields"] == {
         "bundleIdentifier": "com.example.app",
         "version": "1.2",
         "buildVersion": "42",
         "minOSVersion": "15.0",
     }
-    assert ingest.PendingStore(str(pending_path)) == {}
+    assert publish["files"] == {
+        "ipaFile": {
+            "filename": ipa_path.name,
+            "sha256": hashlib.sha256(ipa_path.read_bytes()).hexdigest(),
+            "size": ipa_path.stat().st_size,
+        }
+    }
+    assert publish["cookie"] == "test-session"
+    assert all(reader.file.closed for reader in bounded_upload_reads)
+    stored = ingest.PendingStore(str(pending_path))
+    assert stored[OTHER_USER_ID] == retained
+    if outcome == "failure":
+        assert stored[ALLOWED_USER_ID] == restored[ALLOWED_USER_ID]
+        assert len(feather_http.calls) == 2
+        assert bot.sent_messages[-1] == (CHAT_ID, "Publish failed: Storage unavailable")
+    else:
+        assert ALLOWED_USER_ID not in stored
+        assert "Published com.example.app 1.2" in bot.sent_messages[-1][1]
+        if outcome == "version":
+            assert len(feather_http.calls) == 2
+        else:
+            created, icon = feather_http.calls[2:]
+            assert created["path"] == "/api/add-app"
+            assert created["fields"] == {
+                **publish["fields"],
+                "name": "Example",
+                "developerName": "Unknown",
+                "privacy": json.dumps(inspection.privacy),
+            }
+            assert created["files"] == publish["files"]
+            assert icon["path"] == "/api/update-app"
+            assert icon["fields"] == {"bundleIdentifier": "com.example.app"}
+            assert icon["files"]["iconFile"] == {
+                "filename": thumb_path.name,
+                "sha256": hashlib.sha256(thumb_path.read_bytes()).hexdigest(),
+                "size": thumb_path.stat().st_size,
+            }
+            assert created["cookie"] == icon["cookie"] == "test-session"
+            assert "Icon set." in bot.sent_messages[-1][1]
+
+
+UPLOAD_CASES = [
+    (
+        "add_version", "/api/add-version", "ipaFile", ("com.example.app", "1.2"),
+        {
+            "bundleIdentifier": "com.example.app", "version": "1.2",
+            "buildVersion": "42", "minOSVersion": "15.0",
+        },
+    ),
+    (
+        "add_app", "/api/add-app", "ipaFile",
+        ("com.example.app", "1.2", "Example App", "Example Developer"),
+        {
+            "bundleIdentifier": "com.example.app", "version": "1.2",
+            "name": "Example App", "developerName": "Example Developer",
+            "buildVersion": "42", "minOSVersion": "15.0",
+            "privacy": json.dumps({"NSCameraUsageDescription": "Scan a code"}),
+        },
+    ),
+    ("add_apk", "/api/android/add-apk", "apkFile", (), {}),
+    (
+        "set_icon", "/api/update-app", "iconFile", ("com.example.app",),
+        {"bundleIdentifier": "com.example.app"},
+    ),
+]
+
+
+@pytest.mark.parametrize("method,endpoint,file_field,args,fields", UPLOAD_CASES)
+def test_upload_streams_decodable_multipart_with_bounded_reads(
+    tmp_path, feather_http, http_feather_client, bounded_upload_reads,
+    method, endpoint, file_field, args, fields,
+):
+    # Larger than the read guard so one full-file read cannot pass.
+    content = bytes(range(256)) * 8192
+    path = tmp_path / "forwarded artifact.bin"
+    path.write_bytes(content)
+    response = {
+        "success": True, "message": "published", "added": True,
+        "package": "com.example.android", "versionCode": 42,
+    }
+    feather_http.replies[endpoint] = (200, response)
+    feather = http_feather_client
+    feather.set_preflight(SimpleNamespace(
+        build_version="42", minimum_os_version="15.0",
+        privacy={"NSCameraUsageDescription": "Scan a code"},
+    ))
+    feather.login()
+
+    result = getattr(feather, method)(*args, str(path))
+
+    assert result == (
+        (True, "published", response) if method == "add_apk"
+        else (True, "published")
+    )
+    login, upload = feather_http.calls
+    assert login == {
+        "path": "/api/login", "method": "POST",
+        "json": {"password": "test-password"},
+    }
+    assert upload["path"] == endpoint
+    assert upload["method"] == "POST"
+    assert upload["fields"] == fields
+    assert upload["files"] == {
+        file_field: {
+            "filename": path.name,
+            "size": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+    }
+    assert upload["content_type"] == "multipart/form-data"
+    assert upload["content_length"] > len(content)
+    assert upload["cookie"] == "test-session"
+    assert upload["client_header"] == "bot-regression"
+    assert len(bounded_upload_reads) == 1
+    reader = bounded_upload_reads[0]
+    assert len(reader.read_sizes) > 1
+    assert reader.file.closed
+
+
+@pytest.mark.parametrize("method,endpoint,file_field,args,fields", UPLOAD_CASES)
+@pytest.mark.parametrize("status", [400, 401])
+def test_streamed_upload_preserves_api_errors_and_closes_file(
+    tmp_path, feather_http, http_feather_client, bounded_upload_reads,
+    method, endpoint, file_field, args, fields, status,
+):
+    path = tmp_path / "artifact.bin"
+    path.write_bytes(b"upload payload")
+    response = {"success": False, "error": "Storage unavailable", "message": "ignored"}
+    feather_http.replies[endpoint] = (status, response)
+    feather = http_feather_client
+    feather.login()
+
+    if status == 401:
+        with pytest.raises(ingest.FeatherAuthError, match=endpoint):
+            getattr(feather, method)(*args, str(path))
+    else:
+        result = getattr(feather, method)(*args, str(path))
+        assert result == (
+            (False, "Storage unavailable", response) if method == "add_apk"
+            else (False, "Storage unavailable")
+        )
+    assert feather_http.calls[-1]["files"][file_field]["sha256"] == (
+        hashlib.sha256(path.read_bytes()).hexdigest()
+    )
+    assert bounded_upload_reads[0].file.closed

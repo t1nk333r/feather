@@ -2,10 +2,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Only dependency: requests, already pinned in requirements.txt for the
-# main app. No python-telegram-bot / aiogram / telethon -- two HTTP
-# endpoints (getUpdates, getFile) don't need a framework.
-RUN pip install --no-cache-dir requests==2.31.0
+# HTTP dependencies, matching requirements.txt. MultipartEncoder keeps
+# uploads bounded in memory. No python-telegram-bot / aiogram / telethon
+# -- two HTTP endpoints (getUpdates, getFile) don't need a framework.
+RUN pip install --no-cache-dir requests==2.31.0 requests-toolbelt==1.0.0
 
 COPY scripts/telegram_bot_ingest.py .
 COPY scripts/ipa_inspection.py .

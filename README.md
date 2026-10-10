@@ -205,6 +205,9 @@ replaces that user's previous pending upload; forwarding with no pending upload
 is valid. `/add` clears the persisted entry only after successful publication.
 Detected IPA metadata, including build version and minimum iOS version, is
 restored with the pending upload so a post-restart `/add` keeps those values.
+IPA, APK and icon uploads use bounded-memory multipart streaming, so large
+artifacts do not require a file-sized allocation in the worker. The pending
+entry remains available when publication fails.
 
 Notifications post catalog events to a chat. On by default: `add_app`, `add_version`, `delete_app`, `android_add_apk`. Opt-in via `TELEGRAM_NOTIFY_EVENTS`: `delete_version`, `health_transition`.
 
