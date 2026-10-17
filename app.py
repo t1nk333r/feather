@@ -6706,21 +6706,34 @@ _SITE_CSP = (
 )
 
 
+def _in_site(path):
+    """path, resolved, is inside SITE_DIR: a symlink there can't serve what's
+    beside it in data/ (the catalogue, the F-Droid keystore) or elsewhere."""
+    site = os.path.realpath(SITE_DIR)
+    return os.path.realpath(path).startswith(site + os.sep)
+
+
 def _site_page(url_path):
     """The response for url_path from SITE_DIR, or None if there's nothing
     there. A directory serves its index.html, after a redirect to its path
-    with a slash, as static hosts do (a fragment survives it)."""
+    with a slash, as static hosts do (a fragment survives it). Hidden files
+    and directories aren't served (a checkout's .git/), but .well-known is."""
     relative = url_path.lstrip("/")
-    path = safe_join(SITE_DIR, relative) if relative else None
-    if path is None:
+    parts = [part for part in relative.split("/") if part]
+    if not parts or any(part.startswith(".") for part in (parts[1:] if parts[0] == ".well-known" else parts)):
+        return None
+    path = safe_join(SITE_DIR, relative)
+    if path is None or not _in_site(path):
         return None
     if os.path.isdir(path):
-        if not os.path.isfile(os.path.join(path, "index.html")):
+        index = os.path.join(path, "index.html")
+        if not os.path.isfile(index) or not _in_site(index):
             return None
         if not url_path.endswith("/"):
+            # Built from the cleaned path, never the raw one: "//x" mustn't become a link to another host.
             query = request.query_string.decode("latin-1")
-            return redirect(url_path + "/" + ("?" + query if query else ""), code=301)
-        relative = relative.rstrip("/") + "/index.html"
+            return redirect("/" + "/".join(parts) + "/" + ("?" + query if query else ""), code=301)
+        relative = "/".join(parts) + "/index.html"
     elif not os.path.isfile(path):
         return None
     response = send_from_directory(SITE_DIR, relative)

@@ -2726,6 +2726,33 @@ def test_without_a_site_directory_nothing_changes(client, tmp_path):
     assert resp.get_json() == {"error": "Endpoint not found"}
 
 
+def test_site_never_serves_outside_itself_or_hidden_files(client, tmp_path):
+    site = _site(tmp_path)
+    # Symlinks out of data/site: to the catalogue beside it, and to all of data/.
+    (site / "leak.json").symlink_to(tmp_path / "source.json")
+    (site / "data").symlink_to(tmp_path, target_is_directory=True)
+    (site / "w" / "up").symlink_to(tmp_path, target_is_directory=True)
+    # A checkout's .git/, and a hidden file inside .well-known.
+    (site / ".git").mkdir()
+    (site / ".git" / "config").write_text("[remote]")
+    (site / ".well-known" / ".secret").write_text("x")
+    for path in ("/leak.json", "/data/source.json", "/data/", "/w/up/source.json", "/.git/config", "/.well-known/.secret"):
+        resp = client.get(path)
+        assert resp.status_code == 404, path
+        assert b"Test Source" not in resp.data and b"[remote]" not in resp.data, path
+    # A symlink that stays inside is fine.
+    (site / "share").symlink_to(site / "w", target_is_directory=True)
+    assert client.get("/share/").status_code == 200
+
+
+def test_a_site_redirect_never_points_at_another_host(client, tmp_path):
+    _site(tmp_path)
+    with client.application.test_request_context("//w"):
+        resp = client.app_module._site_page("//w")
+    assert resp.status_code == 301
+    assert resp.headers["Location"] == "/w/"
+
+
 def test_site_files_never_shadow_routes_or_change_their_errors(client, tmp_path):
     site = _site(tmp_path)
     (site / "source.json").write_text('{"name": "shadow"}')
