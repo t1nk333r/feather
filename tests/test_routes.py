@@ -2672,3 +2672,98 @@ def test_android_add_apk_publishes_extracted_icon_and_delete_removes_it(authed_c
     assert icon.read_bytes().startswith(b"\x89PNG")
     assert authed_client.post("/api/android/delete-app", json={"package": "org.test.icon"}).status_code == 200
     assert not icon.parent.parent.exists()
+
+
+# --- Operator pages: DATA_DIR/site served at the same path once no route matches ---
+
+def _site(tmp_path):
+    site = tmp_path / "site"
+    (site / ".well-known").mkdir(parents=True)
+    (site / ".well-known" / "assetlinks.json").write_text('[{"relation": ["delegate_permission/common.handle_all_urls"]}]')
+    (site / "w").mkdir()
+    (site / "w" / "index.html").write_text("<!doctype html><title>share</title>")
+    (site / "empty").mkdir()
+    return site
+
+
+def test_site_files_are_public_and_sandboxed(client, tmp_path):
+    _site(tmp_path)
+    resp = client.get("/.well-known/assetlinks.json")
+    assert resp.status_code == 200
+    assert resp.mimetype == "application/json"
+    assert resp.get_json()[0]["relation"] == ["delegate_permission/common.handle_all_urls"]
+    # An opaque origin: nothing served from here can reach the admin session or the API.
+    assert resp.headers["Content-Security-Policy"].startswith("sandbox ")
+    assert "allow-same-origin" not in resp.headers["Content-Security-Policy"]
+
+
+def test_a_site_directory_redirects_to_its_slash_then_serves_its_index(client, tmp_path):
+    _site(tmp_path)
+    resp = client.get("/w")
+    assert resp.status_code == 301
+    assert resp.headers["Location"].endswith("/w/")
+    assert client.get("/w?x=1").headers["Location"].endswith("/w/?x=1")
+    resp = client.get("/w/")
+    assert resp.status_code == 200
+    assert resp.mimetype == "text/html"
+    assert b"<title>share</title>" in resp.data
+    assert "sandbox" in resp.headers["Content-Security-Policy"]
+    assert client.head("/w/").status_code == 200
+
+
+def test_whats_not_in_the_site_is_the_usual_404(client, tmp_path):
+    _site(tmp_path)
+    for path in ("/nothing", "/w/missing.html", "/empty", "/empty/", "/../source.json", "/%2e%2e/source.json", "/w%00", "/w/%00/index.html"):
+        resp = client.get(path)
+        assert resp.status_code == 404, path
+        assert resp.get_json() == {"error": "Endpoint not found"}, path
+
+
+def test_without_a_site_directory_nothing_changes(client, tmp_path):
+    assert not (tmp_path / "site").exists()
+    resp = client.get("/w/")
+    assert resp.status_code == 404
+    assert resp.get_json() == {"error": "Endpoint not found"}
+
+
+def test_site_never_serves_outside_itself_or_hidden_files(client, tmp_path):
+    site = _site(tmp_path)
+    # Symlinks out of data/site: to the catalogue beside it, and to all of data/.
+    (site / "leak.json").symlink_to(tmp_path / "source.json")
+    (site / "data").symlink_to(tmp_path, target_is_directory=True)
+    (site / "w" / "up").symlink_to(tmp_path, target_is_directory=True)
+    # A checkout's .git/, and a hidden file inside .well-known.
+    (site / ".git").mkdir()
+    (site / ".git" / "config").write_text("[remote]")
+    (site / ".well-known" / ".secret").write_text("x")
+    for path in ("/leak.json", "/data/source.json", "/data/", "/w/up/source.json", "/.git/config", "/.well-known/.secret"):
+        resp = client.get(path)
+        assert resp.status_code == 404, path
+        assert b"Test Source" not in resp.data and b"[remote]" not in resp.data, path
+    # A symlink that stays inside is fine.
+    (site / "share").symlink_to(site / "w", target_is_directory=True)
+    assert client.get("/share/").status_code == 200
+
+
+def test_a_site_redirect_never_points_at_another_host(client, tmp_path):
+    _site(tmp_path)
+    with client.application.test_request_context("//w"):
+        resp = client.app_module._site_page("//w")
+    assert resp.status_code == 301
+    assert resp.headers["Location"] == "/w/"
+
+
+def test_site_files_never_shadow_routes_or_change_their_errors(client, tmp_path):
+    site = _site(tmp_path)
+    (site / "source.json").write_text('{"name": "shadow"}')
+    (site / "fdroid" / "repo").mkdir(parents=True)
+    (site / "fdroid" / "repo" / "index-v1.json").write_text('{"shadow": true}')
+    # The catalogue is the catalogue's.
+    assert client.get("/source.json").get_json()["name"] == "Test Source"
+    # A route's own 404 stays its own: the repo has no index yet, and the site's copy isn't served instead.
+    resp = client.get("/fdroid/repo/index-v1.json")
+    assert resp.status_code == 404
+    assert b"shadow" not in resp.data
+    # Methods: a POST to a site path is the 404 it always was, a GET to a POST-only route still a 405.
+    assert client.post("/w/").status_code == 404
+    assert client.get("/api/login").status_code == 405
