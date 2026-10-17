@@ -2713,7 +2713,7 @@ def test_a_site_directory_redirects_to_its_slash_then_serves_its_index(client, t
 
 def test_whats_not_in_the_site_is_the_usual_404(client, tmp_path):
     _site(tmp_path)
-    for path in ("/nothing", "/w/missing.html", "/empty", "/empty/", "/../source.json", "/%2e%2e/source.json"):
+    for path in ("/nothing", "/w/missing.html", "/empty", "/empty/", "/../source.json", "/%2e%2e/source.json", "/w%00", "/w/%00/index.html"):
         resp = client.get(path)
         assert resp.status_code == 404, path
         assert resp.get_json() == {"error": "Endpoint not found"}, path

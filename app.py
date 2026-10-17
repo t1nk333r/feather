@@ -6720,7 +6720,8 @@ def _site_page(url_path):
     and directories aren't served (a checkout's .git/), but .well-known is."""
     relative = url_path.lstrip("/")
     parts = [part for part in relative.split("/") if part]
-    if not parts or any(part.startswith(".") for part in (parts[1:] if parts[0] == ".well-known" else parts)):
+    # realpath raises on a NUL; such a path is just not there.
+    if not parts or "\x00" in relative or any(part.startswith(".") for part in (parts[1:] if parts[0] == ".well-known" else parts)):
         return None
     path = safe_join(SITE_DIR, relative)
     if path is None or not _in_site(path):
