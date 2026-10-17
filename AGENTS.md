@@ -65,6 +65,8 @@ A branch is not done until CI is green on it.
    - `/source.json`, `/ipas/…`, `/icons/…`, `/qr`
    - `/fdroid/repo/…`, `/fdroid/qr`
    - `/store`, `/api/apps`, `/api/app/<id>`, `/api/version`
+   - operator pages from `data/site/` (`/.well-known/…` and the like), served
+     by the 404 handler once no route matches, with a sandboxing CSP
 
    Phones and F-Droid clients send no credentials; gating any of these breaks
    every subscriber.

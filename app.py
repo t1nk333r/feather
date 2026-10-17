@@ -31,6 +31,7 @@ from urllib.parse import urlparse
 from werkzeug.utils import secure_filename
 from werkzeug.datastructures import FileStorage
 from werkzeug.exceptions import HTTPException
+from werkzeug.security import safe_join
 
 import sys
 _SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts")
@@ -6686,6 +6687,47 @@ def android_request_update():
         return jsonify({"success": False, "error": "Failed to request Android index update"}), 400
 
 
+# Operator pages: files the operator puts in DATA_DIR/site are served at the
+# same path, for what has to sit at a fixed URL on this host -- an Android
+# app's /.well-known/assetlinks.json, or a small static page such as a share
+# page at /w/. Nothing ships there. They're looked up only once no route
+# matches (see not_found), so a file there can never shadow the catalogue,
+# the repo or the API, and a route's own 404 stays a 404.
+SITE_DIR = os.path.join(DATA_DIR, "site")
+
+# The pages would share the admin UI's origin. A sandbox gives them an opaque
+# one, as /fdroid/repo/ has, so a page here runs its own inline script but
+# can't read the admin session or call the API. It may still download what
+# it makes (a blob), open links, and hand off to an app (an intent: link).
+_SITE_CSP = (
+    "sandbox allow-scripts allow-downloads allow-popups allow-popups-to-escape-sandbox "
+    "allow-top-navigation-by-user-activation allow-top-navigation-to-custom-protocols; "
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:"
+)
+
+
+def _site_page(url_path):
+    """The response for url_path from SITE_DIR, or None if there's nothing
+    there. A directory serves its index.html, after a redirect to its path
+    with a slash, as static hosts do (a fragment survives it)."""
+    relative = url_path.lstrip("/")
+    path = safe_join(SITE_DIR, relative) if relative else None
+    if path is None:
+        return None
+    if os.path.isdir(path):
+        if not os.path.isfile(os.path.join(path, "index.html")):
+            return None
+        if not url_path.endswith("/"):
+            query = request.query_string.decode("latin-1")
+            return redirect(url_path + "/" + ("?" + query if query else ""), code=301)
+        relative = relative.rstrip("/") + "/index.html"
+    elif not os.path.isfile(path):
+        return None
+    response = send_from_directory(SITE_DIR, relative)
+    response.headers["Content-Security-Policy"] = _SITE_CSP
+    return response
+
+
 @app.errorhandler(413)
 def too_large(error):
     return jsonify({"success": False,
@@ -6693,6 +6735,11 @@ def too_large(error):
 
 @app.errorhandler(404)
 def not_found(error):
+    # No route matched at all (not a route's own 404): an operator page, if there's one.
+    if request.url_rule is None and request.method in ("GET", "HEAD"):
+        page = _site_page(request.path)
+        if page is not None:
+            return page
     return jsonify({"error": "Endpoint not found"}), 404
 
 @app.errorhandler(500)

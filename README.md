@@ -39,6 +39,7 @@ Everything runs with Docker Compose. Android, Telegram and the cron importer are
 | Android metadata + icons | `data/fdroid/metadata/<package>.yml`, `metadata/<package>/en-US/icon.png` | inside the signed index | stays local |
 | F-Droid signing key | `data/fdroid/keystore.p12` | — | stays local — **back it up** |
 | Importer config/state | `data/release-import/` | — | stays local |
+| Operator pages | `data/site/<path>` (you put them there) | `/<path>`, when no route has it | stays local |
 
 ---
 
@@ -220,6 +221,7 @@ Notifications post catalog events to a chat. On by default: `add_app`, `add_vers
 - **Featured apps and news** — up to five featured apps and AltStore-format news items.
 - **Certificate check** — upload a `.p12` + `.mobileprovision` to see whether they pair, when each expires and which devices they cover. Nothing is signed or stored.
 - **Storage tools** — storage self-test, icon reconcile, and recent server errors (secrets redacted).
+- **Operator pages** — files in `data/site/` are served at the same path, for what has to live at a fixed URL on this host: `data/site/.well-known/assetlinks.json` for an Android app's links, or a small static page (`data/site/w/index.html` at `/w/`; `/w` redirects there). They're looked up only once no route matches, so they can't shadow the catalogue, the repo or the API. Each is served with a sandboxing CSP, giving it an opaque origin: a page there runs its own inline script but can't read the admin session or call the API.
 
 ---
 
