@@ -15,8 +15,9 @@
 2. An operator logs into the admin UI, mutates iOS/Android catalog state, and receives stable JSON outcomes. Agents and CI publish with an API token via `POST /api/publish` or the MCP server; tokens cannot delete or reconfigure.
 3. Manual, Telegram, one-off repository, and scheduled repository imports validate artifacts before catalog mutation.
 4. A `.p12` + `.mobileprovision` pair can be inspected for usability and device coverage; nothing is signed and nothing is stored.
-5. Catalog mutations are serialized and atomically persisted; the F-Droid sidecar consumes rebuild markers and signs generated indexes.
-6. CI tests on supported Python versions, builds all images, smoke-tests them, and only then publishes deployable tags.
+5. With `DEVICE_BACKUPS` on, a phone holding a `kind: backup` token keeps and fetches settings zips under `data/device-backups/<app>/<device>/` (plan 088); that token can do nothing else.
+6. Catalog mutations are serialized and atomically persisted; the F-Droid sidecar consumes rebuild markers and signs generated indexes.
+7. CI tests on supported Python versions, builds all images, smoke-tests them, and only then publishes deployable tags.
 
 [ARCHITECTURE]
 

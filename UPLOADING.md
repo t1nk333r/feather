@@ -216,6 +216,35 @@ job is refused as ambiguous rather than publishing the wrong binary. See
 This leaves the release itself as the audit trail, which the direct upload path
 does not have.
 
+## 4b. Device backups (a phone keeping its own settings)
+
+Off unless the server sets `DEVICE_BACKUPS=true` (plan 088). Create a token
+with **Kind: Device backups only** and the app's package in *Limit to apps*. It
+reaches `/api/device-backups/<app>/…` for those apps and nothing else: it
+cannot publish, read the catalogue, or delete.
+
+```bash
+# keep a backup (multipart `file`, a zip; `label` is the device's display name)
+curl -fsS -H "Authorization: Bearer $TOKEN" -F file=@backup.zip -F label="Galaxy S24 Ultra" \
+  https://feather.example.com/api/device-backups/dev.omalauncher/<device-id>
+# -> {"success": true, "unchanged": false, "snapshot": {"name", "created", "size", "sha256"}}
+#    unchanged: true means it matched the newest snapshot and nothing was stored
+
+curl -fsS -H "Authorization: Bearer $TOKEN" https://feather.example.com/api/device-backups/dev.omalauncher
+#    devices: id, label, snapshots, size, lastBackup
+curl -fsS -H "Authorization: Bearer $TOKEN" https://feather.example.com/api/device-backups/dev.omalauncher/<device-id>
+#    snapshots, newest first
+curl -fsS -H "Authorization: Bearer $TOKEN" -o backup.zip \
+  https://feather.example.com/api/device-backups/dev.omalauncher/<device-id>/<name>
+#    X-Content-SHA256 carries the digest to check
+```
+
+A device ID is 1–64 of letters, digits, `.`, `_` or `-`, not starting with
+`.`. The zip must not contain absolute, backslash or `..` paths. Uploads over
+`DEVICE_BACKUP_MAX_BYTES` (64 MiB) answer 413. The server keeps the newest
+`DEVICE_BACKUP_KEEP` (30) per device and at most `DEVICE_BACKUP_MAX_DEVICES`
+(20) devices per app; delete old devices in the admin UI.
+
 ## 5. What this API does not do
 
 - **It does not verify provenance.** Validation proves the bytes are a

@@ -100,6 +100,7 @@ UPLOAD_FOLDER = os.path.join(DATA_DIR, "uploads")
 IPA_FOLDER = os.path.join(DATA_DIR, "ipas")
 ICON_FOLDER = os.path.join(DATA_DIR, "icons")
 BACKUP_FOLDER = os.path.join(DATA_DIR, "backups")
+DEVICE_BACKUP_FOLDER = os.path.join(DATA_DIR, "device-backups")
 # Plan 073: Android / F-Droid repository. Everything lives under
 # DATA_DIR/fdroid, which is ALSO the working directory of the fdroid-index
 # sidecar (compose service, profile "android"). Layout inside it:
@@ -181,6 +182,13 @@ DOWNLOAD_DEADLINE_SECONDS = int(_env("DOWNLOAD_DEADLINE_SECONDS", "1800"))
 # Debuggable APKs are published with a warning by default (fdroidserver itself
 # only warns); set this to refuse them outright.
 APK_REJECT_DEBUGGABLE = _env("APK_REJECT_DEBUGGABLE", "false").strip().lower() in ("1", "true", "yes", "on")
+# Device backups (plan 088): an app on the operator's own phone keeps copies of
+# its settings here, one folder per app and device. Off by default; on, only a
+# session or a backup-kind token reaches them.
+DEVICE_BACKUPS = _env("DEVICE_BACKUPS", "false").strip().lower() in ("1", "true", "yes", "on")
+DEVICE_BACKUP_MAX_BYTES = int(_env("DEVICE_BACKUP_MAX_BYTES", 64 * 1024 * 1024))
+DEVICE_BACKUP_KEEP = max(1, int(_env("DEVICE_BACKUP_KEEP", "30")))
+DEVICE_BACKUP_MAX_DEVICES = max(1, int(_env("DEVICE_BACKUP_MAX_DEVICES", "20")))
 GARAGE_S3_ENDPOINT = _env("GARAGE_S3_ENDPOINT")
 GARAGE_S3_REGION = _env("GARAGE_S3_REGION", "garage")
 GARAGE_S3_ACCESS_KEY_ID = _env("GARAGE_S3_ACCESS_KEY_ID")
@@ -3025,7 +3033,9 @@ def _save_api_tokens(tokens):
 
 
 def _public_token(t):
-    return {k: t.get(k) for k in ("id", "name", "prefix", "created", "lastUsed", "apps", "expires")}
+    # Tokens from before plan 088 have no kind: they publish.
+    return {**{k: t.get(k) for k in ("id", "name", "prefix", "created", "lastUsed", "apps", "expires")},
+            "kind": t.get("kind") or "publish"}
 
 
 def _bearer_token():
@@ -3086,6 +3096,29 @@ def requires_publish(f):
             g.api_token = _bearer_token()
             if g.api_token is None:
                 return jsonify({"success": False, "error": "Authentication required"}), 401
+            if g.api_token.get("kind") == "backup":
+                # A phone holds this one: it may keep its settings here, not ship apps.
+                return jsonify({"success": False, "error": "This token may only reach device backups"}), 403
+        return f(*args, **kwargs)
+    return wrapper
+
+
+def requires_backup(f):
+    """Admin session OR a backup-kind API token, while DEVICE_BACKUPS is on.
+    A publish token is refused: what ships an app has no business reading a
+    phone's settings, and a phone's token can't ship one."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not DEVICE_BACKUPS:
+            return jsonify({"success": False, "error": "Device backups are turned off"}), 404
+        g.api_token = None
+        if not _session_authed():
+            token = _bearer_token()
+            if token is None:
+                return jsonify({"success": False, "error": "Authentication required"}), 401
+            if token.get("kind") != "backup" or not token.get("apps"):
+                return jsonify({"success": False, "error": "This token may not reach device backups"}), 403
+            g.api_token = token
         return f(*args, **kwargs)
     return wrapper
 
@@ -6072,6 +6105,11 @@ def create_api_token():
     if (not isinstance(apps, list) or len(apps) > 100
             or any(not isinstance(a, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,255}", a) for a in apps)):
         return jsonify({"success": False, "error": "apps must be a list of bundle IDs / package names"}), 400
+    kind = data.get('kind') or "publish"
+    if kind not in ("publish", "backup"):
+        return jsonify({"success": False, "error": "kind must be publish or backup"}), 400
+    if kind == "backup" and not apps:
+        return jsonify({"success": False, "error": "A backup token must be limited to the apps it backs up"}), 400
     days = data.get('expiresInDays')
     expires = None
     if days not in (None, ""):
@@ -6092,6 +6130,7 @@ def create_api_token():
         "lastUsed": None,
         "apps": sorted(set(apps)) or None,
         "expires": expires,
+        "kind": kind,
     }
     with _api_tokens_lock:
         tokens = _load_api_tokens()
@@ -6113,6 +6152,326 @@ def revoke_api_token():
         if len(kept) == len(tokens):
             return jsonify({"success": False, "error": "Token not found"}), 404
         _save_api_tokens(kept)
+    return jsonify({"success": True})
+
+
+# ---------------------------------------------------------------------------
+# Device backups (plan 088): settings an app on the operator's own phone keeps
+# here. Layout: device-backups/<app>/<device>/<UTC stamp>[.NNN].zip, each with
+# a .sha256 beside it, and device.json for the device's label. The archive is
+# the app's business; the server only checks that it is a zip that unpacks
+# within bounds, so a phone restoring it can't be handed a path that escapes.
+# ---------------------------------------------------------------------------
+
+_BACKUP_APP_RE = re.compile(r'^[A-Za-z0-9_-][A-Za-z0-9._-]{0,254}$')
+_BACKUP_DEVICE_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
+_BACKUP_SNAPSHOT_RE = re.compile(r'^(\d{8}T\d{6}Z)(?:\.(\d{3}))?\.zip$')
+DEVICE_BACKUP_MAX_ENTRIES = 20000
+DEVICE_BACKUP_MAX_UNPACKED = 1024 * 1024 * 1024
+_device_backups_lock = threading.Lock()
+
+
+class _BackupTooLarge(Exception):
+    pass
+
+
+def _device_backup_dir(app_id, device_id=None):
+    """The folder for an app, or one of its devices. The patterns admit no
+    separators and no leading dot, so the result stays inside the root."""
+    if not _BACKUP_APP_RE.fullmatch(app_id or ""):
+        raise ValueError("Invalid app ID")
+    parts = [os.path.realpath(DEVICE_BACKUP_FOLDER), app_id]
+    if device_id is not None:
+        if not _BACKUP_DEVICE_RE.fullmatch(device_id or ""):
+            raise ValueError("Invalid device ID: letters, digits, '.', '_' or '-', at most 64")
+        parts.append(device_id)
+    return os.path.join(*parts)
+
+
+def _backup_scope_refusal(app_id):
+    return jsonify({"success": False, "id": app_id,
+                    "error": f"This token may only back up: {', '.join(g.api_token['apps'])}"}), 403
+
+
+def _snapshot_created(name):
+    stamp = _BACKUP_SNAPSHOT_RE.fullmatch(name).group(1)
+    return _utc_iso(datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc))
+
+
+def _snapshot_order(name):
+    m = _BACKUP_SNAPSHOT_RE.fullmatch(name)
+    return (m.group(1), int(m.group(2) or 0))
+
+
+def _device_snapshots(device_dir):
+    """Newest first. A missing .sha256 (a hand-copied file) is recomputed."""
+    try:
+        names = [n for n in os.listdir(device_dir) if _BACKUP_SNAPSHOT_RE.fullmatch(n)]
+    except FileNotFoundError:
+        return []
+    snapshots = []
+    for name in sorted(names, key=_snapshot_order, reverse=True):
+        path = os.path.join(device_dir, name)
+        if os.path.islink(path) or not os.path.isfile(path):
+            continue
+        try:
+            with open(path + ".sha256") as f:
+                digest = f.read().strip()
+        except OSError:
+            digest = ""
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            digest = _sha256_file(path)
+        snapshots.append({"name": name, "created": _snapshot_created(name),
+                          "size": os.path.getsize(path), "sha256": digest})
+    return snapshots
+
+
+def _read_device_info(device_dir):
+    try:
+        with open(os.path.join(device_dir, "device.json")) as f:
+            info = json.load(f)
+        return info if isinstance(info, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_device_info(device_dir, label):
+    info = _read_device_info(device_dir)
+    if label:
+        info["label"] = label
+    info["lastSeen"] = _utc_iso(datetime.now(timezone.utc).replace(microsecond=0))
+    tmp = os.path.join(device_dir, ".device.json.tmp")
+    with open(tmp, "w") as f:
+        json.dump(info, f, indent=2)
+    os.replace(tmp, os.path.join(device_dir, "device.json"))
+
+
+def _clean_backup_label(value):
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f]", "", value)).strip()[:80]
+
+
+def _device_summaries(app_dir):
+    try:
+        names = sorted(os.listdir(app_dir))
+    except FileNotFoundError:
+        return []
+    devices = []
+    for name in names:
+        device_dir = os.path.join(app_dir, name)
+        if not _BACKUP_DEVICE_RE.fullmatch(name) or os.path.islink(device_dir) or not os.path.isdir(device_dir):
+            continue
+        snapshots = _device_snapshots(device_dir)
+        devices.append({
+            "id": name,
+            "label": _read_device_info(device_dir).get("label") or name,
+            "snapshots": len(snapshots),
+            "lastBackup": snapshots[0]["created"] if snapshots else None,
+            "size": sum(s["size"] for s in snapshots),
+        })
+    return devices
+
+
+def _check_backup_zip(path):
+    """A zip that a phone can unpack without a path escaping its target."""
+    try:
+        with zipfile.ZipFile(path) as z:
+            infos = z.infolist()
+    except (zipfile.BadZipFile, OSError):
+        raise ValueError("The backup is not a zip archive")
+    if len(infos) > DEVICE_BACKUP_MAX_ENTRIES:
+        raise ValueError(f"The backup has more than {DEVICE_BACKUP_MAX_ENTRIES} entries")
+    if sum(i.file_size for i in infos) > DEVICE_BACKUP_MAX_UNPACKED:
+        raise ValueError("The backup unpacks to more than 1 GiB")
+    for info in infos:
+        name = info.filename
+        if (not name or name.startswith("/") or "\\" in name or "\x00" in name
+                or any(part == ".." for part in name.split("/"))):
+            raise ValueError(f"Unsafe path in the backup: {name[:80]!r}")
+
+
+def _save_backup_upload(upload):
+    """Stream the upload to a temp file beside the backups, refusing it past
+    DEVICE_BACKUP_MAX_BYTES. Returns (path, sha256, size)."""
+    os.makedirs(DEVICE_BACKUP_FOLDER, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(dir=DEVICE_BACKUP_FOLDER, prefix=".upload-", suffix=".zip")
+    digest, total = hashlib.sha256(), 0
+    try:
+        with os.fdopen(fd, "wb") as out:
+            for chunk in iter(lambda: upload.stream.read(1 << 20), b""):
+                total += len(chunk)
+                if total > DEVICE_BACKUP_MAX_BYTES:
+                    raise _BackupTooLarge()
+                digest.update(chunk)
+                out.write(chunk)
+        if total == 0:
+            raise ValueError("The backup is empty")
+        _check_backup_zip(temp_path)
+    except BaseException:
+        os.remove(temp_path)
+        raise
+    return temp_path, digest.hexdigest(), total
+
+
+@app.route('/api/device-backups')
+@requires_auth
+def device_backups_overview():
+    """Session only: every app's devices, for the admin UI."""
+    if not DEVICE_BACKUPS:
+        return jsonify({"success": True, "enabled": False, "apps": []})
+    root = os.path.realpath(DEVICE_BACKUP_FOLDER)
+    try:
+        names = sorted(os.listdir(root))
+    except FileNotFoundError:
+        names = []
+    apps = [{"id": name, "devices": _device_summaries(os.path.join(root, name))}
+            for name in names
+            if _BACKUP_APP_RE.fullmatch(name) and os.path.isdir(os.path.join(root, name))
+            and not os.path.islink(os.path.join(root, name))]
+    return jsonify({"success": True, "enabled": True, "apps": apps})
+
+
+@app.route('/api/device-backups/<app_id>')
+@requires_backup
+def list_backup_devices(app_id):
+    if not _token_may_touch(app_id):
+        return _backup_scope_refusal(app_id)
+    try:
+        return jsonify({"success": True, "id": app_id, "devices": _device_summaries(_device_backup_dir(app_id))})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+
+
+@app.route('/api/device-backups/<app_id>/<device_id>')
+@requires_backup
+def list_device_backups(app_id, device_id):
+    if not _token_may_touch(app_id):
+        return _backup_scope_refusal(app_id)
+    try:
+        device_dir = _device_backup_dir(app_id, device_id)
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    return jsonify({"success": True, "id": device_id,
+                    "label": _read_device_info(device_dir).get("label") or device_id,
+                    "snapshots": _device_snapshots(device_dir)})
+
+
+@app.route('/api/device-backups/<app_id>/<device_id>', methods=['POST'])
+@requires_backup
+def upload_device_backup(app_id, device_id):
+    """Multipart `file` (a zip) and an optional `label`. The same bytes as the
+    newest snapshot are not stored again (a daily backup of unchanged settings
+    is a no-op); beyond DEVICE_BACKUP_KEEP the oldest go."""
+    if not _token_may_touch(app_id):
+        return _backup_scope_refusal(app_id)
+    temp_path = None
+    try:
+        device_dir = _device_backup_dir(app_id, device_id)
+        upload = request.files.get("file")
+        if upload is None or not upload.filename:
+            return jsonify({"success": False, "error": "Send the backup as a multipart `file`"}), 400
+        label = _clean_backup_label(request.form.get("label"))
+        temp_path, digest, size = _save_backup_upload(upload)
+        with _device_backups_lock:
+            app_dir = os.path.dirname(device_dir)
+            if (not os.path.isdir(device_dir)
+                    and len(_device_summaries(app_dir)) >= DEVICE_BACKUP_MAX_DEVICES):
+                raise ValueError(f"{app_id} already backs up {DEVICE_BACKUP_MAX_DEVICES} devices; "
+                                 "delete one in the admin UI first")
+            os.makedirs(device_dir, exist_ok=True)
+            snapshots = _device_snapshots(device_dir)
+            if snapshots and snapshots[0]["sha256"] == digest:
+                _write_device_info(device_dir, label)
+                return jsonify({"success": True, "unchanged": True, "snapshot": snapshots[0]})
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            name = f"{stamp}.zip"
+            # Newer than the newest even within one second, so order follows upload order.
+            if snapshots and _snapshot_order(snapshots[0]["name"])[0] >= stamp:
+                stamp, seq = _snapshot_order(snapshots[0]["name"])
+                if seq >= 999:
+                    raise ValueError("Too many backups this second")
+                name = f"{stamp}.{seq + 1:03d}.zip"
+            path = os.path.join(device_dir, name)
+            with open(path + ".sha256", "w") as f:
+                f.write(digest + "\n")
+            os.replace(temp_path, path)
+            temp_path = None
+            for stale in _device_snapshots(device_dir)[DEVICE_BACKUP_KEEP:]:
+                for leftover in (stale["name"], stale["name"] + ".sha256"):
+                    try:
+                        os.remove(os.path.join(device_dir, leftover))
+                    except OSError as e:
+                        logging.warning(f"Could not prune device backup {leftover}: {e}")
+            _write_device_info(device_dir, label)
+        snapshot = {"name": name, "created": _snapshot_created(name), "size": size, "sha256": digest}
+        return jsonify({"success": True, "unchanged": False, "snapshot": snapshot})
+    except _BackupTooLarge:
+        return jsonify({"success": False,
+                        "error": f"The backup is larger than DEVICE_BACKUP_MAX_BYTES ({DEVICE_BACKUP_MAX_BYTES} bytes)"}), 413
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error storing a device backup: {e}")
+        return jsonify({"success": False, "error": "Backup failed"}), 500
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+@app.route('/api/device-backups/<app_id>/<device_id>/<name>')
+@requires_backup
+def download_device_backup(app_id, device_id, name):
+    if not _token_may_touch(app_id):
+        return _backup_scope_refusal(app_id)
+    try:
+        device_dir = _device_backup_dir(app_id, device_id)
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    snapshot = next((s for s in _device_snapshots(device_dir) if s["name"] == name), None)
+    if snapshot is None:
+        return jsonify({"success": False, "error": "Backup not found"}), 404
+    response = send_file(os.path.join(device_dir, name), mimetype="application/zip", as_attachment=True,
+                         download_name=f"{app_id}-{device_id}-{name}")
+    response.headers["X-Content-SHA256"] = snapshot["sha256"]
+    return response
+
+
+@app.route('/api/device-backups/<app_id>/<device_id>/<name>', methods=['DELETE'])
+@requires_auth
+def delete_device_backup(app_id, device_id, name):
+    """Session only, like every delete."""
+    if not DEVICE_BACKUPS:
+        return jsonify({"success": False, "error": "Device backups are turned off"}), 404
+    try:
+        device_dir = _device_backup_dir(app_id, device_id)
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    with _device_backups_lock:
+        if not any(s["name"] == name for s in _device_snapshots(device_dir)):
+            return jsonify({"success": False, "error": "Backup not found"}), 404
+        os.remove(os.path.join(device_dir, name))
+        try:
+            os.remove(os.path.join(device_dir, name + ".sha256"))
+        except FileNotFoundError:
+            pass
+    return jsonify({"success": True})
+
+
+@app.route('/api/device-backups/<app_id>/<device_id>', methods=['DELETE'])
+@requires_auth
+def delete_backup_device(app_id, device_id):
+    """Session only: a device and every snapshot it kept."""
+    if not DEVICE_BACKUPS:
+        return jsonify({"success": False, "error": "Device backups are turned off"}), 404
+    try:
+        device_dir = _device_backup_dir(app_id, device_id)
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    with _device_backups_lock:
+        if os.path.islink(device_dir) or not os.path.isdir(device_dir):
+            return jsonify({"success": False, "error": "Device not found"}), 404
+        shutil.rmtree(device_dir)
     return jsonify({"success": True})
 
 
