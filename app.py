@@ -186,7 +186,7 @@ APK_REJECT_DEBUGGABLE = _env("APK_REJECT_DEBUGGABLE", "false").strip().lower() i
 # its settings here, one folder per app and device. Off by default; on, only a
 # session or a backup-kind token reaches them.
 DEVICE_BACKUPS = _env("DEVICE_BACKUPS", "false").strip().lower() in ("1", "true", "yes", "on")
-DEVICE_BACKUP_MAX_BYTES = int(_env("DEVICE_BACKUP_MAX_BYTES", 64 * 1024 * 1024))
+DEVICE_BACKUP_MAX_BYTES = int(_env("DEVICE_BACKUP_MAX_BYTES", 256 * 1024 * 1024))
 DEVICE_BACKUP_KEEP = max(1, int(_env("DEVICE_BACKUP_KEEP", "30")))
 DEVICE_BACKUP_MAX_DEVICES = max(1, int(_env("DEVICE_BACKUP_MAX_DEVICES", "20")))
 GARAGE_S3_ENDPOINT = _env("GARAGE_S3_ENDPOINT")

@@ -241,7 +241,7 @@ curl -fsS -H "Authorization: Bearer $TOKEN" -o backup.zip \
 
 A device ID is 1–64 of letters, digits, `.`, `_` or `-`, not starting with
 `.`. The zip must not contain absolute, backslash or `..` paths. Uploads over
-`DEVICE_BACKUP_MAX_BYTES` (64 MiB) answer 413. The server keeps the newest
+`DEVICE_BACKUP_MAX_BYTES` (256 MiB) answer 413. The server keeps the newest
 `DEVICE_BACKUP_KEEP` (30) per device and at most `DEVICE_BACKUP_MAX_DEVICES`
 (20) devices per app; delete old devices in the admin UI.
 

@@ -34,7 +34,7 @@ updates.
   resolves outside the root. Uploads in the same second get `.001`, `.002`…
   so order follows upload order.
 - **The archive is the app's business.** The server checks only that it is a
-  zip of at most `DEVICE_BACKUP_MAX_BYTES` whose entries have no absolute,
+  zip of at most `DEVICE_BACKUP_MAX_BYTES` (256 MiB: user themes and wallpapers ride along) whose entries have no absolute,
   backslash or `..` path, at most 20,000 entries and 1 GiB unpacked, so a
   phone restoring it can't be handed a path that escapes.
 - **An unchanged backup is a no-op**: the same SHA-256 as the newest snapshot
