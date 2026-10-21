@@ -855,12 +855,20 @@
             </form>
 
             <h2 style="margin-top:40px;">API tokens</h2>
-            <p>For agents and CI: <code>POST /api/publish</code> with <code>Authorization: Bearer &lt;token&gt;</code>, or the MCP server in <code>scripts/feather_mcp.py</code>. A token can publish and read; it cannot delete apps, change settings, or manage tokens.</p>
+            <p>For agents and CI: <code>POST /api/publish</code> with <code>Authorization: Bearer &lt;token&gt;</code>, or the MCP server in <code>scripts/feather_mcp.py</code>. A token can publish and read; it cannot delete apps, change settings, or manage tokens. A <em>device backups</em> token is for a phone: it keeps its named apps' settings under Device backups below, and can do nothing else.</p>
             <div id="apiTokens"></div>
             <form id="apiTokenForm" onsubmit="createApiToken(event)">
                 <div class="form-group">
                     <label for="apiTokenName">Token name</label>
                     <input id="apiTokenName" required maxlength="80" placeholder="claude-agent, github-actions…">
+                </div>
+                <div class="form-group">
+                    <label for="apiTokenKind">Kind</label>
+                    <select id="apiTokenKind">
+                        <option value="publish">Publish (agents, CI)</option>
+                        <option value="backup">Device backups only (a phone)</option>
+                    </select>
+                    <small class="field-hint">A device backups token must be limited to the apps it backs up, e.g. <code>dev.omalauncher</code>.</small>
                 </div>
                 <div class="news-row">
                     <div class="form-group">
@@ -879,6 +887,10 @@
                 <p><strong>Copy this token now; it will not be shown again.</strong></p>
                 <input id="apiTokenValue" readonly aria-label="New API token" style="font-family: var(--mono);" onclick="this.select()">
             </div>
+
+            <h2 style="margin-top:40px;">Device backups</h2>
+            <p>Settings apps on your phones keep here with a device backups token, newest first. Phones restore them; deleting is only possible here.</p>
+            <div id="deviceBackups"></div>
 
         </div>
 
@@ -1381,6 +1393,7 @@
             } else if (tabName === 'source-info') {
                 loadSourceInfo();
                 loadApiTokens();
+                loadDeviceBackups();
             } else if (tabName === 'import-repo') {
                 loadAutoImport();
             } else if (tabName === 'health') {
@@ -2112,7 +2125,7 @@
                 box.innerHTML = tokens.map(t => `
                     <div class="news-row" style="align-items:center; margin-bottom:8px;">
                         <div><strong>${escapeHtml(t.name)}</strong> <code>${escapeHtml(t.prefix)}…</code><br>
-                        <small class="field-hint">${t.apps ? 'Only ' + escapeHtml(t.apps.join(', ')) : 'Any app'} · ${t.expires ? 'expires ' + escapeHtml(t.expires) : 'never expires'} · created ${escapeHtml(t.created || '')} · last used ${escapeHtml(t.lastUsed || 'never')}</small></div>
+                        <small class="field-hint">${t.kind === 'backup' ? 'Device backups · ' : ''}${t.apps ? 'Only ' + escapeHtml(t.apps.join(', ')) : 'Any app'} · ${t.expires ? 'expires ' + escapeHtml(t.expires) : 'never expires'} · created ${escapeHtml(t.created || '')} · last used ${escapeHtml(t.lastUsed || 'never')}</small></div>
                         <button type="button" class="btn btn-secondary" data-token-id="${escapeHtml(t.id)}" onclick="revokeApiToken(this.dataset.tokenId)">Revoke</button>
                     </div>`).join('');
             } catch (error) {
@@ -2125,13 +2138,69 @@
             const name = document.getElementById('apiTokenName').value.trim();
             const apps = document.getElementById('apiTokenApps').value.trim();
             const expiresInDays = document.getElementById('apiTokenDays').value.trim();
-            const response = await fetch('/api/tokens', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name, apps, expiresInDays})});
+            const kind = document.getElementById('apiTokenKind').value;
+            const response = await fetch('/api/tokens', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name, apps, expiresInDays, kind})});
             const data = await response.json();
             if (!response.ok) { showToast(data.error || 'Could not create token', 'error'); return; }
             document.getElementById('apiTokenValue').value = data.token;
             document.getElementById('apiTokenNew').hidden = false;
             ['apiTokenName', 'apiTokenApps', 'apiTokenDays'].forEach(id => { document.getElementById(id).value = ''; });
             loadApiTokens();
+        }
+
+        async function loadDeviceBackups() {
+            const box = document.getElementById('deviceBackups');
+            try {
+                const response = await fetch('/api/device-backups');
+                const data = await response.json();
+                if (!response.ok) { box.textContent = data.error || 'Could not load device backups'; return; }
+                if (!data.enabled) { box.innerHTML = '<p class="field-hint">Off. Set <code>DEVICE_BACKUPS=true</code> in the environment to turn them on.</p>'; return; }
+                const devices = data.apps.flatMap(a => a.devices.map(d => ({app: a.id, ...d})));
+                if (!devices.length) { box.innerHTML = '<p class="field-hint">No backups yet.</p>'; return; }
+                box.innerHTML = devices.map(d => `
+                    <details style="margin-bottom:8px;" data-app="${escapeHtml(d.app)}" data-device="${escapeHtml(d.id)}" ontoggle="if (this.open) loadDeviceSnapshots(this)">
+                        <summary><strong>${escapeHtml(d.label)}</strong> <small class="field-hint">${escapeHtml(d.app)} · ${d.snapshots} backup${d.snapshots === 1 ? '' : 's'} · ${(d.size / 1048576).toFixed(1)} MB · last ${escapeHtml(d.lastBackup || 'never')}</small></summary>
+                        <div class="device-snapshots"></div>
+                        <button type="button" class="btn btn-secondary" onclick="deleteBackupDevice(this.closest('details'))">Delete device and its backups</button>
+                    </details>`).join('');
+            } catch (error) {
+                box.textContent = 'Could not load device backups: ' + error.message;
+            }
+        }
+
+        function deviceBackupPath(details) {
+            return '/api/device-backups/' + encodeURIComponent(details.dataset.app) + '/' + encodeURIComponent(details.dataset.device);
+        }
+
+        async function loadDeviceSnapshots(details) {
+            const list = details.querySelector('.device-snapshots');
+            const response = await fetch(deviceBackupPath(details));
+            const data = await response.json();
+            if (!response.ok) { list.textContent = data.error || 'Could not load backups'; return; }
+            list.innerHTML = data.snapshots.map(s => `
+                <div class="news-row" style="align-items:center; margin:6px 0;">
+                    <div><code>${escapeHtml(s.created)}</code> <small class="field-hint">${(s.size / 1024).toFixed(0)} KB · sha256 ${escapeHtml(s.sha256.slice(0, 12))}…</small></div>
+                    <div>
+                        <a class="btn btn-secondary" href="${deviceBackupPath(details)}/${encodeURIComponent(s.name)}">Download</a>
+                        <button type="button" class="btn btn-secondary" data-name="${escapeHtml(s.name)}" onclick="deleteDeviceSnapshot(this.closest('details'), this.dataset.name)">Delete</button>
+                    </div>
+                </div>`).join('') || '<p class="field-hint">No backups left.</p>';
+        }
+
+        async function deleteDeviceSnapshot(details, name) {
+            if (!confirm('Delete this backup? The phone can no longer restore it.')) return;
+            const response = await fetch(deviceBackupPath(details) + '/' + encodeURIComponent(name), {method: 'DELETE'});
+            const data = await response.json();
+            showToast(response.ok ? 'Backup deleted' : (data.error || 'Delete failed'), response.ok ? 'success' : 'error');
+            if (response.ok) loadDeviceBackups();
+        }
+
+        async function deleteBackupDevice(details) {
+            if (!confirm('Delete this device and every backup it kept?')) return;
+            const response = await fetch(deviceBackupPath(details), {method: 'DELETE'});
+            const data = await response.json();
+            showToast(response.ok ? 'Device deleted' : (data.error || 'Delete failed'), response.ok ? 'success' : 'error');
+            if (response.ok) loadDeviceBackups();
         }
 
         async function revokeApiToken(id) {

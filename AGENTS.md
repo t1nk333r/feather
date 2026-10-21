@@ -84,8 +84,13 @@ A branch is not done until CI is green on it.
    - `requires_auth` means an admin session only.
    - `requires_publish` means a session **or** an API token.
 
+   - `requires_backup` means a session **or** a `kind: backup` token, and
+     only while `DEVICE_BACKUPS` is on (plan 088).
+
    Tokens may publish, edit app details and read; they must never reach
-   delete, settings, token-management or restore routes. A token limited to
+   delete, settings, token-management or restore routes. A backup token
+   reaches only the device-backup routes of its named apps: `requires_publish`
+   refuses it, and `requires_backup` refuses publish tokens. A token limited to
    named apps must be checked with `_token_may_touch(id)` in every route
    that writes an app. When you add a route, choose the tier
    deliberately. `tests/test_publish_api.py` pins the current boundaries.

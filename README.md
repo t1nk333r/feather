@@ -239,6 +239,7 @@ Everything is set in `.env`; [`.env.example`](./.env.example) explains every var
 | `MAX_CONTENT_LENGTH` | 2 GiB | Upload size cap. |
 | `STORAGE_BACKEND` / `ICON_STORAGE_BACKEND` / `APK_STORAGE_BACKEND` | `local` | See [Storage](#storage-local-disk-or-garages3). Needs `GARAGE_*`. |
 | `APK_REJECT_DEBUGGABLE` | `false` | Refuse debuggable APKs on every upload path instead of publishing them with a warning. |
+| `DEVICE_BACKUPS` | `false` | Let phones keep their apps' settings here with a backups-only token (plan 088). `DEVICE_BACKUP_MAX_BYTES` (256 MiB), `DEVICE_BACKUP_KEEP` (30 per device), `DEVICE_BACKUP_MAX_DEVICES` (20 per app). |
 | `SESSION_COOKIE_SECURE` | `false` | Mark the admin cookie `Secure`. Turn on when a TLS proxy is in front. |
 | `DOWNLOAD_DEADLINE_SECONDS` | `1800` | Wall-clock limit for any download-from-URL. |
 | `FDROID_KEYSTORE_PASSWORD` | — | Required for the `android` profile. |
