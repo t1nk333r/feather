@@ -40,6 +40,7 @@ if _SCRIPTS_DIR not in sys.path:
 import release_source_ingest as release_ingest
 from apk_inspection import inspect_apk, ApkInspectionError, extract_apk_icon
 from ipa_inspection import inspect_ipa, InspectionError as IpaInspectionError
+from ipa_inspection import MAX_ENTITLEMENT_KEYS as IPA_MAX_ENTITLEMENT_KEYS, MAX_PRIVACY_KEYS as IPA_MAX_PRIVACY_KEYS
 import certificate_inspection
 
 # Configure logging
@@ -316,9 +317,12 @@ def _declare_permissions(app_entry, inspection):
     source lists every entitlement and privacy key of the app and its
     extensions (VerifyAppOperation, `undeclaredPermissions`); an empty list
     blocks any app signed with, say, an App Group. The list is per app, not
-    per version, so keys are only ever added: an extra one costs nothing,
-    a missing one blocks the install. Existing entries, and their text,
-    are kept as they are."""
+    per version, so keys are only ever added: an extra one only lengthens
+    the permission list AltStore shows before installing, a missing one
+    blocks the install. Existing entries, and their text, are kept as they
+    are. The inspector caps what one IPA contributes; the same caps bound
+    the app's whole list, so publishing many versions cannot grow the public
+    source.json without limit."""
     if inspection is None or not isinstance(app_entry, dict):
         return []
     permissions = app_entry.get('appPermissions')
@@ -329,9 +333,12 @@ def _declare_permissions(app_entry, inspection):
     privacy = dict(privacy) if isinstance(privacy, dict) else {}
 
     # Older AltStore sources wrote {"name": ...} objects; count them as declared.
-    declared = {e if isinstance(e, str) else e.get('name') for e in entitlements if isinstance(e, (str, dict))}
+    names = (e if isinstance(e, str) else e.get('name') for e in entitlements if isinstance(e, (str, dict)))
+    declared = {name for name in names if isinstance(name, str)}
     new_entitlements = sorted(set(inspection.entitlements) - _IMPLICIT_ENTITLEMENTS - declared)
+    new_entitlements = new_entitlements[:max(0, IPA_MAX_ENTITLEMENT_KEYS - len(entitlements))]
     new_privacy = sorted(set(inspection.privacy) - set(privacy))
+    new_privacy = new_privacy[:max(0, IPA_MAX_PRIVACY_KEYS - len(privacy))]
     if not new_entitlements and not new_privacy:
         return []
     permissions['entitlements'] = entitlements + new_entitlements
@@ -1912,7 +1919,7 @@ class SourceManager:
                 logging.info(f"Added new app: {data['name']}")
             target = source_data['apps'][existing_index] if existing_index is not None else new_app
             _declare_permissions(target, self.ipa_inspection)
-
+        
             if self.save_source(source_data):
                 if stored_icon_ext:
                     icon_storage.cleanup_variants(bundle_id, stored_icon_ext)
@@ -2177,7 +2184,7 @@ class SourceManager:
             if auto_icon_url:
                 app['iconURL'] = auto_icon_url
             _declare_permissions(app, self.ipa_inspection)
-
+        
             success = self.save_source(source_data)
             if not success:
                 return False, "Failed to add version"
@@ -2220,16 +2227,16 @@ class SourceManager:
             source_data = self.load_source()
             if not source_data:
                 return False, "Failed to load source data"
-
+        
             app_index = None
             for i, app in enumerate(source_data['apps']):
                 if app['bundleIdentifier'] == bundle_identifier:
                     app_index = i
                     break
-
+        
             if app_index is None:
                 return False, "App not found"
-
+        
             app = source_data['apps'][app_index]
             version_index = None
         
@@ -2298,7 +2305,7 @@ class SourceManager:
                 if 'size' in version_data and version_data['size'] is not None:
                     version_obj['size'] = version_data['size']
             _declare_permissions(app, self.ipa_inspection)
-
+        
             success = self.save_source(source_data)
             return success, "Version updated successfully" if success else "Failed to update version"
     

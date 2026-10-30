@@ -87,7 +87,7 @@ Open `http://<host>:7000`, sign in with `ADMIN_PASSWORD`, and add an app. Put a 
 
 What every path has in common:
 
-- **The binary is the truth.** Bundle ID / package and version are read from `Info.plist` or `AndroidManifest.xml`, never from the filename. Publishing a version that already exists is a no-op.
+- **The binary is the truth.** Bundle ID / package and version are read from `Info.plist` or `AndroidManifest.xml`, never from the filename. Publishing a version that already exists stores nothing; through `/api/publish`, an iOS repeat still declares any entitlement or privacy key the app's `appPermissions` lacks (AltStore and SideStore refuse to install without them).
 - **Bad files are refused up front.** A file that isn't a real IPA (e.g. an HTML error page) is rejected with the reason. Unsigned APKs are rejected, because F-Droid would silently never publish them.
 - **Icons come from the binary.** If you don't supply an icon, the IPA's own icon files or the APK's launcher icon are used. A supplied icon, or a real icon the app already has, is never replaced. For apps added before this existed, click **Fill missing icons** on the Apps tab (Android: **Rebuild Index** does it too). Limits: iOS icons that exist only inside `Assets.car`, and Android icons that are vector-only, can't be extracted — the default icon is shown.
 - **A different bundle ID is allowed, with a warning.** Renamed/patched builds are often catalogued under their own ID on purpose; devices still install and update them by the IPA's real identifier, so the response tells you.

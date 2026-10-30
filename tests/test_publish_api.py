@@ -596,3 +596,69 @@ def test_replacing_a_version_binary_declares_its_entitlements(authed_client, tmp
                                          base_url="http://example.test")
     assert ok, message
     assert _permissions(tmp_path, "com.example.app") == {"entitlements": [GROUPS], "privacy": {}}
+
+
+def test_only_entitlement_keys_reach_the_catalogue(authed_client, tmp_path):
+    _publish_signed(authed_client, "com.signed.values", "1.0",
+                    {GROUPS: ["group.value-never-stored"], "keychain-access-groups": ["T.secret-value"]})
+    source = (tmp_path / "source.json").read_text()
+    assert GROUPS in source and "keychain-access-groups" in source
+    assert "value-never-stored" not in source and "secret-value" not in source
+
+
+@pytest.mark.parametrize("entry_point", ["add_app_manual", "add_version", "update_version"])
+def test_a_version_without_a_binary_never_reuses_an_earlier_inspection(authed_client, tmp_path, entry_point):
+    manager = authed_client.app_module.source_manager
+    ipa = tmp_path / "earlier.ipa"
+    ipa.write_bytes(_signed_ipa("com.earlier.app", "1.0", {GROUPS: ["g"]}))
+    manager.ipa_inspection = sys.modules["ipa_inspection"].inspect_ipa(ipa)
+    assert manager.ipa_inspection.entitlements == (GROUPS,)
+    url = "http://example.test/no-binary.ipa"
+    if entry_point == "add_app_manual":
+        bundle_id = "com.url.only"
+        ok, message = manager.add_app_manual({"bundleIdentifier": bundle_id, "version": "1.0", "name": "U",
+                                              "developerName": "D", "downloadURL": url})
+    elif entry_point == "add_version":
+        bundle_id = "com.example.app"
+        ok, message = manager.add_version(bundle_id, {"version": "9.0", "downloadURL": url})
+    else:
+        bundle_id = "com.example.app"
+        ok, message = manager.update_version(bundle_id, "1.0.0", {"downloadURL": url})
+    assert ok, message
+    assert GROUPS not in json.dumps(_permissions(tmp_path, bundle_id))
+
+
+def test_concurrent_retry_still_declares_permissions(authed_client, tmp_path, monkeypatch):
+    module = authed_client.app_module
+    # The early check missed it; another request stored this version first.
+    monkeypatch.setattr(module.source_manager, "add_version",
+                        lambda *a, **k: (True, f"Version 1.1.0 {module.ALREADY_PRESENT}"))
+    body = _publish_signed(authed_client, "com.example.app", "1.1.0", {GROUPS: ["g"]}).get_json()
+    assert body["added"] is False and body["created"] is False, body
+    assert body["permissionsAdded"] == [GROUPS]
+    assert GROUPS in _permissions(tmp_path, "com.example.app")["entitlements"]
+
+
+def test_malformed_declared_entries_are_kept_and_ignored(authed_client, tmp_path):
+    source = json.loads((tmp_path / "source.json").read_text())
+    source["apps"][0]["appPermissions"] = {"entitlements": [{"name": ["odd"]}, 7], "privacy": {}}
+    (tmp_path / "source.json").write_text(json.dumps(source))
+    body = _publish_signed(authed_client, "com.example.app", "1.1.0", {GROUPS: ["g"]}).get_json()
+    assert body["added"] is True, body
+    assert _permissions(tmp_path, "com.example.app")["entitlements"] == [{"name": ["odd"]}, 7, GROUPS]
+
+
+def test_an_apps_declared_permissions_are_capped(authed_client, tmp_path, monkeypatch):
+    module = authed_client.app_module
+    monkeypatch.setattr(module, "IPA_MAX_ENTITLEMENT_KEYS", 2)
+    monkeypatch.setattr(module, "IPA_MAX_PRIVACY_KEYS", 1)
+    source = json.loads((tmp_path / "source.json").read_text())
+    source["apps"][0]["appPermissions"] = {"entitlements": ["a.kept"], "privacy": {}}
+    (tmp_path / "source.json").write_text(json.dumps(source))
+    _publish_signed(authed_client, "com.example.app", "1.1.0", {GROUPS: ["g"], "keychain-access-groups": ["k"]},
+                    {"NSCameraUsageDescription": "Scan", "NSMicrophoneUsageDescription": "Mic"})
+    assert _permissions(tmp_path, "com.example.app") == {
+        "entitlements": ["a.kept", GROUPS], "privacy": {"NSCameraUsageDescription": "Scan"}}
+    _publish_signed(authed_client, "com.example.app", "1.2.0", {"z.more": True}, {"NSPhotoLibraryUsageDescription": "P"})
+    assert _permissions(tmp_path, "com.example.app") == {
+        "entitlements": ["a.kept", GROUPS], "privacy": {"NSCameraUsageDescription": "Scan"}}

@@ -16,16 +16,31 @@ _EXTENSION_INFO_PLIST = re.compile(r"^Payload/[^/]+\.app/(?:PlugIns|Extensions)/
 # bytes actually read (the central directory's size is attacker-controlled):
 # a 1.5 MB IPA whose plist inflates to 1.5 GB otherwise costs ~3 GB of RAM.
 MAX_INFO_PLIST_BYTES = 4 * 1024 * 1024
-# Reaching an executable's code signature inflates everything before it, so
-# the executable's declared size bounds that work (the reader never returns
-# more than it). Real iOS executables are well under it. The other caps bound
-# what is held in memory at once.
+# Reaching an executable's code signature inflates everything before it, and
+# the archive reader re-inflates from the start on any backward seek. Every
+# read below is therefore forward-only, so one executable costs at most its
+# declared size (the reader never returns more), and the sizes of all the
+# executables one inspection reads must fit MAX_INFLATED_EXECUTABLE_BYTES; an
+# executable over either cap is skipped. Inspection runs under the catalogue
+# lock. Real iOS executables are well under both (a 459 MB TikTok IPA reads in
+# 0.07 s). The other caps bound what is held in memory at once.
 MAX_EXECUTABLE_BYTES = 1024 * 1024 * 1024
-MAX_LOAD_COMMANDS_BYTES = 4 * 1024 * 1024
+MAX_INFLATED_EXECUTABLE_BYTES = 2 * 1024 * 1024 * 1024
+MAX_LOAD_COMMANDS_BYTES = 256 * 1024
 MAX_ENTITLEMENTS_BYTES = 1024 * 1024
+MAX_EXTENSION_PLIST_BYTES = 256 * 1024
 MAX_FAT_SLICES = 8
 MAX_SIGNATURE_SLOTS = 64
 MAX_EXTENSIONS = 64
+# What is kept ends up in the public source.json, polled by every device.
+# Entitlement and privacy keys are short identifiers (Apple defines a few
+# dozen privacy keys); a key over the length cap is dropped, only the first
+# keys in sorted order are kept, and privacy text is cut to MAX_PRIVACY_TEXT
+# characters.
+MAX_KEY_LENGTH = 256
+MAX_ENTITLEMENT_KEYS = 256
+MAX_PRIVACY_KEYS = 64
+MAX_PRIVACY_TEXT = 2000
 
 # fat_arch and fat_arch_64: cputype, cpusubtype, offset, size, ...
 _FAT_ARCH_LAYOUTS = {0xCAFEBABE: (20, ">IIII"), 0xCAFEBABF: (32, ">IIQQ")}
@@ -88,10 +103,12 @@ def _clean_optional(value):
 
 
 def _privacy(plist):
+    """NS…UsageDescription keys and their text, cut to the catalogue caps."""
     return {
-        key: value.strip()
+        key: value.strip()[:MAX_PRIVACY_TEXT]
         for key, value in plist.items()
         if isinstance(key, str)
+        and len(key) <= MAX_KEY_LENGTH
         and key.startswith("NS")
         and key.endswith("UsageDescription")
         and isinstance(value, str)
@@ -106,13 +123,20 @@ def _read_exact(handle, size):
     return data
 
 
+def _seek_forward(handle, offset):
+    # A backward seek re-inflates the member from its start (see the caps).
+    if offset < handle.tell():
+        raise ValueError("backward seek")
+    handle.seek(offset)
+
+
 def _extension_plist(archive, name):
     info = archive.getinfo(name)
-    if info.file_size > MAX_INFO_PLIST_BYTES:
+    if info.file_size > MAX_EXTENSION_PLIST_BYTES:
         return None
     with archive.open(info) as handle:
-        raw = handle.read(MAX_INFO_PLIST_BYTES + 1)
-    if len(raw) > MAX_INFO_PLIST_BYTES:
+        raw = handle.read(MAX_EXTENSION_PLIST_BYTES + 1)
+    if len(raw) > MAX_EXTENSION_PLIST_BYTES:
         return None
     plist = plistlib.loads(raw)
     return plist if isinstance(plist, dict) else None
@@ -120,15 +144,18 @@ def _extension_plist(archive, name):
 
 def _slice_entitlements(handle, start, end):
     """Entitlement keys of the thin Mach-O at [start, end) of the executable,
-    from the XML entitlements blob of its embedded code signature."""
-    handle.seek(start)
+    from the XML entitlements blob (slot 5) of its embedded code signature.
+    A signature with only the DER form (slot 7) yields nothing; codesign,
+    ldid and rcodesign write both."""
+    _seek_forward(handle, start)
     magic = _read_exact(handle, 4)
     header_size = _MACHO_HEADER_SIZES.get(magic)
     if header_size is None:
         return set()
     header = magic + _read_exact(handle, header_size - 4)
     ncmds, sizeofcmds = struct.unpack_from("<II", header, 16)
-    if sizeofcmds > MAX_LOAD_COMMANDS_BYTES or start + header_size + sizeofcmds > end:
+    commands_end = start + header_size + sizeofcmds
+    if sizeofcmds > MAX_LOAD_COMMANDS_BYTES or ncmds > sizeofcmds // 8 or commands_end > end:
         return set()
     commands = _read_exact(handle, sizeofcmds)
     offset, signature = 0, None
@@ -146,9 +173,9 @@ def _slice_entitlements(handle, start, end):
         return set()                                   # unsigned
     dataoff, datasize = signature
     sig_start = start + dataoff
-    if datasize < 12 or sig_start + datasize > end:
+    if datasize < 12 or sig_start < commands_end or sig_start + datasize > end:
         return set()
-    handle.seek(sig_start)
+    _seek_forward(handle, sig_start)
     magic, length, count = struct.unpack(">III", _read_exact(handle, 12))
     index_end = 12 + 8 * count
     if magic != _CSMAGIC_EMBEDDED_SIGNATURE or count > MAX_SIGNATURE_SLOTS or length > datasize or index_end > length:
@@ -157,7 +184,7 @@ def _slice_entitlements(handle, start, end):
     blob_offset = next((off for slot, off in struct.iter_unpack(">II", index) if slot == _CSSLOT_ENTITLEMENTS), None)
     if blob_offset is None or blob_offset < index_end or blob_offset + 8 > length:
         return set()                                   # signed without entitlements
-    handle.seek(sig_start + blob_offset)
+    _seek_forward(handle, sig_start + blob_offset)
     magic, blob_length = struct.unpack(">II", _read_exact(handle, 8))
     if (magic != _CSMAGIC_EMBEDDED_ENTITLEMENTS or not 8 <= blob_length <= MAX_ENTITLEMENTS_BYTES
             or blob_offset + blob_length > length):
@@ -165,19 +192,17 @@ def _slice_entitlements(handle, start, end):
     entitlements = plistlib.loads(_read_exact(handle, blob_length - 8))
     if not isinstance(entitlements, dict):
         return set()
-    return {key for key in entitlements if isinstance(key, str)}
+    return {key for key in entitlements if isinstance(key, str) and len(key) <= MAX_KEY_LENGTH}
 
 
-def _executable_entitlements(archive, name):
+def _executable_entitlements(archive, info):
     """Entitlement keys of every architecture slice of one executable."""
-    info = archive.getinfo(name)
     size = info.file_size
-    if size > MAX_EXECUTABLE_BYTES:
-        return set()
     with archive.open(info) as handle:
         head = _read_exact(handle, 8)
         layout = _FAT_ARCH_LAYOUTS.get(struct.unpack(">I", head[:4])[0])
         if layout is None:
+            handle.seek(0)                             # back over the 8 bytes just read
             slices = [(0, size)]
         else:
             entry_size, fields = layout
@@ -185,13 +210,19 @@ def _executable_entitlements(archive, name):
             if not 0 < nfat <= MAX_FAT_SLICES:
                 return set()
             table = _read_exact(handle, entry_size * nfat)
+            table_end = 8 + entry_size * nfat
             slices = []
             for i in range(nfat):
                 _cputype, _cpusubtype, offset, slice_size = struct.unpack_from(fields, table, i * entry_size)
-                if 8 + entry_size * nfat <= offset and offset + slice_size <= size:
+                if table_end <= offset and 0 < slice_size and offset + slice_size <= size:
                     slices.append((offset, offset + slice_size))
-        keys = set()
-        for start, end in sorted(slices):              # in file order: forward seeks only
+        keys, read_to = set(), 0
+        # In file order, and a slice overlapping the one before it is skipped,
+        # so every slice is read in one forward pass.
+        for start, end in sorted(slices):
+            if start < read_to:
+                continue
+            read_to = end
             try:
                 keys |= _slice_entitlements(handle, start, end)
             except Exception:
@@ -202,8 +233,9 @@ def _executable_entitlements(archive, name):
 def _bundle_permissions(archive, names, app_plist_name, app_plist):
     """Entitlement keys of the app's and its extensions' executables, and the
     privacy keys of the extensions' Info.plists. Best effort: any part that
-    cannot be read contributes nothing and never fails the inspection, so an
-    IPA that was accepted before is accepted unchanged."""
+    cannot be read, or does not fit the caps, contributes nothing and never
+    fails the inspection, so an IPA that was accepted before is accepted
+    unchanged."""
     bundles = [(app_plist_name, app_plist)]
     for name in [n for n in names if _EXTENSION_INFO_PLIST.match(n)][:MAX_EXTENSIONS]:
         try:
@@ -211,6 +243,7 @@ def _bundle_permissions(archive, names, app_plist_name, app_plist):
         except Exception:
             continue
     members = set(names)
+    budget = MAX_INFLATED_EXECUTABLE_BYTES             # the app comes first
     keys, extension_privacy = set(), {}
     for plist_name, plist in bundles:
         if not isinstance(plist, dict):
@@ -224,10 +257,20 @@ def _bundle_permissions(archive, names, app_plist_name, app_plist):
         if member not in members:
             continue
         try:
-            keys |= _executable_entitlements(archive, member)
+            info = archive.getinfo(member)
+            if info.file_size > min(MAX_EXECUTABLE_BYTES, budget):
+                continue
+            budget -= info.file_size
+            keys |= _executable_entitlements(archive, info)
         except Exception:
             continue
-    return tuple(sorted(keys)), extension_privacy
+    return tuple(sorted(keys)[:MAX_ENTITLEMENT_KEYS]), extension_privacy
+
+
+def _capped_privacy(privacy):
+    if len(privacy) <= MAX_PRIVACY_KEYS:
+        return privacy
+    return {key: privacy[key] for key in sorted(privacy)[:MAX_PRIVACY_KEYS]}
 
 
 def inspect_ipa(path, label="IPA"):
@@ -309,6 +352,6 @@ def inspect_ipa(path, label="IPA"):
         supported_platforms=platforms,
         device_families=families,
         # The app's own text wins over an extension's for the same key.
-        privacy={**extension_privacy, **_privacy(plist)},
+        privacy=_capped_privacy({**extension_privacy, **_privacy(plist)}),
         entitlements=entitlements,
     )

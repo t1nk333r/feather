@@ -77,9 +77,9 @@ A branch is not done until CI is green on it.
 3. **The binary is the truth.** Bundle ID, package and version are read from
    `Info.plist` or `AndroidManifest.xml`, never from filenames (filenames
    lie), and an iOS app's `appPermissions` from its executables' signed
-   entitlements and plists. Re-publishing an existing version is a no-op,
-   not an overwrite: it only declares permissions its binary carries that
-   the app lacks.
+   entitlements and plists. Re-publishing an existing version is never an
+   overwrite: it stores nothing, and through iOS `/api/publish` it only
+   declares permissions its binary carries that the app lacks.
 4. **Validate before storing.** Every ingest path calls the inspectors
    before anything touches storage. Keep the zip-bomb caps in the inspectors
    (plist 4 MB, manifest 16 MB, resources 64 MB, icons 8 MB).

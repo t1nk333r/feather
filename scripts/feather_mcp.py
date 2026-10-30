@@ -44,7 +44,9 @@ TOOLS = [
             "is false; the app details (name, summary, description, licence, links, "
             "categories) apply only when the app is created -- use update_app afterwards. "
             "whats_new is this version's release notes. Publishing a version that already "
-            "exists is a no-op (added=false). Check `warnings` in the result."
+            "exists stores nothing (added=false); for an iOS app it still declares any "
+            "entitlement or privacy key the app lacks (permissionsAdded). Check `warnings` "
+            "in the result."
         ),
         "inputSchema": {
             "type": "object",
