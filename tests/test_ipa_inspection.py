@@ -385,13 +385,16 @@ def test_entitlements_blob_cap_at_its_default(tmp_path, filler, read):
     assert inspect_ipa(path).entitlements == ((GROUPS,) if read else ())
 
 
-def test_entitlements_blobs_share_one_parse_budget_app_first(tmp_path, monkeypatch):
+@pytest.mark.parametrize("slack, expected", [(0, (GROUPS, "e0", "e1")), (-1, (GROUPS, "e0"))])
+def test_entitlements_blobs_share_one_parse_budget_app_first(tmp_path, monkeypatch, slack, expected):
     import scripts.ipa_inspection as module
     path = tmp_path / "app.ipa"
     _with_extensions(path, 2)
+    # Each blob is charged in full, header included: one byte short skips the last.
     blob = len(plistlib.dumps({"e0": True})) + 8
-    monkeypatch.setattr(module, "MAX_PARSED_ENTITLEMENTS_BYTES", len(plistlib.dumps({GROUPS: ["g"]})) + 8 + blob)
-    assert inspect_ipa(path).entitlements == (GROUPS, "e0")
+    monkeypatch.setattr(module, "MAX_PARSED_ENTITLEMENTS_BYTES",
+                        len(plistlib.dumps({GROUPS: ["g"]})) + 8 + 2 * blob + slack)
+    assert inspect_ipa(path).entitlements == expected
 
 
 def test_keys_are_trimmed_as_they_accumulate(tmp_path, monkeypatch):
@@ -459,3 +462,14 @@ def test_a_slice_behind_the_reader_is_refused():
     handle.read(16)
     with pytest.raises(ValueError):
         module._slice_entitlements(handle, 0, len(handle.getvalue()), module._Budget())
+
+
+def test_extension_privacy_is_trimmed_as_it_accumulates(tmp_path, monkeypatch):
+    import scripts.ipa_inspection as module
+    monkeypatch.setattr(module, "MAX_PRIVACY_KEYS", 1)
+    path = tmp_path / "app.ipa"
+    _with_extensions(path, 3)                                            # NSE0..NSE2UsageDescription
+    with zipfile.ZipFile(path) as archive:
+        names = archive.namelist()
+        _keys, privacy = module._bundle_permissions(archive, names, "Payload/App.app/Info.plist", bundle())
+    assert privacy == {"NSE0UsageDescription": "text"}

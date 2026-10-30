@@ -26,7 +26,8 @@ MAX_INFO_PLIST_BYTES = 4 * 1024 * 1024
 #   never returns more), and all the executables one inspection reads must
 #   fit MAX_INFLATED_EXECUTABLE_BYTES. Only stored and deflated executables
 #   are read: deflate inflates at 0.4-1.5 GiB/s, bzip2 and lzma at a few
-#   dozen MiB/s. MangaSync 0.3.5's 30 MiB deflated executable reads in 0.07 s.
+#   dozen MiB/s at worst. MangaSync 0.3.5's 30 MiB deflated executable reads
+#   in 0.07 s.
 # - Parsing XML costs about 0.1 s per MiB, so each entitlements blob is
 #   capped and all of them together must fit MAX_PARSED_ENTITLEMENTS_BYTES.
 #   Real blobs are a few KB.
@@ -262,21 +263,22 @@ def _bundle_permissions(archive, names, app_plist_name, app_plist):
     cannot be read, or does not fit the caps, contributes nothing and never
     fails the inspection, so an IPA that was accepted before is accepted
     unchanged."""
-    bundles = [(app_plist_name, app_plist)]
+    # Only each plist's executable name and privacy keys are kept, and the
+    # privacy keys are trimmed as they accumulate, like the entitlement keys.
+    bundles = [(app_plist_name, app_plist.get("CFBundleExecutable"))]
+    extension_privacy = {}
     for name in [n for n in names if _EXTENSION_INFO_PLIST.match(n)][:MAX_EXTENSIONS]:
         try:
-            bundles.append((name, _extension_plist(archive, name)))
+            plist = _extension_plist(archive, name)
         except Exception:
             continue
+        if plist is not None:
+            extension_privacy = _capped_privacy({**extension_privacy, **_privacy(plist)})
+            bundles.append((name, plist.get("CFBundleExecutable")))
     members = set(names)
     budget = _Budget()                                 # the app comes first
-    keys, extension_privacy = set(), {}
-    for plist_name, plist in bundles:
-        if not isinstance(plist, dict):
-            continue
-        if plist is not app_plist:
-            extension_privacy.update(_privacy(plist))
-        executable = plist.get("CFBundleExecutable")
+    keys = set()
+    for plist_name, executable in bundles:
         if not isinstance(executable, str) or not executable or "/" in executable:
             continue
         member = plist_name[: -len("Info.plist")] + executable

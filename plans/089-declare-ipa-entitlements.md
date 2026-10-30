@@ -60,8 +60,10 @@ would make a busy host silently drop permissions and block installs.
   read: bzip2 and lzma inflate at a few dozen MiB/s, deflate at 0.4-1.5 GiB/s.
 - **Parsing.** XML costs about 0.1 s per MiB, so an entitlements blob may be
   64 KiB (real ones are a few KB) and all of one inspection's blobs 4 MiB.
-- **Holding.** Keys are trimmed to the first 256 as they accumulate, not at
-  the end, so a binary full of distinct keys cannot fill memory.
+- **Holding.** Entitlement and privacy keys are trimmed to the first 256 and
+  64 as they accumulate, not at the end, and only each extension plist's
+  executable name and privacy keys are kept once it is parsed, so a binary
+  or plist full of keys cannot fill memory.
 - **Looping.** Load commands at most 256 KiB and no more commands than they
   can hold, 8 fat slices, 64 signature slots, 64 extensions, 256 KiB per
   extension `Info.plist`.
@@ -74,14 +76,23 @@ each shape an app plus 64 extensions unless noted:
 |---|---|---|---|
 | nine 256 MiB executables of 8 overlapping slices | 2.25 MiB | 3.4 s | 54 MiB |
 | 8 slices of maximal 8-byte load commands each | 0.24 MiB | 1.6 s | 54 MiB |
-| 64 maximal extension plists | 0.72 MiB | 0.5 s | 54 MiB |
+| 64 extension plists of 256 KiB of `<dict/>` | 0.04 MiB | 1.4 s | 37 MiB |
+| 64 extension plists of 256 KiB of distinct privacy keys | 0.85 MiB | 0.5 s | 49 MiB |
 | 8 slices of 1 MiB entitlements XML each | 1.34 MiB | 0.2 s | 45 MiB |
 | 8 slices of 60 KiB of distinct keys each | 2.92 MiB | 0.2 s | 45 MiB |
 | 8 slices of 1 MiB of distinct keys each | 47.8 MiB | 0.3 s | 62 MiB |
+| **all at once:** 65 executables, 2 GiB inflated, 8 slices each of maximal load commands and a 64 KiB blob, and 64 maximal plists | 2.23 MiB | 6.8 s | 51 MiB |
 
-A reviewer measured the fourth shape at 31.7 s and the last at 35 s and
-2.1 GiB before the parse budget and the running trim; the first scaled to
-minutes before the inflate budget.
+Peak RSS is the measuring process's, which ran several shapes in turn, so
+each figure is an upper bound for its row. The last row is the worst case
+one inspection can cost: every unit of work
+is either budgeted (inflating, parsing entitlements) or capped (load
+commands, plists, slices, extensions), and their sum is about 7 s on one
+core. `/api/publish` inspects twice, once before taking the lock. A reviewer
+measured the 1 MiB XML shape at 31.7 s, the 1 MiB distinct-key shape at
+35 s and 2.1 GiB, and the dense plists at 182 MiB, before the parse budget
+and the running trims; the overlap shape scaled to minutes before the
+inflate budget.
 
 ## Writing the catalogue
 
