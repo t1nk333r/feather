@@ -82,7 +82,10 @@ A branch is not done until CI is green on it.
    declares permissions its binary carries that the app lacks.
 4. **Validate before storing.** Every ingest path calls the inspectors
    before anything touches storage. Keep the zip-bomb caps in the inspectors
-   (plist 4 MB, manifest 16 MB, resources 64 MB, icons 8 MB).
+   (plist 4 MB, manifest 16 MB, resources 64 MB, icons 8 MB) and the IPA
+   entitlement reader's per-inspection budgets (2 GiB of executables
+   inflated, 4 MiB of entitlements parsed; `tests/test_ipa_inspection.py`
+   pins every default). It runs under the catalogue lock.
 5. **Auth tiers:**
    - `requires_auth` means an admin session only.
    - `requires_publish` means a session **or** an API token.

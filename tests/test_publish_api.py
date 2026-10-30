@@ -662,3 +662,12 @@ def test_an_apps_declared_permissions_are_capped(authed_client, tmp_path, monkey
     _publish_signed(authed_client, "com.example.app", "1.2.0", {"z.more": True}, {"NSPhotoLibraryUsageDescription": "P"})
     assert _permissions(tmp_path, "com.example.app") == {
         "entitlements": ["a.kept", GROUPS], "privacy": {"NSCameraUsageDescription": "Scan"}}
+
+
+def test_new_permissions_are_appended_in_sorted_order(authed_client, tmp_path):
+    _publish_signed(authed_client, "com.signed.order", "1.0",
+                    {"z.last": True, GROUPS: ["g"], "a.first": True, "m.middle": True},
+                    {"NSMicrophoneUsageDescription": "Mic", "NSCameraUsageDescription": "Scan"})
+    permissions = _permissions(tmp_path, "com.signed.order")
+    assert permissions["entitlements"] == ["a.first", GROUPS, "m.middle", "z.last"]
+    assert list(permissions["privacy"]) == ["NSCameraUsageDescription", "NSMicrophoneUsageDescription"]

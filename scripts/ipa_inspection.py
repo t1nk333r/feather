@@ -16,18 +16,26 @@ _EXTENSION_INFO_PLIST = re.compile(r"^Payload/[^/]+\.app/(?:PlugIns|Extensions)/
 # bytes actually read (the central directory's size is attacker-controlled):
 # a 1.5 MB IPA whose plist inflates to 1.5 GB otherwise costs ~3 GB of RAM.
 MAX_INFO_PLIST_BYTES = 4 * 1024 * 1024
-# Reaching an executable's code signature inflates everything before it, and
-# the archive reader re-inflates from the start on any backward seek. Every
-# read below is therefore forward-only, so one executable costs at most its
-# declared size (the reader never returns more), and the sizes of all the
-# executables one inspection reads must fit MAX_INFLATED_EXECUTABLE_BYTES; an
-# executable over either cap is skipped. Inspection runs under the catalogue
-# lock. Real iOS executables are well under both (a 459 MB TikTok IPA reads in
-# 0.07 s). The other caps bound what is held in memory at once.
+# Inspection runs under the catalogue lock, on bytes a publisher controls, so
+# its work is budgeted per inspection, deterministically (a deadline would
+# silently drop permissions on a busy host), app first:
+# - Reaching an executable's code signature inflates everything before it,
+#   and the archive reader re-inflates from the start on any backward seek.
+#   So reads only move forward (bar re-reading the 8-byte head of a thin
+#   binary), one executable costs at most its declared size (the reader
+#   never returns more), and all the executables one inspection reads must
+#   fit MAX_INFLATED_EXECUTABLE_BYTES. Only stored and deflated executables
+#   are read: deflate inflates at 0.4-1.5 GiB/s, bzip2 and lzma at a few
+#   dozen MiB/s. MangaSync 0.3.5's 30 MiB deflated executable reads in 0.07 s.
+# - Parsing XML costs about 0.1 s per MiB, so each entitlements blob is
+#   capped and all of them together must fit MAX_PARSED_ENTITLEMENTS_BYTES.
+#   Real blobs are a few KB.
+# Anything over a cap is skipped. The other caps bound what one step holds.
 MAX_EXECUTABLE_BYTES = 1024 * 1024 * 1024
 MAX_INFLATED_EXECUTABLE_BYTES = 2 * 1024 * 1024 * 1024
+MAX_ENTITLEMENTS_BYTES = 64 * 1024
+MAX_PARSED_ENTITLEMENTS_BYTES = 4 * 1024 * 1024
 MAX_LOAD_COMMANDS_BYTES = 256 * 1024
-MAX_ENTITLEMENTS_BYTES = 1024 * 1024
 MAX_EXTENSION_PLIST_BYTES = 256 * 1024
 MAX_FAT_SLICES = 8
 MAX_SIGNATURE_SLOTS = 64
@@ -35,7 +43,8 @@ MAX_EXTENSIONS = 64
 # What is kept ends up in the public source.json, polled by every device.
 # Entitlement and privacy keys are short identifiers (Apple defines a few
 # dozen privacy keys); a key over the length cap is dropped, only the first
-# keys in sorted order are kept, and privacy text is cut to MAX_PRIVACY_TEXT
+# keys in sorted order are kept (trimmed as they accumulate, so a binary full
+# of keys cannot fill memory), and privacy text is cut to MAX_PRIVACY_TEXT
 # characters.
 MAX_KEY_LENGTH = 256
 MAX_ENTITLEMENT_KEYS = 256
@@ -116,7 +125,23 @@ def _privacy(plist):
     }
 
 
+class _Budget:
+    """What one inspection may still inflate and parse."""
+
+    def __init__(self):
+        self.executable_bytes = MAX_INFLATED_EXECUTABLE_BYTES
+        self.entitlements_bytes = MAX_PARSED_ENTITLEMENTS_BYTES
+
+
+def _first_keys(keys):
+    # The first N of a union are the first N of the unions' first Ns, so
+    # trimming after every union gives the same result as trimming once.
+    return set(sorted(keys)[:MAX_ENTITLEMENT_KEYS])
+
+
 def _read_exact(handle, size):
+    if size < 0:
+        raise ValueError("negative size")              # read(-n) reads to the end
     data = handle.read(size)
     if len(data) != size:
         raise ValueError("truncated")
@@ -142,7 +167,7 @@ def _extension_plist(archive, name):
     return plist if isinstance(plist, dict) else None
 
 
-def _slice_entitlements(handle, start, end):
+def _slice_entitlements(handle, start, end, budget):
     """Entitlement keys of the thin Mach-O at [start, end) of the executable,
     from the XML entitlements blob (slot 5) of its embedded code signature.
     A signature with only the DER form (slot 7) yields nothing; codesign,
@@ -187,15 +212,16 @@ def _slice_entitlements(handle, start, end):
     _seek_forward(handle, sig_start + blob_offset)
     magic, blob_length = struct.unpack(">II", _read_exact(handle, 8))
     if (magic != _CSMAGIC_EMBEDDED_ENTITLEMENTS or not 8 <= blob_length <= MAX_ENTITLEMENTS_BYTES
-            or blob_offset + blob_length > length):
+            or blob_offset + blob_length > length or blob_length > budget.entitlements_bytes):
         return set()
+    budget.entitlements_bytes -= blob_length
     entitlements = plistlib.loads(_read_exact(handle, blob_length - 8))
     if not isinstance(entitlements, dict):
         return set()
     return {key for key in entitlements if isinstance(key, str) and len(key) <= MAX_KEY_LENGTH}
 
 
-def _executable_entitlements(archive, info):
+def _executable_entitlements(archive, info, budget):
     """Entitlement keys of every architecture slice of one executable."""
     size = info.file_size
     with archive.open(info) as handle:
@@ -224,7 +250,7 @@ def _executable_entitlements(archive, info):
                 continue
             read_to = end
             try:
-                keys |= _slice_entitlements(handle, start, end)
+                keys = _first_keys(keys | _slice_entitlements(handle, start, end, budget))
             except Exception:
                 continue
         return keys
@@ -243,7 +269,7 @@ def _bundle_permissions(archive, names, app_plist_name, app_plist):
         except Exception:
             continue
     members = set(names)
-    budget = MAX_INFLATED_EXECUTABLE_BYTES             # the app comes first
+    budget = _Budget()                                 # the app comes first
     keys, extension_privacy = set(), {}
     for plist_name, plist in bundles:
         if not isinstance(plist, dict):
@@ -258,13 +284,14 @@ def _bundle_permissions(archive, names, app_plist_name, app_plist):
             continue
         try:
             info = archive.getinfo(member)
-            if info.file_size > min(MAX_EXECUTABLE_BYTES, budget):
+            if (info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
+                    or info.file_size > min(MAX_EXECUTABLE_BYTES, budget.executable_bytes)):
                 continue
-            budget -= info.file_size
-            keys |= _executable_entitlements(archive, info)
+            budget.executable_bytes -= info.file_size
+            keys = _first_keys(keys | _executable_entitlements(archive, info, budget))
         except Exception:
             continue
-    return tuple(sorted(keys)[:MAX_ENTITLEMENT_KEYS]), extension_privacy
+    return tuple(sorted(keys)), extension_privacy
 
 
 def _capped_privacy(privacy):

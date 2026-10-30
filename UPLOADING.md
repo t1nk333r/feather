@@ -66,6 +66,7 @@ listed (both installers ignore them). Keys are read from the XML entitlements
 in each executable's code signature (`codesign`, `ldid` and `rcodesign` all
 write it); a key over 256 characters is dropped, privacy text is cut to 2000
 characters, and an app lists at most 256 entitlement and 64 privacy keys.
+An executable compressed with anything but deflate (or stored) is not read.
 Sending an already-published IPA to `/api/publish` again declares whatever its
 app still lacks, and stores nothing else; iOS `added: false` responses report
 those keys in `permissionsAdded` (`[]` when nothing was missing). The admin

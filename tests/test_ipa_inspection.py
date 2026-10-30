@@ -227,7 +227,7 @@ def test_reads_a_fat64_universal_binary(tmp_path):
 
 
 @pytest.mark.parametrize("executable", [
-    signed_macho({GROUPS: ["g"]}, ncmds=1000),          # more commands than sizeofcmds can hold
+    signed_macho({GROUPS: ["g"]}, ncmds=6),             # more commands than 40 bytes can hold
     signed_macho({GROUPS: ["g"]}, datasize_extra=100),  # signature runs past the slice
     signed_macho({GROUPS: ["g"]}, length_delta=-1),     # entitlements blob runs past the SuperBlob
     fat_macho(signed_macho({GROUPS: ["g"]}), sizes=[10_000]),  # slice runs past the file
@@ -277,6 +277,7 @@ def test_seeks_only_forward():
     ("MAX_INFLATED_EXECUTABLE_BYTES", 100),
     ("MAX_LOAD_COMMANDS_BYTES", 32),
     ("MAX_FAT_SLICES", 1),
+    ("MAX_SIGNATURE_SLOTS", 1),
 ])
 def test_executable_caps(tmp_path, monkeypatch, cap, value):
     import scripts.ipa_inspection as module
@@ -353,3 +354,108 @@ def test_unreadable_executable_member_contributes_nothing(tmp_path, damage):
     path.write_bytes(bytes(raw))
     result = inspect_ipa(path)
     assert result.bundle_identifier == "com.example.app" and result.entitlements == ()
+
+
+def test_as_many_load_commands_as_fit_are_read(tmp_path):
+    path = tmp_path / "app.ipa"
+    write_ipa(path, bundle(), extra={"Payload/App.app/App": signed_macho({GROUPS: ["g"]}, ncmds=5)})
+    assert inspect_ipa(path).entitlements == (GROUPS,)
+
+
+def test_default_caps():
+    import scripts.ipa_inspection as module
+    # Security bounds (AGENTS.md invariant 4): a change here is deliberate.
+    assert {name: getattr(module, name) for name in (
+        "MAX_INFO_PLIST_BYTES", "MAX_EXECUTABLE_BYTES", "MAX_INFLATED_EXECUTABLE_BYTES",
+        "MAX_ENTITLEMENTS_BYTES", "MAX_PARSED_ENTITLEMENTS_BYTES", "MAX_LOAD_COMMANDS_BYTES",
+        "MAX_EXTENSION_PLIST_BYTES", "MAX_FAT_SLICES", "MAX_SIGNATURE_SLOTS", "MAX_EXTENSIONS",
+        "MAX_KEY_LENGTH", "MAX_ENTITLEMENT_KEYS", "MAX_PRIVACY_KEYS", "MAX_PRIVACY_TEXT")} == {
+        "MAX_INFO_PLIST_BYTES": 4 << 20, "MAX_EXECUTABLE_BYTES": 1 << 30,
+        "MAX_INFLATED_EXECUTABLE_BYTES": 2 << 30, "MAX_ENTITLEMENTS_BYTES": 64 << 10,
+        "MAX_PARSED_ENTITLEMENTS_BYTES": 4 << 20, "MAX_LOAD_COMMANDS_BYTES": 256 << 10,
+        "MAX_EXTENSION_PLIST_BYTES": 256 << 10, "MAX_FAT_SLICES": 8, "MAX_SIGNATURE_SLOTS": 64,
+        "MAX_EXTENSIONS": 64, "MAX_KEY_LENGTH": 256, "MAX_ENTITLEMENT_KEYS": 256,
+        "MAX_PRIVACY_KEYS": 64, "MAX_PRIVACY_TEXT": 2000}
+
+
+@pytest.mark.parametrize("filler, read", [(60 * 1024, True), (70 * 1024, False)])
+def test_entitlements_blob_cap_at_its_default(tmp_path, filler, read):
+    path = tmp_path / "app.ipa"
+    write_ipa(path, bundle(), extra={"Payload/App.app/App": signed_macho({GROUPS: ["x" * filler]})})
+    assert inspect_ipa(path).entitlements == ((GROUPS,) if read else ())
+
+
+def test_entitlements_blobs_share_one_parse_budget_app_first(tmp_path, monkeypatch):
+    import scripts.ipa_inspection as module
+    path = tmp_path / "app.ipa"
+    _with_extensions(path, 2)
+    blob = len(plistlib.dumps({"e0": True})) + 8
+    monkeypatch.setattr(module, "MAX_PARSED_ENTITLEMENTS_BYTES", len(plistlib.dumps({GROUPS: ["g"]})) + 8 + blob)
+    assert inspect_ipa(path).entitlements == (GROUPS, "e0")
+
+
+def test_keys_are_trimmed_as_they_accumulate(tmp_path, monkeypatch):
+    import scripts.ipa_inspection as module
+    monkeypatch.setattr(module, "MAX_ENTITLEMENT_KEYS", 2)
+    path = tmp_path / "app.ipa"
+    _with_extensions(path, 2)                                            # GROUPS, e0, e1
+    assert inspect_ipa(path).entitlements == (GROUPS, "e0")
+    fat = fat_macho(signed_macho({"a": True, "b": True}), signed_macho({"c": True, "d": True}))
+    write_ipa(path, bundle(), extra={"Payload/App.app/App": fat})
+    with zipfile.ZipFile(path) as archive:
+        assert module._executable_entitlements(
+            archive, archive.getinfo("Payload/App.app/App"), module._Budget()) == {"a", "b"}
+
+
+@pytest.mark.parametrize("method, read", [
+    (zipfile.ZIP_STORED, True), (zipfile.ZIP_DEFLATED, True),
+    (zipfile.ZIP_BZIP2, False), (zipfile.ZIP_LZMA, False),
+])
+def test_only_stored_and_deflated_executables_are_read(tmp_path, method, read):
+    path = tmp_path / "app.ipa"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("Payload/App.app/Info.plist", plistlib.dumps(bundle()))
+        archive.writestr("Payload/App.app/App", signed_macho({GROUPS: ["g"]}), method)
+    assert inspect_ipa(path).entitlements == ((GROUPS,) if read else ())
+
+
+@pytest.mark.parametrize("plist", [b"not a plist", plistlib.dumps(["a", "list"])])
+def test_unreadable_extension_plist_contributes_nothing(tmp_path, plist):
+    path = tmp_path / "app.ipa"
+    write_ipa(path, bundle(), extra={
+        "Payload/App.app/App": signed_macho({GROUPS: ["g"]}),
+        "Payload/App.app/PlugIns/Bad.appex/Info.plist": plist,
+        "Payload/App.app/PlugIns/Good.appex/Info.plist": plistlib.dumps(
+            {"CFBundleExecutable": "Good", "NSCameraUsageDescription": "Scan"}),
+        "Payload/App.app/PlugIns/Good.appex/Good": signed_macho({"e.good": True}),
+    })
+    result = inspect_ipa(path)
+    assert result.entitlements == (GROUPS, "e.good") and result.privacy == {"NSCameraUsageDescription": "Scan"}
+
+
+def test_an_unreadable_slice_keeps_its_siblings(tmp_path):
+    broken = signed_macho({"e.broken": True}).replace(b"<dict>", b"<dicx>")   # malformed XML, same length
+    path = tmp_path / "app.ipa"
+    write_ipa(path, bundle(), extra={"Payload/App.app/App": fat_macho(broken, signed_macho({GROUPS: ["g"]}))})
+    assert inspect_ipa(path).entitlements == (GROUPS,)
+
+
+@pytest.mark.parametrize("blob_length", range(8))
+def test_a_short_entitlements_blob_never_reads_to_the_end(tmp_path, monkeypatch, blob_length):
+    import scripts.ipa_inspection as module
+    sizes, read_exact = [], module._read_exact
+    monkeypatch.setattr(module, "_read_exact", lambda handle, size: sizes.append(size) or read_exact(handle, size))
+    thin = signed_macho({GROUPS: ["g"]})
+    at = thin.index(b"\xfa\xde\x71\x71")
+    thin = thin[:at + 4] + struct.pack(">I", blob_length) + thin[at + 8:]
+    path = tmp_path / "app.ipa"
+    write_ipa(path, bundle(), extra={"Payload/App.app/App": thin})
+    assert inspect_ipa(path).entitlements == () and sizes and min(sizes) >= 0
+
+
+def test_a_slice_behind_the_reader_is_refused():
+    import scripts.ipa_inspection as module
+    handle = io.BytesIO(signed_macho({GROUPS: ["g"]}))
+    handle.read(16)
+    with pytest.raises(ValueError):
+        module._slice_entitlements(handle, 0, len(handle.getvalue()), module._Budget())
