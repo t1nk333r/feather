@@ -303,6 +303,43 @@ def normalize_source(source_data):
     return data
 
 
+# Every signed app carries these; AltStore and SideStore do not ask a source
+# to list them.
+_IMPLICIT_ENTITLEMENTS = frozenset({"application-identifier", "com.apple.developer.team-identifier"})
+
+
+def _declare_permissions(app_entry, inspection):
+    """Add the entitlement and privacy keys an IPA carries to its app's
+    `appPermissions`, and return the keys added.
+
+    AltStore and SideStore refuse to install an app from a source unless the
+    source lists every entitlement and privacy key of the app and its
+    extensions (VerifyAppOperation, `undeclaredPermissions`); an empty list
+    blocks any app signed with, say, an App Group. The list is per app, not
+    per version, so keys are only ever added: an extra one costs nothing,
+    a missing one blocks the install. Existing entries, and their text,
+    are kept as they are."""
+    if inspection is None or not isinstance(app_entry, dict):
+        return []
+    permissions = app_entry.get('appPermissions')
+    permissions = dict(permissions) if isinstance(permissions, dict) else {}
+    entitlements = permissions.get('entitlements')
+    entitlements = list(entitlements) if isinstance(entitlements, list) else []
+    privacy = permissions.get('privacy')
+    privacy = dict(privacy) if isinstance(privacy, dict) else {}
+
+    # Older AltStore sources wrote {"name": ...} objects; count them as declared.
+    declared = {e if isinstance(e, str) else e.get('name') for e in entitlements if isinstance(e, (str, dict))}
+    new_entitlements = sorted(set(inspection.entitlements) - _IMPLICIT_ENTITLEMENTS - declared)
+    new_privacy = sorted(set(inspection.privacy) - set(privacy))
+    if not new_entitlements and not new_privacy:
+        return []
+    permissions['entitlements'] = entitlements + new_entitlements
+    permissions['privacy'] = {**privacy, **{key: inspection.privacy[key] for key in new_privacy}}
+    app_entry['appPermissions'] = permissions
+    return new_entitlements + new_privacy
+
+
 def notify(event, text):
     """Fire-and-forget Telegram message. Never raises, never blocks the caller.
 
@@ -1235,12 +1272,15 @@ class SourceManager:
         warning: renamed patched builds are published under their own
         catalog ID on purpose, but devices install and update by the IPA's
         identifier, so the uploader should know. The warning is left in
-        self.ipa_warning for the caller's success message; every caller
-        holds self._lock.
+        self.ipa_warning for the caller's success message, and the
+        inspection in self.ipa_inspection for _declare_permissions; every
+        caller holds self._lock.
         """
         self.ipa_warning = None
+        self.ipa_inspection = None
         self.extracted_icon = None
         inspection = inspect_ipa(source, label or "IPA")
+        self.ipa_inspection = inspection
         if getattr(self, "_icon_wanted", False):
             # The uploader gave no icon and the app has none: take it from
             # the IPA (Info.plist icon files / iTunesArtwork, CgBI decoded).
@@ -1728,6 +1768,7 @@ class SourceManager:
 
     def _add_app_manual_locked(self, data, ipa_file, download_from_url, icon_file, download_icon_from_url, base_url):
             self.ipa_warning = None
+            self.ipa_inspection = None
             source_data = self.load_source()
             if not source_data:
                 return False, "Failed to load source data"
@@ -1869,7 +1910,9 @@ class SourceManager:
                 # Add new app
                 source_data['apps'].append(new_app)
                 logging.info(f"Added new app: {data['name']}")
-        
+            target = source_data['apps'][existing_index] if existing_index is not None else new_app
+            _declare_permissions(target, self.ipa_inspection)
+
             if self.save_source(source_data):
                 if stored_icon_ext:
                     icon_storage.cleanup_variants(bundle_id, stored_icon_ext)
@@ -2056,6 +2099,7 @@ class SourceManager:
 
     def _add_version_locked(self, bundle_identifier, version_data, ipa_file, download_from_url, base_url):
             self.ipa_warning = None
+            self.ipa_inspection = None
             source_data = self.load_source()
             if not source_data:
                 return False, "Failed to load source data"
@@ -2132,7 +2176,8 @@ class SourceManager:
             auto_icon_url, _ = self._store_extracted_icon(bundle_identifier, base_url)
             if auto_icon_url:
                 app['iconURL'] = auto_icon_url
-        
+            _declare_permissions(app, self.ipa_inspection)
+
             success = self.save_source(source_data)
             if not success:
                 return False, "Failed to add version"
@@ -2153,22 +2198,38 @@ class SourceManager:
             entry['localizedDescription'] = text
             return (True, "Release notes updated") if self.save_source(source_data) else (False, "Failed to save source data")
 
+    def declare_permissions(self, bundle_identifier, inspection):
+        """Declare an already-published IPA's permissions on its app
+        (_declare_permissions); no version or binary changes. Returns
+        (ok, keys added); ok is False only when the catalogue could not be
+        saved."""
+        with self._lock:
+            source_data = self.load_source()
+            app = next((a for a in (source_data or {}).get('apps', []) if a.get('bundleIdentifier') == bundle_identifier), None)
+            if app is None:
+                return True, []
+            added = _declare_permissions(app, inspection)
+            if added and not self.save_source(source_data):
+                return False, []
+            return True, added
+
     def update_version(self, bundle_identifier, version, version_data, ipa_file=None, download_from_url=False, base_url=None):
         """Update a specific version of an app"""
         with self._lock:
+            self.ipa_inspection = None
             source_data = self.load_source()
             if not source_data:
                 return False, "Failed to load source data"
-        
+
             app_index = None
             for i, app in enumerate(source_data['apps']):
                 if app['bundleIdentifier'] == bundle_identifier:
                     app_index = i
                     break
-        
+
             if app_index is None:
                 return False, "App not found"
-        
+
             app = source_data['apps'][app_index]
             version_index = None
         
@@ -2236,7 +2297,8 @@ class SourceManager:
                 # Update size if provided
                 if 'size' in version_data and version_data['size'] is not None:
                     version_obj['size'] = version_data['size']
-        
+            _declare_permissions(app, self.ipa_inspection)
+
             success = self.save_source(source_data)
             return success, "Version updated successfully" if success else "Failed to update version"
     
@@ -6552,6 +6614,24 @@ def _ios_fields(details):
     return {meta: details[key] for key, meta in mapping.items() if details.get(key)}
 
 
+def _already_present_ios(result, inspection, name):
+    """The version is published already, so nothing is stored. Its binary
+    still states the permissions it needs: declare any the app lacks, so a
+    source published before Feather read entitlements is fixed by sending
+    the same IPA again."""
+    bundle_id, version = result["id"], result["version"]
+    ok, added = source_manager.declare_permissions(bundle_id, inspection)
+    if not ok:
+        return jsonify({**result, "success": False,
+                        "error": f"Failed to declare the permissions of {bundle_id} {version}"}), 503
+    body = {**result, "success": True, "added": False, "permissionsAdded": added,
+            "message": f"Already present: {bundle_id} {version}"
+                       + (f"; declared {', '.join(added)}" if added else "")}
+    if name is not None:
+        body["name"] = name
+    return jsonify(body), 200
+
+
 def _publish_ios(tmp_path, opts, base_url):
     try:
         inspection = inspect_ipa(tmp_path, "IPA")
@@ -6564,8 +6644,7 @@ def _publish_ios(tmp_path, opts, base_url):
               "build": inspection.build_version, "created": False, "warnings": []}
     existing = source_manager.get_app(bundle_id)
     if existing and any(isinstance(v, dict) and v.get('version') == version for v in existing.get('versions', [])):
-        return jsonify({**result, "success": True, "added": False, "name": existing.get("name"),
-                        "message": f"Already present: {bundle_id} {version}"}), 200
+        return _already_present_ios(result, inspection, existing.get("name"))
     if not existing and not opts["createIfMissing"]:
         return jsonify({**result, "success": False,
                         "error": f"{bundle_id} is not in the catalogue and createIfMissing is false"}), 404
@@ -6601,8 +6680,7 @@ def _publish_ios(tmp_path, opts, base_url):
             result["created"] = ok
     if ok and ALREADY_PRESENT in message:
         # A concurrent retry stored it first: same answer as the early check.
-        return jsonify({**result, "success": True, "added": False, "created": False,
-                        "message": f"Already present: {bundle_id} {version}"}), 200
+        return _already_present_ios({**result, "created": False}, inspection, None)
     if not ok:
         # Save/load failures are the server's (disk, Garage); say so, so a
         # client retries instead of treating it as a bad upload.

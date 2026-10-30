@@ -103,3 +103,113 @@ def test_published_images_include_shared_inspector():
     assert "COPY scripts/ipa_inspection.py ./scripts/ipa_inspection.py" in (root / "Dockerfile").read_text()
     assert "COPY scripts/ipa_inspection.py ." in (root / "Dockerfile.bot").read_text()
     assert "!scripts/ipa_inspection.py" in (root / ".dockerignore").read_text()
+
+
+# --- entitlements ----------------------------------------------------------------------------
+
+import struct
+
+GROUPS = "com.apple.security.application-groups"
+
+
+def signed_macho(entitlements, bits=64, signature=None):
+    """A minimal thin Mach-O whose LC_CODE_SIGNATURE points at an embedded
+    SuperBlob: a code-directory stand-in, then the XML entitlements blob
+    (slot 5), as codesign and rcodesign lay it out. `entitlements=None`
+    leaves the binary unsigned; `signature` replaces the SuperBlob bytes."""
+    magic, header_size = (b"\xcf\xfa\xed\xfe", 32) if bits == 64 else (b"\xce\xfa\xed\xfe", 28)
+    commands = struct.pack("<II", 0x2, 24) + b"\0" * 16                  # an LC_SYMTAB first
+    code = b"\x1f\x20\x03\xd5" * 16
+    if entitlements is not None or signature is not None:
+        if signature is None:
+            directory = struct.pack(">II", 0xFADE0C02, 16) + b"\0" * 8
+            xml = plistlib.dumps(entitlements)
+            blob = struct.pack(">II", 0xFADE7171, 8 + len(xml)) + xml
+            index_size = 12 + 8 * 2
+            signature = (struct.pack(">III", 0xFADE0CC0, index_size + len(directory) + len(blob), 2)
+                         + struct.pack(">IIII", 0, index_size, 5, index_size + len(directory))
+                         + directory + blob)
+        dataoff = header_size + len(commands) + 16 + len(code)
+        commands += struct.pack("<IIII", 0x1D, 16, dataoff, len(signature))
+    else:
+        signature = b""
+    ncmds = 2 if signature else 1
+    header = magic + struct.pack("<IIIIII", 0x0100000C, 0, 2, ncmds, len(commands), 0)
+    if bits == 64:
+        header += b"\0" * 4
+    return header + commands + code + signature
+
+
+def fat_macho(*slices):
+    """A universal binary holding `slices`, each 16-byte aligned."""
+    offset = (8 + 20 * len(slices) + 15) & ~15
+    table, body = b"", b""
+    for thin in slices:
+        table += struct.pack(">IIIII", 0x0100000C, 0, offset + len(body), len(thin), 4)
+        body += thin + b"\0" * (-len(thin) % 16)
+    head = struct.pack(">II", 0xCAFEBABE, len(slices)) + table
+    return head + b"\0" * (offset - len(head)) + body
+
+
+def bundle(executable="App", **extra):
+    return {"CFBundleIdentifier": "com.example.app", "CFBundleShortVersionString": "1.0",
+            "CFBundleExecutable": executable, **extra}
+
+
+def test_reads_entitlement_keys_of_app_and_extensions(tmp_path):
+    path = tmp_path / "app.ipa"
+    write_ipa(path, bundle(NSCameraUsageDescription="App text"), extra={
+        "Payload/App.app/App": signed_macho({GROUPS: ["group.example"], "application-identifier": "T.x"}),
+        "Payload/App.app/PlugIns/Share.appex/Info.plist": plistlib.dumps(
+            {"CFBundleExecutable": "Share", "NSCameraUsageDescription": "Share text",
+             "NSPhotoLibraryUsageDescription": "Photos"}),
+        "Payload/App.app/PlugIns/Share.appex/Share": signed_macho({"keychain-access-groups": ["T.shared"]}),
+        "Payload/App.app/Extensions/Widget.appex/Info.plist": plistlib.dumps({"CFBundleExecutable": "Widget"}),
+        "Payload/App.app/Extensions/Widget.appex/Widget": signed_macho({"com.apple.developer.siri": True}, bits=32),
+    })
+    result = inspect_ipa(path, "app.ipa")
+    assert result.entitlements == ("application-identifier", "com.apple.developer.siri", GROUPS,
+                                   "keychain-access-groups")
+    # Entitlement values are never kept, only keys; the app's privacy text wins.
+    assert result.privacy == {"NSCameraUsageDescription": "App text", "NSPhotoLibraryUsageDescription": "Photos"}
+
+
+def test_reads_every_slice_of_a_universal_binary(tmp_path):
+    path = tmp_path / "app.ipa"
+    write_ipa(path, bundle(), extra={"Payload/App.app/App": fat_macho(
+        signed_macho({GROUPS: ["g"]}), signed_macho({"get-task-allow": False}, bits=32))})
+    assert inspect_ipa(path).entitlements == (GROUPS, "get-task-allow")
+
+
+@pytest.mark.parametrize("executable", [
+    signed_macho(None),                                                  # unsigned
+    signed_macho(None, signature=b"\xfa\xde\x0c\xc0" + b"\0" * 20),     # signed, no entitlements slot
+    signed_macho(None, signature=b"\0" * 40),                            # not a SuperBlob
+    signed_macho({GROUPS: ["g"]})[:-30],                                # signature cut short
+    signed_macho({GROUPS: ["g"]}).replace(b"\xfa\xde\x71\x71", b"\xfa\xde\x71\x72"),  # wrong blob magic
+    b"\xca\xfe\xba\xbe\0\0\0\x09" + b"\0" * 200,                         # implausible slice count
+    b"#!/bin/sh\n",                                                      # not a Mach-O
+    b"",
+])
+def test_unreadable_signature_contributes_nothing_and_never_fails(tmp_path, executable):
+    path = tmp_path / "app.ipa"
+    write_ipa(path, bundle(), extra={"Payload/App.app/App": executable})
+    result = inspect_ipa(path)
+    assert result.bundle_identifier == "com.example.app" and result.entitlements == ()
+
+
+def test_oversized_entitlements_blob_is_skipped(tmp_path, monkeypatch):
+    import scripts.ipa_inspection as module
+    monkeypatch.setattr(module, "MAX_ENTITLEMENTS_BYTES", 64)
+    path = tmp_path / "app.ipa"
+    write_ipa(path, bundle(), extra={"Payload/App.app/App": signed_macho({GROUPS: ["g" * 100]})})
+    assert inspect_ipa(path).entitlements == ()
+
+
+def test_executable_must_be_the_named_member_of_its_bundle(tmp_path):
+    path = tmp_path / "app.ipa"
+    signed = signed_macho({GROUPS: ["g"]})
+    write_ipa(path, bundle(executable="../Other/App"), extra={"Payload/Other/App": signed})
+    assert inspect_ipa(path).entitlements == ()
+    write_ipa(path, bundle(executable="Missing"), extra={"Payload/App.app/App": signed})
+    assert inspect_ipa(path).entitlements == ()
