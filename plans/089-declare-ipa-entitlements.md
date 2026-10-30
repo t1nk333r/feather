@@ -72,7 +72,7 @@ Anything unreadable or over a cap contributes nothing; the inspection itself
 never fails because of it. Measured on this branch (Python 3.14, one core),
 each shape an app plus 64 extensions unless noted:
 
-| Shape | IPA | Inspect | Peak RSS |
+| Shape | IPA | Inspect | Peak RSS (3.14) |
 |---|---|---|---|
 | nine 256 MiB executables of 8 overlapping slices | 2.25 MiB | 3.4 s | 54 MiB |
 | 8 slices of maximal 8-byte load commands each | 0.24 MiB | 1.6 s | 54 MiB |
@@ -84,7 +84,12 @@ each shape an app plus 64 extensions unless noted:
 | **all at once:** 65 executables, 2 GiB inflated, 8 slices each of maximal load commands and a 64 KiB blob, and 64 maximal plists | 2.23 MiB | 6.8 s | 51 MiB |
 
 Peak RSS is the measuring process's, which ran several shapes in turn, so
-each figure is an upper bound for its row. The last row is the worst case
+each figure is an upper bound for its row. On Python 3.11, which the image
+ships, the plist-heavy shapes peak higher (a reviewer measured about 190 MiB
+for the last row and 183 MiB for the `<dict/>` plists, at 5.9 s): 3.11's
+plistlib leaves each parsed tree in a reference cycle until the cyclic
+collector runs. It is bounded by the 16 MiB of plists one inspection may
+parse. The last row is the worst case
 one inspection can cost: every unit of work
 is either budgeted (inflating, parsing entitlements) or capped (load
 commands, plists, slices, extensions), and their sum is about 7 s on one
