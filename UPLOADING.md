@@ -55,6 +55,24 @@ for an app that already exists (ignored), and Android-only fields sent for
 iOS.
 
 `added: false` means that exact version was already published (a safe retry).
+
+**iOS permissions come from the binary.** Every stored IPA adds the
+entitlement keys its app and extension executables are signed with, and the
+`NS…UsageDescription` keys of their `Info.plist`s, to the app's
+`appPermissions`. AltStore and SideStore refuse to install an app from a
+source that does not list them all. Keys are only added, never removed, and
+`application-identifier` and `com.apple.developer.team-identifier` are never
+listed (both installers ignore them). Keys are read from the XML entitlements
+in each executable's code signature (`codesign`, `ldid` and `rcodesign` all
+write it); a key over 256 characters is dropped, privacy text is cut to 2000
+characters, and an app lists at most 256 entitlement and 64 privacy keys.
+An executable compressed with anything but deflate (or stored) is not read.
+Sending an already-published IPA to `/api/publish` again declares whatever its
+app still lacks, and stores nothing else; iOS `added: false` responses report
+those keys in `permissionsAdded` (`[]` when nothing was missing). The admin
+UI, the importers and the Telegram bot stop at "already present" without
+reading the file, so they declare nothing on a repeat.
+
 Android responses carry `"pending": true`: the APK is stored, and it appears in
 the F-Droid index after the sidecar's next rebuild. Errors are
 `{"success": false, "error": "..."}` with `400` (not a valid IPA/APK, bad

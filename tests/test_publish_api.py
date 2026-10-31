@@ -502,3 +502,172 @@ def test_mcp_repo_status_reports_server_version(authed_client, live_server):
                            "params": {"name": "repo_status", "arguments": {}}}])
     status = json.loads(out[0]["result"]["content"][0]["text"])
     assert status["server_version"] == "dev", err
+
+
+# --- appPermissions follow the binary (AltStore/SideStore refuse undeclared ones) ---------------
+
+GROUPS = "com.apple.security.application-groups"
+
+
+def _signed_ipa(bundle_id, version, entitlements, privacy=None):
+    import plistlib
+    import zipfile
+    from tests.test_ipa_inspection import signed_macho
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("Payload/Fixture.app/Info.plist", plistlib.dumps({
+            "CFBundleIdentifier": bundle_id, "CFBundleShortVersionString": version,
+            "CFBundleVersion": version, "CFBundleExecutable": "Fixture", **(privacy or {})}))
+        zf.writestr("Payload/Fixture.app/Fixture", signed_macho(entitlements))
+    return buf.getvalue()
+
+
+def _publish_signed(client, bundle_id, version, entitlements, privacy=None):
+    return client.post("/api/publish", content_type="multipart/form-data", data={
+        "file": (io.BytesIO(_signed_ipa(bundle_id, version, entitlements, privacy)), "x.ipa")})
+
+
+def _permissions(tmp_path, bundle_id):
+    apps = json.loads((tmp_path / "source.json").read_text())["apps"]
+    return next(a for a in apps if a["bundleIdentifier"] == bundle_id).get("appPermissions")
+
+
+def test_publish_new_app_declares_its_entitlements(authed_client, tmp_path):
+    body = _publish_signed(authed_client, "com.signed.new", "1.0",
+                           {GROUPS: ["group.x"], "application-identifier": "T.com.signed.new",
+                            "com.apple.developer.team-identifier": "T"},
+                           {"NSCameraUsageDescription": "Scan"}).get_json()
+    assert body["added"] is True and body["created"] is True, body
+    # The two identity entitlements every signed app has are never declared.
+    assert _permissions(tmp_path, "com.signed.new") == {
+        "entitlements": [GROUPS], "privacy": {"NSCameraUsageDescription": "Scan"}}
+    source = authed_client.get("/source.json").get_json()
+    entry = next(a for a in source["apps"] if a["bundleIdentifier"] == "com.signed.new")
+    assert entry["appPermissions"]["entitlements"] == [GROUPS]
+
+
+def test_publish_new_version_adds_to_existing_declarations(authed_client, tmp_path):
+    source = json.loads((tmp_path / "source.json").read_text())
+    source["apps"][0]["appPermissions"] = {"entitlements": [{"name": "keychain-access-groups"}, "z.kept"],
+                                           "privacy": {"NSCameraUsageDescription": "Operator text"}}
+    (tmp_path / "source.json").write_text(json.dumps(source))
+    body = _publish_signed(authed_client, "com.example.app", "1.1.0",
+                           {GROUPS: ["g"], "keychain-access-groups": ["T.k"]},
+                           {"NSCameraUsageDescription": "Binary text",
+                            "NSMicrophoneUsageDescription": "Mic"}).get_json()
+    assert body["added"] is True and body["created"] is False, body
+    # Kept as they were, in order; only what was missing is appended.
+    assert _permissions(tmp_path, "com.example.app") == {
+        "entitlements": [{"name": "keychain-access-groups"}, "z.kept", GROUPS],
+        "privacy": {"NSCameraUsageDescription": "Operator text", "NSMicrophoneUsageDescription": "Mic"}}
+
+
+def test_republishing_a_version_declares_what_its_binary_needs(authed_client, tmp_path):
+    first = _publish_signed(authed_client, "com.signed.old", "1.0", None).get_json()
+    assert first["added"] is True and _permissions(tmp_path, "com.signed.old") is None
+
+    again = _publish_signed(authed_client, "com.signed.old", "1.0", {GROUPS: ["g"]}).get_json()
+    assert again["success"] is True and again["added"] is False, again
+    assert again["permissionsAdded"] == [GROUPS] and GROUPS in again["message"]
+    apps = json.loads((tmp_path / "source.json").read_text())["apps"]
+    entry = next(a for a in apps if a["bundleIdentifier"] == "com.signed.old")
+    assert [v["version"] for v in entry["versions"]] == ["1.0"]
+    assert entry["appPermissions"] == {"entitlements": [GROUPS], "privacy": {}}
+
+    before = (tmp_path / "source.json").read_bytes()
+    third = _publish_signed(authed_client, "com.signed.old", "1.0", {GROUPS: ["g"]}).get_json()
+    assert third["added"] is False and third["permissionsAdded"] == []
+    assert (tmp_path / "source.json").read_bytes() == before
+
+
+def test_republish_reports_a_failed_save_as_503(authed_client, tmp_path, monkeypatch):
+    _publish_signed(authed_client, "com.signed.disk", "1.0", None)
+    monkeypatch.setattr(authed_client.app_module.source_manager, "save_source", lambda data: False)
+    resp = _publish_signed(authed_client, "com.signed.disk", "1.0", {GROUPS: ["g"]})
+    assert resp.status_code == 503 and resp.get_json()["success"] is False
+
+
+def test_replacing_a_version_binary_declares_its_entitlements(authed_client, tmp_path):
+    from werkzeug.datastructures import FileStorage
+    manager = authed_client.app_module.source_manager
+    ipa = FileStorage(stream=io.BytesIO(_signed_ipa("com.example.app", "1.0.0", {GROUPS: ["g"]})),
+                      filename="replacement.ipa")
+    ok, message = manager.update_version("com.example.app", "1.0.0", {}, ipa_file=ipa,
+                                         base_url="http://example.test")
+    assert ok, message
+    assert _permissions(tmp_path, "com.example.app") == {"entitlements": [GROUPS], "privacy": {}}
+
+
+def test_only_entitlement_keys_reach_the_catalogue(authed_client, tmp_path):
+    _publish_signed(authed_client, "com.signed.values", "1.0",
+                    {GROUPS: ["group.value-never-stored"], "keychain-access-groups": ["T.secret-value"]})
+    source = (tmp_path / "source.json").read_text()
+    assert GROUPS in source and "keychain-access-groups" in source
+    assert "value-never-stored" not in source and "secret-value" not in source
+
+
+@pytest.mark.parametrize("entry_point", ["add_app_manual", "add_version", "update_version"])
+def test_a_version_without_a_binary_never_reuses_an_earlier_inspection(authed_client, tmp_path, entry_point):
+    manager = authed_client.app_module.source_manager
+    ipa = tmp_path / "earlier.ipa"
+    ipa.write_bytes(_signed_ipa("com.earlier.app", "1.0", {GROUPS: ["g"]}))
+    manager.ipa_inspection = sys.modules["ipa_inspection"].inspect_ipa(ipa)
+    assert manager.ipa_inspection.entitlements == (GROUPS,)
+    url = "http://example.test/no-binary.ipa"
+    if entry_point == "add_app_manual":
+        bundle_id = "com.url.only"
+        ok, message = manager.add_app_manual({"bundleIdentifier": bundle_id, "version": "1.0", "name": "U",
+                                              "developerName": "D", "downloadURL": url})
+    elif entry_point == "add_version":
+        bundle_id = "com.example.app"
+        ok, message = manager.add_version(bundle_id, {"version": "9.0", "downloadURL": url})
+    else:
+        bundle_id = "com.example.app"
+        ok, message = manager.update_version(bundle_id, "1.0.0", {"downloadURL": url})
+    assert ok, message
+    assert GROUPS not in json.dumps(_permissions(tmp_path, bundle_id))
+
+
+def test_concurrent_retry_still_declares_permissions(authed_client, tmp_path, monkeypatch):
+    module = authed_client.app_module
+    # The early check missed it; another request stored this version first.
+    monkeypatch.setattr(module.source_manager, "add_version",
+                        lambda *a, **k: (True, f"Version 1.1.0 {module.ALREADY_PRESENT}"))
+    body = _publish_signed(authed_client, "com.example.app", "1.1.0", {GROUPS: ["g"]}).get_json()
+    assert body["added"] is False and body["created"] is False, body
+    assert body["permissionsAdded"] == [GROUPS]
+    assert GROUPS in _permissions(tmp_path, "com.example.app")["entitlements"]
+
+
+def test_malformed_declared_entries_are_kept_and_ignored(authed_client, tmp_path):
+    source = json.loads((tmp_path / "source.json").read_text())
+    source["apps"][0]["appPermissions"] = {"entitlements": [{"name": ["odd"]}, 7], "privacy": {}}
+    (tmp_path / "source.json").write_text(json.dumps(source))
+    body = _publish_signed(authed_client, "com.example.app", "1.1.0", {GROUPS: ["g"]}).get_json()
+    assert body["added"] is True, body
+    assert _permissions(tmp_path, "com.example.app")["entitlements"] == [{"name": ["odd"]}, 7, GROUPS]
+
+
+def test_an_apps_declared_permissions_are_capped(authed_client, tmp_path, monkeypatch):
+    module = authed_client.app_module
+    monkeypatch.setattr(module, "IPA_MAX_ENTITLEMENT_KEYS", 2)
+    monkeypatch.setattr(module, "IPA_MAX_PRIVACY_KEYS", 1)
+    source = json.loads((tmp_path / "source.json").read_text())
+    source["apps"][0]["appPermissions"] = {"entitlements": ["a.kept"], "privacy": {}}
+    (tmp_path / "source.json").write_text(json.dumps(source))
+    _publish_signed(authed_client, "com.example.app", "1.1.0", {GROUPS: ["g"], "keychain-access-groups": ["k"]},
+                    {"NSCameraUsageDescription": "Scan", "NSMicrophoneUsageDescription": "Mic"})
+    assert _permissions(tmp_path, "com.example.app") == {
+        "entitlements": ["a.kept", GROUPS], "privacy": {"NSCameraUsageDescription": "Scan"}}
+    _publish_signed(authed_client, "com.example.app", "1.2.0", {"z.more": True}, {"NSPhotoLibraryUsageDescription": "P"})
+    assert _permissions(tmp_path, "com.example.app") == {
+        "entitlements": ["a.kept", GROUPS], "privacy": {"NSCameraUsageDescription": "Scan"}}
+
+
+def test_new_permissions_are_appended_in_sorted_order(authed_client, tmp_path):
+    _publish_signed(authed_client, "com.signed.order", "1.0",
+                    {"z.last": True, GROUPS: ["g"], "a.first": True, "m.middle": True},
+                    {"NSMicrophoneUsageDescription": "Mic", "NSCameraUsageDescription": "Scan"})
+    permissions = _permissions(tmp_path, "com.signed.order")
+    assert permissions["entitlements"] == ["a.first", GROUPS, "m.middle", "z.last"]
+    assert list(permissions["privacy"]) == ["NSCameraUsageDescription", "NSMicrophoneUsageDescription"]

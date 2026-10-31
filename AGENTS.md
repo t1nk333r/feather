@@ -76,10 +76,16 @@ A branch is not done until CI is green on it.
    changes the repo fingerprint for every Android subscriber.
 3. **The binary is the truth.** Bundle ID, package and version are read from
    `Info.plist` or `AndroidManifest.xml`, never from filenames (filenames
-   lie). Re-publishing an existing version is a no-op, not an overwrite.
+   lie), and an iOS app's `appPermissions` from its executables' signed
+   entitlements and plists. Re-publishing an existing version is never an
+   overwrite: it stores nothing, and through iOS `/api/publish` it only
+   declares permissions its binary carries that the app lacks.
 4. **Validate before storing.** Every ingest path calls the inspectors
    before anything touches storage. Keep the zip-bomb caps in the inspectors
-   (plist 4 MB, manifest 16 MB, resources 64 MB, icons 8 MB).
+   (plist 4 MB, manifest 16 MB, resources 64 MB, icons 8 MB) and the IPA
+   entitlement reader's per-inspection budgets (2 GiB of executables
+   inflated, 4 MiB of entitlements parsed; `tests/test_ipa_inspection.py`
+   pins every default). It runs under the catalogue lock.
 5. **Auth tiers:**
    - `requires_auth` means an admin session only.
    - `requires_publish` means a session **or** an API token.
