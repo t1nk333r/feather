@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Migrate local app icons to Garage.
 
-The default is a read-only dry run.  Pass ``--apply`` to upload objects; local
-icons are never removed or changed.
+The default is a read-only dry run. Pass ``--apply`` to upload objects. The
+script never removes or changes local icons.
 """
 import argparse
 import json
@@ -18,7 +18,8 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
 def find_icon_files(icon_folder):
-    """Return ``(bundle, ext, path, size)`` for allowed icon files."""
+    """Return ``(results, invalid)``. ``results`` holds ``(bundle, ext, path,
+    size)`` for allowed icon files, and ``invalid`` holds every other path."""
     results = []
     invalid = []
     if not os.path.isdir(icon_folder):

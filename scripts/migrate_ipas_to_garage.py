@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Migrate data/ipas/*.ipa to the Garage S3 object store (Plan 011).
 
-Dry-run by default -- prints exactly what would happen and writes nothing.
-Pass --apply to actually upload. This script never deletes, moves, or
-modifies anything under data/; its only write is to Garage.
+By default this is a dry run that prints exactly what would happen and writes
+nothing. Pass --apply to upload. This script never deletes, moves, or
+modifies anything under data/; it writes only to Garage.
 
 Usage:
     .venv/bin/python scripts/migrate_ipas_to_garage.py            # dry run
@@ -20,30 +20,30 @@ import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import app as app_module  # noqa: E402 -- reuses config + secure_filename so
-                           # this script's key layout can never drift from
-                           # GarageIpaStorage's.
+# Reuses app's config and secure_filename so this script's key layout can
+# never drift from GarageIpaStorage's.
+import app as app_module  # noqa: E402
 from werkzeug.utils import secure_filename  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
 def garage_key(bundle_id, version):
-    """Same key layout as GarageIpaStorage._key in app.py -- pinned by
-    tests/test_storage.py::test_garage_key_layout. Kept in lockstep so the
-    migration writes to exactly the keys serve_ipa will look up.
+    """Same key layout as GarageIpaStorage._key in app.py, which
+    tests/test_storage.py::test_garage_key_layout pins. The two must match
+    so the migration writes to exactly the keys serve_ipa will look up.
     """
     prefix = app_module.GARAGE_KEY_PREFIX
     return f"{prefix}/{secure_filename(bundle_id)}/{secure_filename(version)}.ipa"
 
 
 def require_garage_config():
-    """Validated independently of STORAGE_BACKEND -- this script is meant
-    to run *before* the app is switched over to Garage (Step 5 happens
-    before Step 7), so it cannot rely on app._require_garage_config(),
-    which only fires when STORAGE_BACKEND=garage. Only called for --apply;
-    a dry run needs no Garage credentials at all, since it only inspects
-    local files.
+    """Checks the Garage variables whatever STORAGE_BACKEND says. This
+    script is meant to run *before* the app switches over to Garage (Step 5
+    happens before Step 7), so it cannot rely on app._require_garage_config(),
+    which app.py calls only when it builds Garage storage. Only --apply
+    calls this. A dry run inspects only local files, so it needs no Garage
+    credentials.
     """
     required = {
         "GARAGE_S3_ENDPOINT": app_module.GARAGE_S3_ENDPOINT,
@@ -63,9 +63,9 @@ def require_garage_config():
 
 
 def find_ipa_files(ipa_folder):
-    """Walk data/ipas/<bundle_id>/<version>.ipa, returning a list of
-    (bundle_id, version, path, size) for every *.ipa file found. Read-only
-    -- never creates or modifies anything under ipa_folder.
+    """Walk data/ipas/<bundle_id>/<version>.ipa and return a list of
+    (bundle_id, version, path, size) for every *.ipa file found. It is
+    read-only and never creates or modifies anything under ipa_folder.
     """
     results = []
     if not os.path.isdir(ipa_folder):
@@ -89,9 +89,9 @@ def find_ipa_files(ipa_folder):
 
 def load_catalog_download_urls(source_json_path):
     """Return the set of (bundle_id, version) pairs that data/source.json
-    references via a downloadURL pointing at this app's own /ipas/ route.
-    Used only to flag orphans -- files on disk with no catalog entry
-    pointing at them. Read-only.
+    references through a downloadURL that contains /ipas/. Used only to
+    flag orphans, which are files on disk that no catalog entry points at.
+    Read-only.
     """
     referenced = set()
     if not os.path.exists(source_json_path):
@@ -110,12 +110,12 @@ def load_catalog_download_urls(source_json_path):
 def classify(files, referenced):
     """Split found files into (uploadable, skipped_corrupt, orphans).
 
-    uploadable: real ZIP archives (an IPA is a ZIP; zipfile.is_zipfile()
-        is the integrity gate -- this is what separates the three known
-        gzip-HTML files from the real binaries with no guesswork).
+    uploadable: real ZIP archives. An IPA is a ZIP, and zipfile.is_zipfile()
+        is the integrity check that separates the three known gzip-HTML
+        files from the real binaries with no guesswork.
     skipped_corrupt: files that fail the ZIP check. Never migrated.
-    orphans: a subset of uploadable -- on disk but not referenced by any
-        downloadURL in the catalog. Migrated, but reported separately.
+    orphans: the uploadable files that no downloadURL in the catalog
+        references. Migrated, but reported separately.
     """
     uploadable = []
     skipped_corrupt = []
@@ -154,8 +154,8 @@ def apply_uploads(uploadable):
     """Upload every file in uploadable to Garage. Idempotent (skips a key
     that already exists with the same size) and verifies every upload
     with a post-upload head_object before counting it as a success. A
-    ContentLength mismatch is a hard failure for that file only -- the
-    rest of the batch keeps going.
+    ContentLength mismatch fails that file only; the rest of the batch
+    keeps going.
 
     Returns (uploaded, uploaded_bytes, skipped_existing, failed).
     """
@@ -186,7 +186,7 @@ def apply_uploads(uploadable):
                 skipped_existing += 1
                 continue
         except ClientError:
-            pass  # not there yet -- proceed to upload
+            pass  # not there yet, so upload it
 
         try:
             client.upload_file(

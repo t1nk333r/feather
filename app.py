@@ -46,8 +46,8 @@ import certificate_inspection
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-# Added by plan 051 -- in-memory ring buffer of recent WARNING+ log records,
-# surfaced (auth-gated, secrets redacted) via GET /api/diagnostics.
+# An in-memory ring buffer of recent WARNING+ log records (plan 051).
+# GET /api/diagnostics returns it, auth-gated and with secrets redacted.
 import collections
 
 _DIAG_BUFFER = collections.deque(maxlen=200)
@@ -86,11 +86,11 @@ app = Flask(__name__)
 def _env(name, default=None):
     """os.environ.get, except that a blank value counts as unset.
 
-    `cp .env.example .env` ships keys like `PORT=`; Compose passes those into
-    the container as empty strings, which os.environ.get returns instead of
-    the default -- int('') crashed startup, and blank TELEGRAM_NOTIFY_EVENTS,
-    ICON/APK_STORAGE_BACKEND or GARAGE_S3_REGION silently replaced their
-    documented defaults."""
+    `cp .env.example .env` ships keys like `PORT=`. Compose passes those into
+    the container as empty strings, and os.environ.get returns them instead
+    of the default. int('') crashed startup, and a blank
+    TELEGRAM_NOTIFY_EVENTS, ICON/APK_STORAGE_BACKEND or GARAGE_S3_REGION
+    silently replaced its documented default."""
     value = os.environ.get(name)
     return default if value is None or value.strip() == "" else value
 
@@ -102,10 +102,10 @@ IPA_FOLDER = os.path.join(DATA_DIR, "ipas")
 ICON_FOLDER = os.path.join(DATA_DIR, "icons")
 BACKUP_FOLDER = os.path.join(DATA_DIR, "backups")
 DEVICE_BACKUP_FOLDER = os.path.join(DATA_DIR, "device-backups")
-# Plan 073: Android / F-Droid repository. Everything lives under
-# DATA_DIR/fdroid, which is ALSO the working directory of the fdroid-index
+# Plan 073: the Android / F-Droid repository. Everything lives under
+# DATA_DIR/fdroid, which is also the working directory of the fdroid-index
 # sidecar (compose service, profile "android"). Layout inside it:
-#   repo/          APKs + the signed index the sidecar writes (served at /fdroid/repo/)
+#   repo/          APKs and the signed index the sidecar writes (served at /fdroid/repo/)
 #   metadata/      one <package>.yml per app, written by feather
 #   repo-config.json     repo name/description, written by feather, read by the sidecar
 #   .update-requested    marker: feather touches it, the sidecar consumes it
@@ -124,8 +124,8 @@ ALLOWED_APK_EXTENSIONS = {'apk'}
 ANDROID_PACKAGE_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$')
 # Catalog bundle identifiers (plan 090): reverse-DNS, at least two segments,
 # only the characters Apple allows in CFBundleIdentifier. They also name the
-# ipas/<id>/ and icons/<id>/ storage paths, so they must survive
-# secure_filename unchanged -- this pattern guarantees that.
+# ipas/<id>/ and icons/<id>/ storage paths, so they must come through
+# secure_filename unchanged, which this pattern guarantees.
 CATALOG_BUNDLE_ID_RE = re.compile(r'^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$')
 ANDROID_APK_FILENAME_RE = re.compile(r'^(.+)_(\d+)\.apk$')
 SOURCE_ARTWORK_URL = "https://f002.backblazeb2.com/file/S30000PUBLIC/MEDIA-PUBLIC/feather-tinker-1024.png"
@@ -155,11 +155,11 @@ PUBLIC_BASE_URL = _env("PUBLIC_BASE_URL")
 PORT = int(_env("PORT", "5000"))
 MAX_CONTENT_LENGTH = int(_env("MAX_CONTENT_LENGTH", 2 * 1024 * 1024 * 1024))
 
-# Added by plan 014 -- optional Telegram notification on catalog changes.
-# Disabled unless both TELEGRAM_BOT_TOKEN and TELEGRAM_NOTIFY_CHAT_ID are
-# set; see notify() below. TELEGRAM_BOT_TOKEN and BOT_API_BASE_URL are
-# shared with plan 013's bot ingest script where that has landed --
-# neither is redeclared in .env.example for this plan.
+# Optional Telegram notification on catalog changes (plan 014). It is off
+# unless both TELEGRAM_BOT_TOKEN and TELEGRAM_NOTIFY_CHAT_ID are set; see
+# notify() below. TELEGRAM_BOT_TOKEN and BOT_API_BASE_URL are shared with
+# plan 013's bot ingest script, so .env.example does not declare them again
+# for this plan.
 TELEGRAM_BOT_TOKEN = _env("TELEGRAM_BOT_TOKEN")
 TELEGRAM_NOTIFY_CHAT_ID = _env("TELEGRAM_NOTIFY_CHAT_ID")
 TELEGRAM_API_BASE = _env("BOT_API_BASE_URL", "https://api.telegram.org")
@@ -169,28 +169,29 @@ TELEGRAM_NOTIFY_EVENTS = set(
     if event.strip()
 )
 
-# IPA storage backend (Plan 011). Defaults to "local" -- today's behaviour,
-# unchanged -- so merging this is a no-op until the flag is deliberately
-# flipped. See GarageIpaStorage below for the "refuse to start" validation.
+# IPA storage backend (Plan 011). It defaults to "local", the behaviour from
+# before Garage, so nothing changes until an operator sets it. See
+# GarageIpaStorage below for the "refuse to start" validation.
 STORAGE_BACKEND = _env("STORAGE_BACKEND", "local")
 # Icons can use a different backend than IPAs (e.g. IPAs on Garage, icons on
-# local disk at /app/data/icons). Defaults to STORAGE_BACKEND for backward
-# compatibility, so existing single-backend deployments are unaffected.
+# local disk at /app/data/icons). It defaults to STORAGE_BACKEND, so existing
+# single-backend deployments are unaffected.
 ICON_STORAGE_BACKEND = _env("ICON_STORAGE_BACKEND", STORAGE_BACKEND)
-# APKs always keep a local copy in data/fdroid/repo -- fdroidserver must
-# read them to build and sign the index. With "garage" each APK is also
-# uploaded, byte-identical, and downloads are redirected to the bucket.
+# APKs always keep a local copy in data/fdroid/repo, because fdroidserver
+# must read them to build and sign the index. With "garage" each APK is also
+# uploaded, byte-identical, and downloads redirect to the bucket.
 APK_STORAGE_BACKEND = _env("APK_STORAGE_BACKEND", STORAGE_BACKEND)
 # Wall-clock cap for any URL download. requests' timeout bounds each socket
-# read, not the transfer: a server sending a byte every 299 s held a worker
-# thread -- and, on the admin add paths, the catalogue lock -- indefinitely.
+# read, not the whole transfer. A server sending a byte every 299 s held a
+# worker thread indefinitely, and on the admin add paths the catalogue lock
+# with it.
 DOWNLOAD_DEADLINE_SECONDS = int(_env("DOWNLOAD_DEADLINE_SECONDS", "1800"))
 # Debuggable APKs are published with a warning by default (fdroidserver itself
-# only warns); set this to refuse them outright.
+# only warns); set this to refuse them.
 APK_REJECT_DEBUGGABLE = _env("APK_REJECT_DEBUGGABLE", "false").strip().lower() in ("1", "true", "yes", "on")
-# Device backups (plan 088): an app on the operator's own phone keeps copies of
-# its settings here, one folder per app and device. Off by default; on, only a
-# session or a backup-kind token reaches them.
+# Device backups (plan 088). An app on the operator's own phone keeps copies
+# of its settings here, one folder per app and device. Off by default. When
+# on, only a session or a backup-kind token reaches them.
 DEVICE_BACKUPS = _env("DEVICE_BACKUPS", "false").strip().lower() in ("1", "true", "yes", "on")
 DEVICE_BACKUP_MAX_BYTES = int(_env("DEVICE_BACKUP_MAX_BYTES", 256 * 1024 * 1024))
 DEVICE_BACKUP_KEEP = max(1, int(_env("DEVICE_BACKUP_KEEP", "30")))
@@ -206,9 +207,9 @@ GARAGE_KEY_PREFIX = _env("GARAGE_KEY_PREFIX", "ipas")
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-# SESSION_COOKIE_SECURE defaults off: the app itself speaks plain HTTP and a
-# Secure cookie is never stored over HTTP. Behind a TLS proxy, set it on so
-# the admin cookie is never sent in clear text.
+# SESSION_COOKIE_SECURE defaults off because the app itself speaks plain HTTP
+# and browsers never store a Secure cookie over HTTP. Behind a TLS proxy, turn
+# it on so the admin cookie never travels in clear text.
 app.config["SESSION_COOKIE_SECURE"] = _env("SESSION_COOKIE_SECURE", "false").strip().lower() in ("1", "true", "yes", "on")
 if SECRET_KEY:
     app.secret_key = SECRET_KEY
@@ -226,9 +227,9 @@ def get_file_size(filepath):
     """Get file size in bytes.
 
     Returns None (not 0) if the size cannot be determined, so "unknown"
-    is distinguishable from "genuinely empty file". Callers that write
-    this into a version's "size" field must normalize None themselves --
-    a `null` size must never reach source.json.
+    stays distinct from an empty file. Callers that write this into a
+    version's "size" field must normalize None themselves. A `null` size
+    must never reach source.json.
     """
     try:
         return os.path.getsize(filepath)
@@ -239,9 +240,9 @@ def get_file_size(filepath):
 def resolve_base_url():
     """The externally-reachable base URL for links written into source.json.
 
-    Prefers PUBLIC_BASE_URL. Falls back to the request's Host header, which
-    is client-controlled — so an admin browsing by LAN IP would otherwise
-    bake that IP permanently into the catalog.
+    Prefers PUBLIC_BASE_URL. Without it, falls back to the request's Host
+    header, which the client controls, so an admin browsing by LAN IP would
+    write that IP into the catalog for good.
     """
     if PUBLIC_BASE_URL:
         return PUBLIC_BASE_URL.rstrip('/')
@@ -254,20 +255,21 @@ def resolve_base_url():
 
 def normalize_source(source_data):
     """Fill in AltStore-required fields that may be absent from the stored
-    catalog, without ever overwriting a value that is already present.
+    catalog, never overwriting a value that is already present. Also fill in
+    a missing app iconURL and drop an app's duplicate versions, keeping the
+    first.
 
-    Plan 024: the AltStore source spec requires 'nsfw' at the top level,
-    'appPermissions' per app, and 'buildVersion' per version. Older or
-    hand-edited catalogs can lack these, which makes a strict client
-    decoder reject the whole document. This runs at serve time only —
-    it never writes to disk — so it fixes every existing entry on the
-    next request without a migration.
+    The AltStore source spec requires 'nsfw' at the top level,
+    'appPermissions' per app, and 'buildVersion' per version (plan 024).
+    Older or hand-edited catalogs can lack these, and a strict client
+    decoder then rejects the whole document. This runs at serve time only
+    and never writes to disk, so it fixes every existing entry on the next
+    request without a migration.
 
-    Works on a deep copy; the argument is never mutated. Tolerates
-    malformed input (missing 'apps', a non-dict app or version) by
-    leaving the offending element untouched rather than raising, since
-    this sits on the /source.json request path that every subscribed
-    device polls and which must never 500.
+    Works on a deep copy and never mutates the argument. Malformed input
+    (missing 'apps', a non-dict app or version) is left untouched rather
+    than raising, because this is on the /source.json request path that
+    every subscribed device polls, and that path must never 500.
     """
     if not isinstance(source_data, dict):
         return source_data
@@ -320,14 +322,14 @@ def _declare_permissions(app_entry, inspection):
 
     AltStore and SideStore refuse to install an app from a source unless the
     source lists every entitlement and privacy key of the app and its
-    extensions (VerifyAppOperation, `undeclaredPermissions`); an empty list
+    extensions (VerifyAppOperation, `undeclaredPermissions`). An empty list
     blocks any app signed with, say, an App Group. The list is per app, not
-    per version, so keys are only ever added: an extra one only lengthens
-    the permission list AltStore shows before installing, a missing one
-    blocks the install. Existing entries, and their text, are kept as they
-    are. The inspector caps what one IPA contributes; the same caps bound
-    the app's whole list, so publishing many versions cannot grow the public
-    source.json without limit."""
+    per version, so this only ever adds keys. An extra key only lengthens
+    the permission list AltStore shows before installing; a missing one
+    blocks the install. Existing entries and their text stay as they are.
+    The inspector caps what one IPA contributes, and the same caps bound
+    the app's whole list, so publishing many versions cannot grow the
+    public source.json without limit."""
     if inspection is None or not isinstance(app_entry, dict):
         return []
     permissions = app_entry.get('appPermissions')
@@ -356,16 +358,16 @@ def notify(event, text):
     """Fire-and-forget Telegram message. Never raises, never blocks the caller.
 
     Plan 014. Call this from the route layer only, after SourceManager has
-    already returned -- never from inside SourceManager, which holds
-    self._lock across its whole read-modify-write and would otherwise
-    serialise every publish behind Telegram's latency.
+    returned, never from inside it. SourceManager holds self._lock across
+    its whole read-modify-write, so every publish would wait on Telegram's
+    latency.
 
-    Returns immediately with no network call at all if notifications are
-    disabled (TELEGRAM_BOT_TOKEN / TELEGRAM_NOTIFY_CHAT_ID unset) or if
-    `event` is not in the configured TELEGRAM_NOTIFY_EVENTS set. Otherwise
-    the request is sent on a daemon thread, so the caller never waits on
-    Telegram, and any failure is swallowed and logged at warning -- no
-    notification problem may ever reach the HTTP response.
+    Returns at once, with no network call, if notifications are disabled
+    (TELEGRAM_BOT_TOKEN / TELEGRAM_NOTIFY_CHAT_ID unset) or if `event` is
+    not in the configured TELEGRAM_NOTIFY_EVENTS set. Otherwise it sends the
+    request on a daemon thread, so the caller never waits on Telegram. Any
+    failure is logged at warning and swallowed, so no notification problem
+    reaches the HTTP response.
     """
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_NOTIFY_CHAT_ID):
         return
@@ -397,9 +399,9 @@ else:
 
 def _require_garage_config():
     """Refuse to start with STORAGE_BACKEND=garage and any required Garage
-    variable unset. Logs which *names* are missing -- never values -- and
+    variable unset. Logs which *names* are missing, never their values, and
     raises. A half-configured object store that silently fell back to
-    local disk is how a catalog ends up pointing at files nobody wrote.
+    local disk would leave the catalog pointing at files nobody wrote.
     """
     required = {
         "GARAGE_S3_ENDPOINT": GARAGE_S3_ENDPOINT,
@@ -420,9 +422,9 @@ def _require_garage_config():
 
 def _classify_storage_error(e):
     """Classify a ClientError raised during a storage self-test probe
-    (plan 050). A 403 -- by HTTP status or an AccessDenied/Forbidden
-    error code -- is reported as "forbidden" so a permission problem is
-    never confused with a plain "error". Returns (status, detail), where
+    (plan 050). A 403, by HTTP status or by an AccessDenied/Forbidden
+    error code, is reported as "forbidden", so a permission problem never
+    looks like a plain "error". Returns (status, detail), where
     detail is the S3 error code.
     """
     status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
@@ -437,9 +439,9 @@ def _move_file(src, dest):
 
     compose.yml mounts ./data/ipas, ./data/icons and ./data/fdroid as their
     own bind mounts beside ./data, and rename(2) never crosses a mount, so a
-    temp file in data/uploads cannot be renamed into them (EXDEV): every
-    IPA/icon download-from-URL failed on the default deployment. Fall back
-    to copy + fsync + atomic replace inside the destination directory."""
+    temp file in data/uploads cannot be renamed into them (EXDEV). Every
+    IPA/icon download-from-URL failed on the default deployment. On EXDEV,
+    copy, fsync, then replace atomically inside the destination directory."""
     try:
         os.replace(src, dest)
         return
@@ -464,13 +466,13 @@ def _move_file(src, dest):
 
 
 class LocalIpaStorage:
-    """IPA storage on local disk -- today's behaviour, unchanged.
+    """IPA storage on local disk, the behaviour from before Garage.
 
-    Reproduces Plan 007's guarantees exactly: the bundle directory is
-    created only on write, a partial file is cleaned up if the write
-    raises, and the size returned is None (not 0) when it cannot be
-    determined. public_url() always returns None, which is what tells
-    serve_ipa to fall back to send_file instead of redirecting.
+    Keeps Plan 007's guarantees: the bundle directory is created only on
+    write, a partial file is removed if the write raises, and the size
+    returned is None (not 0) when it cannot be determined. public_url()
+    always returns None, which tells serve_ipa to fall back to send_file
+    instead of redirecting.
     """
 
     def _path(self, bundle_id, version):
@@ -479,17 +481,16 @@ class LocalIpaStorage:
         return os.path.join(bundle_folder, filename)
 
     def put(self, src, bundle_id, version):
-        """Write src -- a path, or a file-like object with .save() (a
-        Werkzeug FileStorage) -- to the final local path.
+        """Write src to the final local path. src is a path, or a
+        file-like object with .save() (a Werkzeug FileStorage).
 
-        A plain path is assumed to already be fully and successfully
-        written (the "local temp file" staging step callers do before
-        calling put()), so it is moved into place with os.replace(),
-        which is atomic on the same filesystem: the destination either
-        keeps its old content or gets the complete new content, never a
-        partial write. A FileStorage is saved directly, since there is
-        nothing at the destination yet to protect from a partial write in
-        the common "add a new version" case.
+        A plain path must already be completely written (callers stage it
+        as a "local temp file" before calling put()), so it moves into
+        place with os.replace(). That is atomic on one filesystem: the
+        destination either keeps its old content or gets the complete new
+        content, never a partial write. A FileStorage is saved directly,
+        because in the common "add a new version" case there is nothing at
+        the destination yet to protect from a partial write.
 
         Returns the resulting size, or None on failure.
         """
@@ -536,11 +537,10 @@ class LocalIpaStorage:
 
     def selftest(self):
         """Write, read, then delete a probe file under IPA_FOLDER to
-        confirm the mount is writable and readable (plan 050). All
-        capabilities are "ok" unless an OSError occurs, in which case
-        that capability is "error" with the errno in detail. The probe
-        file is always deleted, even if the read step fails. Never
-        raises.
+        confirm the mount is writable and readable (plan 050). Each
+        capability is "ok" unless an OSError occurs, which marks that
+        capability "error" with the errno in detail. The probe file is
+        always deleted, even if the read fails. Never raises.
         """
         result = {"backend": "local", "write": "error", "read": "error", "delete": "error", "detail": None}
 
@@ -587,9 +587,9 @@ class LocalIpaStorage:
 class GarageIpaStorage:
     """IPA storage on the self-hosted Garage S3-compatible object store.
 
-    public_url() returns the object's Garage web-endpoint URL, which is
-    what lets serve_ipa redirect (302) instead of proxying bytes through
-    Flask -- see plans/011-garage-s3-ipa-storage.md for the design.
+    public_url() returns the object's Garage web-endpoint URL, which lets
+    serve_ipa redirect (302) instead of proxying bytes through Flask.
+    plans/011-garage-s3-ipa-storage.md has the design.
     """
 
     def __init__(self):
@@ -609,9 +609,9 @@ class GarageIpaStorage:
     def _remaining_size(src):
         """Return remaining bytes without consuming a file-like source.
 
-        Duplicated from GarageIconStorage._remaining_size (plan 065): a
-        tiny, dependency-free helper, kept identical on both classes
-        rather than hoisted, so this class's behaviour never depends on
+        A copy of GarageIconStorage._remaining_size (plan 065). The helper
+        is small and has no dependencies, so each class keeps its own
+        identical copy, and this class's behaviour never depends on
         GarageIconStorage's internals.
         """
         if isinstance(src, (str, bytes, os.PathLike)):
@@ -628,11 +628,11 @@ class GarageIpaStorage:
             return content_length if content_length and content_length >= 0 else None
 
     def put(self, src, bundle_id, version):
-        """Upload src -- a path, or a file-like object with .save() (a
-        Werkzeug FileStorage) -- to the object's final key.
+        """Upload src to the object's final key. src is a path, or a
+        file-like object with .save() (a Werkzeug FileStorage).
 
-        Uses upload_file/upload_fileobj (not put_object) so large objects
-        multipart automatically instead of being buffered whole. Returns
+        Uses upload_file/upload_fileobj, not put_object, so large objects
+        upload in multipart parts instead of being buffered whole. Returns
         the uploaded size (from a post-upload head_object), or None on
         failure. Never logs the secret key or response headers.
         """
@@ -697,12 +697,11 @@ class GarageIpaStorage:
             return False
 
     def selftest(self):
-        """Write, read, then delete a dedicated probe object -- never a
-        real IPA key -- and report each capability (plan 050). A 403 is
+        """Write, read, then delete a dedicated probe object, never a
+        real IPA key, and report each capability (plan 050). A 403 is
         reported as "forbidden", distinct from a plain "error" or "ok",
-        so a permission problem is never mistaken for the object simply
-        being missing. The probe is always deleted, even if the read
-        step fails. Never raises.
+        so a permission problem never looks like a missing object. The
+        probe is always deleted, even if the read fails. Never raises.
         """
         probe_key = self._key("__selftest__", "probe")
         result = {"backend": "garage", "write": "error", "read": "error", "delete": "error", "detail": None}
@@ -759,8 +758,8 @@ class GarageApkMirror:
 
     The local file in FDROID_REPO_DIR stays the source of truth (the
     sidecar signs from it); this only moves download bandwidth to the
-    bucket. Every method is best effort and never raises: a missing or
-    failed object just means the download is served from local disk.
+    bucket. Every method is best effort and never raises. A missing or
+    failed object only means the download is served from local disk.
     """
 
     CONTENT_TYPE = "application/vnd.android.package-archive"
@@ -880,11 +879,10 @@ class LocalIconStorage:
 
     def selftest(self):
         """Write, read, then delete a probe file under ICON_FOLDER to
-        confirm the mount is writable and readable (plan 050). All
-        capabilities are "ok" unless an OSError occurs, in which case
-        that capability is "error" with the errno in detail. The probe
-        file is always deleted, even if the read step fails. Never
-        raises.
+        confirm the mount is writable and readable (plan 050). Each
+        capability is "ok" unless an OSError occurs, which marks that
+        capability "error" with the errno in detail. The probe file is
+        always deleted, even if the read fails. Never raises.
         """
         result = {"backend": "local", "write": "error", "read": "error", "delete": "error", "detail": None}
 
@@ -995,9 +993,9 @@ class GarageIconStorage:
         except ClientError as e:
             status, code = _classify_storage_error(e)
             if status == "forbidden":
-                # The upload above already succeeded; we simply lack read/head
-                # permission to verify size. Do NOT fail the write on a
-                # permission-denied verify (that breaks a write-only key).
+                # The upload above succeeded; the key only lacks read/head
+                # permission to verify the size. Failing the write on a
+                # permission-denied verify would break a write-only key.
                 logging.warning(
                     f"Uploaded icon but cannot verify it ({key}): {code} -- "
                     f"treating upload as successful (grant the key read to re-enable verification)"
@@ -1043,12 +1041,11 @@ class GarageIconStorage:
             return False
 
     def selftest(self):
-        """Write, read, then delete a dedicated probe object -- never a
-        real icon key -- and report each capability (plan 050). A 403 is
+        """Write, read, then delete a dedicated probe object, never a
+        real icon key, and report each capability (plan 050). A 403 is
         reported as "forbidden", distinct from a plain "error" or "ok",
-        so a permission problem is never mistaken for the icon simply
-        being missing. The probe is always deleted, even if the read
-        step fails. Never raises.
+        so a permission problem never looks like a missing icon. The
+        probe is always deleted, even if the read fails. Never raises.
         """
         probe_key = self._key("__selftest__", "probe")
         result = {"backend": "garage", "write": "error", "read": "error", "delete": "error", "detail": None}
@@ -1217,7 +1214,7 @@ def _is_http_url(value):
 ALREADY_PRESENT = "already exists; nothing to add"
 
 
-# Version retention (plan 091): an opt-in, per-app "keep the newest version
+# Version retention (plan 091) is an opt-in, per-app "keep the newest version
 # plus N before it". It lives in its own file rather than in source.json
 # because source.json is public and no sideloading client has a use for it.
 # A missing or unreadable file means no app has a policy, so nothing is
@@ -1288,8 +1285,8 @@ def set_retention(platform, app_id, keep_previous):
 
 
 def _forget_retention(platform, app_id):
-    """A deleted app drops its policy: re-adding it later must not silently
-    inherit a pruning rule nobody remembers setting."""
+    """A deleted app drops its policy, so re-adding it later does not
+    silently inherit a pruning rule nobody remembers setting."""
     try:
         set_retention(platform, app_id, None)
     except Exception as e:
@@ -1307,12 +1304,12 @@ class SourceManager:
     
     def __init__(self, source_file):
         self.source_file = source_file
-        # NOTE: this in-process lock only serializes writes within a single
-        # Python process. app.run() runs one process (threaded=True), so
+        # NOTE: this in-process lock serializes writes within one Python
+        # process only. Waitress serves one process with many threads, so
         # this holds today. If this app is ever served by gunicorn with
         # -w > 1 (or any multi-process WSGI setup), this lock silently stops
-        # protecting anything -- it would need to become a cross-process
-        # file lock instead.
+        # protecting anything and would have to become a cross-process
+        # file lock.
         self._lock = threading.Lock()
         self.ensure_data_directory()
         self.initialize_source()
@@ -1329,8 +1326,8 @@ class SourceManager:
     def get_ipa_path(self, bundle_id, version):
         """Get the file path for an IPA file.
 
-        Read-only: does not create the bundle subdirectory. Callers that
-        write to this path are responsible for creating it first.
+        Read-only. It does not create the bundle subdirectory; callers
+        that write to this path must create it first.
         """
         bundle_folder = os.path.join(IPA_FOLDER, secure_filename(bundle_id))
         filename = f"{secure_filename(version)}.ipa"
@@ -1366,12 +1363,12 @@ class SourceManager:
         `source` is a path or a seekable file object. Raises
         IpaInspectionError (not caught by the save/download helpers, so the
         route reports the reason). A different CFBundleIdentifier is only a
-        warning: renamed patched builds are published under their own
-        catalog ID on purpose, but devices install and update by the IPA's
-        identifier, so the uploader should know. The warning is left in
-        self.ipa_warning for the caller's success message, and the
-        inspection in self.ipa_inspection for _declare_permissions; every
-        caller holds self._lock.
+        warning. Renamed patched builds go under their own catalog ID on
+        purpose, but devices install and update by the IPA's identifier,
+        so the uploader should know. The warning stays in self.ipa_warning
+        for the caller's success message, and the inspection in
+        self.ipa_inspection for _declare_permissions. Every caller holds
+        self._lock.
         """
         self.ipa_warning = None
         self.ipa_inspection = None
@@ -1393,19 +1390,18 @@ class SourceManager:
         return inspection
 
     def save_ipa_file(self, file, bundle_id, version, dest_path=None):
-        """Save uploaded IPA file via the configured storage backend
-        (ipa_storage -- Plan 011).
+        """Save an uploaded IPA file through the configured storage backend
+        (ipa_storage, Plan 011).
 
-        If dest_path is given, save there instead -- a local staging path
-        used by update_version to fully capture the replacement IPA on
-        local disk before it is committed to the storage backend (see
-        update_version's docstring for why: the existing hosted object
-        must never be touched until the replacement is known-complete).
-        This staging write always happens on local disk, regardless of
-        backend.
+        If dest_path is given, save there instead. update_version passes a
+        local staging path so the whole replacement IPA is on local disk
+        before it is committed to the storage backend. A comment in
+        update_version says why: the existing hosted object must not be touched
+        until the replacement is known to be complete. This staging write
+        always goes to local disk, whatever the backend.
 
         Returns (truthy-on-success, size) to match the existing call
-        sites, which only check truthiness of the first element.
+        sites, which only check whether the first element is truthy.
         """
         filepath = None
         try:
@@ -1435,16 +1431,15 @@ class SourceManager:
             return None, 0
 
     def download_ipa_from_url(self, url, bundle_id, version, dest_path=None):
-        """Download IPA file from URL and commit it via the configured
-        storage backend (ipa_storage -- Plan 011).
+        """Download an IPA file from a URL and commit it through the
+        configured storage backend (ipa_storage, Plan 011).
 
-        The bytes always land on local disk first -- that is where the
-        size-limit enforcement and content-decoding below happen, and it
-        doubles as the "local temp file" staging step Plan 011 stages
-        through before committing to the backend. If dest_path is given,
-        that local file *is* the destination (see save_ipa_file's
-        docstring); otherwise it is a throwaway temp file that is removed
-        once ipa_storage.put() has committed it (or failed).
+        The bytes always land on local disk first. The size limit and
+        content decoding below apply there, and the same file is the
+        "local temp file" Plan 011 stages through before committing to the
+        backend. If dest_path is given, that local file *is* the
+        destination (see save_ipa_file's docstring). Otherwise it is a temp
+        file, removed once ipa_storage.put() has committed it or failed.
         """
         filepath = None
         is_staging_write = dest_path is not None
@@ -1514,7 +1509,7 @@ class SourceManager:
 
     def delete_ipa_file(self, bundle_id, version):
         """Delete IPA file for a version via the configured storage
-        backend (ipa_storage -- Plan 011)."""
+        backend (ipa_storage, Plan 011)."""
         return ipa_storage.delete(bundle_id, version)
     
     def get_local_ipa_url(self, bundle_id, version, base_url=None):
@@ -1540,7 +1535,7 @@ class SourceManager:
             return None
     
     def download_icon_from_url(self, url, bundle_id):
-        """Download icon file from URL and save it locally"""
+        """Download icon file from URL and store it through icon_storage"""
         filepath = None
         try:
             logging.info(f"Downloading icon from: {url}")
@@ -1656,15 +1651,13 @@ class SourceManager:
         """Copy the current source.json into data/backups/ before it is
         replaced, then prune old backups down to the most recent 20.
 
-        Best-effort only: a failure here is logged and swallowed. A failed
-        backup is a nuisance; letting a backup failure block save_source
-        (and therefore the live catalog write) would turn a nuisance into
-        data loss.
+        Best effort only. A failure here is logged and swallowed. A failed
+        backup is a nuisance, but letting it block save_source, and with it
+        the live catalog write, would turn a nuisance into data loss.
 
         Filenames use a UTC timestamp plus an incrementing counter suffix
-        (".001", ".002", ...) so that multiple backups taken within the
-        same second -- which the plain one-second-resolution timestamp
-        alone would collide on -- still get distinct filenames.
+        (".001", ".002", ...). The timestamp has one-second resolution, so
+        without the counter two backups in the same second would collide.
         """
         if not os.path.exists(self.source_file):
             return
@@ -1786,9 +1779,9 @@ class SourceManager:
 
     def backfill_icons(self, base_url=None):
         """Give every app without a real icon one extracted from its newest
-        hosted IPA. Slow part (fetch + extract) runs outside the lock; the
-        write re-checks under it so a concurrently set icon is never
-        overwritten. Returns {"added": n, "missing": [bundle ids]}."""
+        hosted IPA. The slow part (fetch and extract) runs outside the lock,
+        and the write re-checks under it, so it never overwrites an icon
+        set in the meantime. Returns {"added": n, "missing": [bundle ids]}."""
         with self._lock:
             source_data = self.load_source() or {}
             targets = []
@@ -1906,7 +1899,7 @@ class SourceManager:
             else:
                 self._icon_wanted = not icon_supplied
 
-            # Handle IPA file - upload, download, or use URL
+            # Handle the IPA file: upload, download, or use the URL
             file_size = 0
             stored_ipa = False
             if ipa_file and allowed_file(ipa_file.filename):
@@ -1929,10 +1922,10 @@ class SourceManager:
             if file_size is None:
                 # get_file_size could not stat the file even though the save/
                 # download itself reported success. Record 0 rather than
-                # publishing `null` into source.json -- clients expect an int.
+                # publish `null` into source.json, because clients expect an int.
                 file_size = 0
 
-            # Handle icon file - upload, download, or use URL
+            # Handle the icon file: upload, download, or use the URL
             stored_icon_ext = None
             user_icon_url = None
             if icon_file and allowed_icon_file(icon_file.filename):
@@ -2037,18 +2030,18 @@ class SourceManager:
             ]
         
             if len(source_data['apps']) < initial_count:
-                # Drop editorial references to the deleted app: a dangling
-                # featuredApps entry or news appID is published as-is and
-                # makes the news item fail validation on its next save.
+                # Drop editorial references to the deleted app. A dangling
+                # featuredApps entry or news appID is published as-is, and
+                # the news item then fails validation on its next save.
                 featured = source_data.get('featuredApps')
                 if isinstance(featured, list):
                     source_data['featuredApps'] = [b for b in featured if b != bundle_identifier]
                 for item in source_data.get('news') or []:
                     if isinstance(item, dict) and item.get('appID') == bundle_identifier:
                         del item['appID']
-                # Commit the catalogue first, then delete files (as
-                # delete_version does): a failed save must not leave the live
-                # catalogue pointing at IPAs that are already gone. A failed
+                # Commit the catalogue first, then delete files, as
+                # delete_version does. A failed save must not leave the live
+                # catalogue pointing at IPAs that are already gone; a failed
                 # file delete afterwards leaves only an orphan.
                 success = self.save_source(source_data)
                 if success:
@@ -2131,10 +2124,10 @@ class SourceManager:
                 if field in data and data[field] is not None:
                     app[field] = data[field]
 
-            # Handle screenshotURLs separately: accept a JSON list or a
-            # newline/comma-separated string; only overwrite when the key was
-            # explicitly provided (mirrors the "only when present" convention
-            # used for the scalar fields above).
+            # Handle screenshotURLs separately. Accept a JSON list or a
+            # newline/comma-separated string, and overwrite only when the key
+            # is present, the same "only when present" rule as the scalar
+            # fields above.
             if 'screenshotURLs' in data and data['screenshotURLs'] is not None:
                 raw_screenshots = data['screenshotURLs']
                 if isinstance(raw_screenshots, list):
@@ -2146,7 +2139,7 @@ class SourceManager:
                     item.strip() for item in screenshot_items if item and item.strip()
                 ]
 
-            # Handle icon file - upload, download, or use URL
+            # Handle the icon file: upload, download, or use the URL
             # Only update icon if a new one is provided
             icon_url = data.get('iconURL', '')
             icon_updated = False
@@ -2239,7 +2232,7 @@ class SourceManager:
             file_size = version_data.get('size', 0)
             self._icon_wanted = not self._has_real_icon(app)
         
-            # Handle IPA file - upload, download, or use URL
+            # Handle the IPA file: upload, download, or use the URL
             if ipa_file and allowed_file(ipa_file.filename):
                 # Upload file
                 filepath, file_size = self.save_ipa_file(ipa_file, bundle_identifier, version)
@@ -2276,8 +2269,8 @@ class SourceManager:
             if auto_icon_url:
                 app['iconURL'] = auto_icon_url
             _declare_permissions(app, self.ipa_inspection)
-            # Only an update prunes: a backport landing below the newest
-            # version is not one, and must not delete anything.
+            # Only an update prunes. A backport that lands below the newest
+            # version is not an update and must not delete anything.
             dropped = []
             if position == 0:
                 dropped = self._cut_versions(app, retention_keep_previous("ios", bundle_identifier))
@@ -2291,8 +2284,8 @@ class SourceManager:
 
     @staticmethod
     def _cut_versions(app, keep_previous):
-        """Remove the versions past the newest + keep_previous from `app` in
-        memory (versions[0] is the newest) and return them. The caller saves
+        """Remove the versions past the newest plus keep_previous from `app`
+        in memory (versions[0] is the newest) and return them. The caller saves
         the source first and deletes their IPAs only after, so a failed save
         loses no binary."""
         versions = app.get('versions') or []
@@ -2393,17 +2386,16 @@ class SourceManager:
             # Update version fields
             version_obj = app['versions'][version_index]
         
-            # Handle IPA file update - upload, download, or use URL.
+            # Handle the IPA file update: upload, download, or use the URL.
             #
-            # Plan 011: fully and successfully capture the replacement to a
-            # local temp file first, and only ever commit it to the storage
-            # backend (ipa_storage.put(), which for the local backend is an
-            # atomic os.replace() and for Garage is an upload straight to
-            # the final key) once that capture has fully succeeded. A
-            # failed fetch must never destroy a binary that is still being
-            # served -- deleting the original before the replacement was
-            # confirmed was the old (and dangerous) behaviour, and staging
-            # locally first preserves that guarantee for either backend.
+            # Capture the whole replacement to a local temp file first
+            # (plan 011), and commit it to the storage backend only once that
+            # capture has succeeded. ipa_storage.put() is an atomic
+            # os.replace() for the local backend and an upload straight to
+            # the final key for Garage. A failed fetch must never destroy a
+            # binary that is still being served. The old, dangerous behaviour
+            # deleted the original before the replacement was confirmed;
+            # staging locally first prevents that on either backend.
             if ipa_file and allowed_file(ipa_file.filename):
                 tmp_path = self.get_ipa_path(bundle_identifier, version) + ".new"
                 filepath, _ = self.save_ipa_file(ipa_file, bundle_identifier, version, dest_path=tmp_path)
@@ -2540,8 +2532,8 @@ class AndroidRepoManager:
     """Feather's side of the F-Droid repo. It owns repo/*.apk, metadata/*.yml
     and repo-config.json; the fdroid-index sidecar owns everything else
     under FDROID_DIR. Every mutation ends with request_update(), which is
-    the only signal the sidecar listens for. Single-process lock, same
-    caveat as SourceManager."""
+    the only signal the sidecar listens for. Its lock is single-process,
+    with the same caveat as SourceManager's."""
 
     METADATA_KEYS = ("Name", "Summary", "Description", "AuthorName", "WebSite", "SourceCode", "License", "Categories")
     _LIMITS = {"Name": 50, "Summary": 80, "Description": 4000}
@@ -2664,12 +2656,12 @@ class AndroidRepoManager:
 
         config.yml names `repo_icon: icon.png`, which fdroidserver resolves
         against its working directory (data/fdroid/). Nothing ever wrote it,
-        so fdroidserver generated a QR-code placeholder at repo/icons/icon.png
-        -- and current fdroidserver only copies the real icon when that file
-        does not exist yet, so the placeholder outlives any fix. Install the
+        so fdroidserver generated a QR-code placeholder at repo/icons/icon.png.
+        Current fdroidserver copies the real icon only when that file does
+        not exist yet, so the placeholder stays after any fix. Install the
         Feather icon when data/fdroid/icon.png is missing (an operator's own
         file is never overwritten), and remove a published repo icon that
-        differs from it so the rebuild copies it afresh."""
+        differs from it so the rebuild copies it again."""
         src = os.path.join(FDROID_DIR, "icon.png")
         published = os.path.join(FDROID_REPO_DIR, "icons", "icon.png")
         try:
@@ -2728,7 +2720,7 @@ class AndroidRepoManager:
                 if fn.endswith('.yml'):
                     packages.add(fn[:-4])
 
-        disk_versions = {}  # package -> {version_code: filename}
+        disk_versions = {}  # {package: {version_code: filename}}
         if os.path.isdir(FDROID_REPO_DIR):
             for fn in os.listdir(FDROID_REPO_DIR):
                 m = ANDROID_APK_FILENAME_RE.match(fn)
@@ -2843,9 +2835,9 @@ class AndroidRepoManager:
             "pending": os.path.exists(FDROID_UPDATE_MARKER),
             "last_update": last_update,
             "index_timestamp": index_timestamp,
-            # Convenience for the admin UI -- not part of the plan's contract
-            # sketch, sourced from repo_config() so the Android tab can
-            # pre-fill its name/description fields without a second route.
+            # For the admin UI, not part of the plan's contract sketch. They
+            # come from repo_config() so the Android tab can pre-fill its
+            # name/description fields without a second route.
             "name": cfg.get("name", ""),
             "description": cfg.get("description", ""),
         }
@@ -2877,8 +2869,8 @@ class AndroidRepoManager:
     REPO_DESCRIPTION_MAX = 2000
 
     def write_repo_config(self, name, description):
-        """Validated: the values end up in fdroidserver's config.yml, and one
-        it cannot parse makes every later rebuild fail."""
+        """Validated, because the values end up in fdroidserver's config.yml,
+        and one it cannot parse makes every later rebuild fail."""
         for field, value, limit in (("name", name, self.REPO_NAME_MAX),
                                     ("description", description, self.REPO_DESCRIPTION_MAX)):
             if not isinstance(value, str):
@@ -2945,9 +2937,9 @@ class AndroidRepoManager:
         return normalized
 
     def write_metadata(self, package, fields):
-        """fields: subset of METADATA_KEYS. Merges into the existing yml.
-        Enforce: Name <= 50, Summary <= 80, Description <= 4000, Categories is
-        a list (default ['Feather'])."""
+        """fields is a subset of METADATA_KEYS, merged into the existing yml.
+        Enforces Name <= 50, Summary <= 80, Description <= 4000, and
+        Categories as a list (default ['Feather'])."""
         if not ANDROID_PACKAGE_RE.match(package or ""):
             raise ValueError(f"Invalid package name: {package!r}")
         fields = self.validate_metadata(fields)
@@ -2978,10 +2970,10 @@ class AndroidRepoManager:
 
     def add_apk(self, src_path, expected_package=None):
         """Inspect src_path with _inspect_apk. If expected_package is given and
-        differs -> ValueError. If the destination apk already exists -> return
-        (False, 'already present') WITHOUT overwriting. Else move src -> dest.
-        Create metadata yml if missing, using app_name as Name. Return
-        (True, info_dict)."""
+        differs, raise ValueError. If the destination APK already exists,
+        return (False, info_dict) without overwriting. Otherwise move
+        src to dest, create the metadata yml if missing (using app_name as
+        Name), and return (True, info_dict)."""
         info = _inspect_apk(src_path)
         package = info["package"]
         if expected_package and expected_package != package:
@@ -3001,13 +2993,13 @@ class AndroidRepoManager:
             try:
                 os.replace(src_path, dest)
             except OSError as e:
-                # UPLOAD_FOLDER and FDROID_REPO_DIR are usually the same
+                # UPLOAD_FOLDER and FDROID_REPO_DIR are usually on the same
                 # filesystem (both under DATA_DIR), but compose.yml mounts
-                # ./data/fdroid as its own bind mount alongside ./data --
-                # same layout as ipas/ and icons/ -- which some Docker
-                # storage/mount configurations surface to the container as
-                # a different device, making a plain rename cross-device.
-                # Fall back to copy+remove in that case only.
+                # ./data/fdroid as its own bind mount beside ./data, the same
+                # layout as ipas/ and icons/. Some Docker storage/mount
+                # configurations present it to the container as a different
+                # device, so a plain rename crosses devices. Only in that case,
+                # fall back to copy and remove.
                 if e.errno != errno.EXDEV:
                     raise
                 tmp_dest = os.path.join(FDROID_REPO_DIR, f".{os.path.basename(dest)}.part")
@@ -3034,7 +3026,7 @@ class AndroidRepoManager:
                 name = name[:limit - 1].rstrip() + "…"
             self.write_metadata(package, {"Name": name})
         if apk_storage is not None and not apk_storage.put(dest):
-            logging.warning("APK %s kept on local disk only; Rebuild Index retries the Garage upload",
+            logging.warning("APK %s kept on local disk only; Rebuild index retries the Garage upload",
                             os.path.basename(dest))
         newest = self._newest_apk(package)
         if newest and newest[1] == dest:
@@ -3054,7 +3046,7 @@ class AndroidRepoManager:
         releases rank by their highest versionCode, F-Droid's own notion of
         newer. versionName comes from `known` (an APK just inspected), then
         the published index, then the APK itself. An APK whose versionName
-        cannot be read is left out: never counted, never pruned."""
+        cannot be read is left out, so it is never counted or pruned."""
         names = {}
         index = self.load_index() or {}
         for entry in (index.get('packages') or {}).get(package) or []:
@@ -3103,7 +3095,7 @@ class AndroidRepoManager:
         """Apply the package's retention policy once an added APK makes its
         release the newest. Adding an older build (a backport, or one ABI of
         a release whose others are still to come) prunes nothing. A failure
-        here is logged, never raised: the APK is already published."""
+        here is logged, never raised, because the APK is already published."""
         keep_previous = retention_keep_previous("android", package)
         if keep_previous is None:
             return []
@@ -3184,13 +3176,13 @@ class AndroidRepoManager:
 # Initialize source manager
 source_manager = SourceManager(SOURCE_FILE)
 
-# Plan 073: Android / F-Droid repository manager (own directory tree under
-# DATA_DIR/fdroid; does not touch source_manager's data at all).
+# Plan 073: the Android / F-Droid repository manager. It has its own directory
+# tree under DATA_DIR/fdroid and never touches source_manager's data.
 android_repo = AndroidRepoManager()
 
-# Initialize IPA storage backend. STORAGE_BACKEND defaults to "local", so
-# merging this is a no-op until the flag is deliberately flipped to
-# "garage" -- see _require_garage_config for the refuse-to-start check.
+# Initialize the IPA storage backend. STORAGE_BACKEND defaults to "local", so
+# nothing changes until an operator sets it to "garage". See
+# _require_garage_config for the refuse-to-start check.
 if STORAGE_BACKEND == "garage":
     ipa_storage = GarageIpaStorage()
 else:
@@ -3200,7 +3192,7 @@ else:
 apk_storage = GarageApkMirror() if APK_STORAGE_BACKEND == "garage" else None
 
 # Icon storage backend (ICON_STORAGE_BACKEND, defaults to STORAGE_BACKEND).
-# Independent so icons can live on local disk while IPAs stay on Garage.
+# It is separate so icons can stay on local disk while IPAs are on Garage.
 if ICON_STORAGE_BACKEND == "garage":
     icon_storage = GarageIconStorage()
 else:
@@ -3215,8 +3207,8 @@ _FDROID_REPO_CSP = (
 @app.after_request
 def _security_headers(response):
     """Baseline headers. /fdroid/repo/ holds pages fdroidserver generates
-    (index.html interpolates the repo name and description unescaped); a
-    sandboxing CSP gives them an opaque origin so nothing there can reach
+    (index.html interpolates the repo name and description unescaped). A
+    sandboxing CSP gives them an opaque origin, so nothing there can reach
     the admin session or API, whatever fdroidserver writes."""
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "same-origin")
@@ -3246,10 +3238,10 @@ def _reject_malformed_json():
     return None
 
 
-# Failed-login throttle: per client address, sliding window, in-process
-# (the app is single-process by design). Behind a reverse proxy every
-# client shares the proxy's address, so this becomes a global limit --
-# still bounded to LOGIN_MAX_FAILURES per window, and a success clears it.
+# Failed-login throttle, per client address, over a sliding window, kept
+# in-process (the app is single-process by design). Behind a reverse proxy
+# every client shares the proxy's address, so this becomes a global limit.
+# It still allows LOGIN_MAX_FAILURES per window, and a success clears it.
 LOGIN_MAX_FAILURES = 5
 LOGIN_WINDOW_SECONDS = 60
 _login_failures = {}
@@ -3297,7 +3289,7 @@ def requires_auth(f):
 
 # API tokens for agents and CI. A token can publish IPAs/APKs and read the
 # catalogue (requires_publish) but never manage tokens, delete apps, or change
-# settings -- those stay session-only (requires_auth). Only a SHA-256 of each
+# settings, which stay session-only (requires_auth). Only a SHA-256 of each
 # token is stored; the plaintext is shown once, at creation.
 API_TOKENS_FILE = os.path.join(DATA_DIR, "api-tokens.json")
 API_TOKEN_PREFIX = "ftr_"
@@ -3393,7 +3385,7 @@ def requires_publish(f):
             if g.api_token is None:
                 return jsonify({"success": False, "error": "Authentication required"}), 401
             if g.api_token.get("kind") == "backup":
-                # A phone holds this one: it may keep its settings here, not ship apps.
+                # A phone holds this token. It may keep settings here, not ship apps.
                 return jsonify({"success": False, "error": "This token may only reach device backups"}), 403
         return f(*args, **kwargs)
     return wrapper
@@ -3401,8 +3393,8 @@ def requires_publish(f):
 
 def requires_backup(f):
     """Admin session OR a backup-kind API token, while DEVICE_BACKUPS is on.
-    A publish token is refused: what ships an app has no business reading a
-    phone's settings, and a phone's token can't ship one."""
+    A publish token is refused. A token that ships apps has no business
+    reading a phone's settings, and a phone's token can't ship one."""
     @wraps(f)
     def wrapper(*args, **kwargs):
         if not DEVICE_BACKUPS:
@@ -3426,9 +3418,9 @@ def index():
 
 @app.route('/api/version')
 def version():
-    """Public: the commit the running image was built from (CI passes it as
-    FEATHER_VERSION). The way to check a deploy -- route probes stop working
-    once the probed route exists in both images."""
+    """Public. The commit the running image was built from (CI passes it as
+    FEATHER_VERSION). Use it to check a deploy, because route probes stop
+    working once the probed route exists in both images."""
     return jsonify({"version": _env("FEATHER_VERSION", "dev")})
 
 @app.route('/store')
@@ -3486,11 +3478,11 @@ def serve_source():
 def serve_ipa(bundle_id, filename):
     """Serve IPA files.
 
-    Plan 011: the catalog URL is permanent regardless of storage backend.
+    The catalog URL stays the same whatever the storage backend (plan 011).
     ipa_storage.public_url() returns None for the local backend (send_file
-    below, unchanged) or a Garage web-endpoint URL for the garage backend
-    (302 redirect). exists() is checked first so a missing object still
-    gives a clean 404 rather than a redirect into a Garage NoSuchKey page.
+    below) or a Garage web-endpoint URL for the garage backend (302
+    redirect). exists() is checked first, so a missing object still gives
+    a clean 404 rather than a redirect to a Garage NoSuchKey page.
     """
     try:
         # Security: ensure both URL segments are safe
@@ -3787,7 +3779,7 @@ def add_version():
         return jsonify({"success": False, "error": str(e)}), 400
 
 def _normalize_repo_project(raw):
-    """Strip browser-URL chrome from a pasted repo reference -> 'Owner/Repo'."""
+    """Reduce a pasted repo URL or reference to 'Owner/Repo'."""
     p = (raw or "").strip()
     for prefix in ("https://", "http://"):
         if p.lower().startswith(prefix):
@@ -3820,10 +3812,9 @@ def _decode_cgbi_png(data):
 
     CgBI PNGs store BGRA pixels with premultiplied alpha and a raw-deflate
     (no zlib header) IDAT stream. This undoes both, following the
-    well-known "pngdefry"/"iphone-png-normalizer" approach. Raises
-    ``ValueError`` (or lets the underlying zlib/struct error propagate) on
-    anything that isn't a well-formed 8-bit RGBA CgBI PNG -- callers must
-    catch and fall back.
+    "pngdefry"/"iphone-png-normalizer" approach. Raises ``ValueError``, or
+    lets the underlying zlib/struct error propagate, on anything that isn't
+    a well-formed 8-bit RGBA CgBI PNG. Callers must catch and fall back.
     """
     if data[:8] != b"\x89PNG\r\n\x1a\n":
         raise ValueError("not a PNG")
@@ -3957,9 +3948,9 @@ def _save_temp_png(img):
 
 def _add_app_with_avatar_icon(new_app, fs, owner, base_url):
     """Create an app using the GitHub owner avatar as its icon. The avatar
-    is cosmetic: if it cannot be fetched (404 for some org/renamed owners,
-    rate limits, network), create the app iconless -- the source icon is
-    served in its place -- instead of failing the whole import."""
+    is cosmetic. If it cannot be fetched (404 for some org/renamed owners,
+    rate limits, network), create the app without an icon, so the source
+    icon is served in its place, instead of failing the whole import."""
     with_icon = dict(new_app, iconURL=f"https://github.com/{owner}.png")
     ok, message = source_manager.add_app_manual(
         with_icon, ipa_file=fs, download_icon_from_url=True, base_url=base_url)
@@ -3975,7 +3966,7 @@ _MAX_ICON_MEMBER_BYTES = 8 * 1024 * 1024
 
 
 def _zip_read_capped(zf, name):
-    """zf.read with a size cap: icon candidates and Info.plist come from an
+    """zf.read with a size cap. Icon candidates and Info.plist come from an
     untrusted archive and would otherwise be inflated whole (zip bomb)."""
     info = zf.getinfo(name)
     if info.file_size > _MAX_ICON_MEMBER_BYTES:
@@ -3990,8 +3981,8 @@ def _zip_read_capped(zf, name):
 def _extract_ipa_icon(ipa_path):
     """Best-effort extraction of the app icon from an .ipa, normalized to a
     standard PNG. Returns a path to a new temporary PNG file (the caller
-    must delete it) or ``None`` if no icon could be extracted. Never raises
-    -- any failure anywhere just yields ``None`` so the caller falls back.
+    must delete it) or ``None`` if no icon could be extracted. Never
+    raises. Any failure yields ``None``, so the caller falls back.
     """
     try:
         with zipfile.ZipFile(ipa_path) as zf:
@@ -4130,10 +4121,11 @@ def _apply_icon_to_existing(bundle_id, existing, ipa_path, *, provider, project,
                             icon_url_in="", base_url=None):
     """Best-effort: (re)apply an icon to an already-existing app during import.
 
-    An explicit ``icon_url_in`` (user-supplied) always wins. Otherwise auto-detect
-    ONLY when the current icon is missing/placeholder (never clobber a good icon on
-    a routine version import): IPA-extracted icon, else GitHub owner avatar.
-    Never raises -- a failed icon step must not fail the version import.
+    An explicit, user-supplied ``icon_url_in`` always wins. Otherwise detect an
+    icon ONLY when the current one is missing or the placeholder, so a routine
+    version import never replaces a good icon. The IPA's own icon comes first,
+    then the GitHub owner avatar. Never raises, because a failed icon step must
+    not fail the version import.
     """
     try:
         if icon_url_in:
@@ -4145,7 +4137,7 @@ def _apply_icon_to_existing(bundle_id, existing, ipa_path, *, provider, project,
             return
         cur_icon = (existing.get("iconURL") or "").strip()
         if cur_icon and cur_icon != SOURCE_ARTWORK_URL:
-            return  # already has a real icon — leave it
+            return  # already has a real icon; leave it
         extracted_icon = _extract_ipa_icon(ipa_path)
         try:
             if extracted_icon:
@@ -4284,10 +4276,10 @@ def _inspection_history_fields(inspection):
 
 
 def _catalog_history_fields(catalog_id, inspection):
-    """Plan 090: provenance is looked up by catalog id, so the record of a
+    """Provenance is looked up by catalog id (plan 090), so the record of a
     publish under an overridden catalog id carries that id as
     bundleIdentifier and keeps the IPA's own id as artifactBundleIdentifier.
-    Spread after _inspection_history_fields so it wins."""
+    Spread it after _inspection_history_fields so it wins."""
     if inspection is None or not catalog_id or catalog_id == inspection.bundle_identifier:
         return {}
     return {"bundleIdentifier": catalog_id,
@@ -4295,9 +4287,9 @@ def _catalog_history_fields(catalog_id, inspection):
 
 
 # ---------------------------------------------------------------------------
-# Auto-import (Plan 048): an app-managed job store + in-process scheduler
-# that runs the same release-ingest engine as /api/import-release above, on
-# a schedule, without a host crontab or .env manifest.
+# Auto-import (Plan 048). An app-managed job store and an in-process
+# scheduler run the same release-ingest engine as /api/import-release above,
+# on a schedule, without a host crontab or .env manifest.
 # ---------------------------------------------------------------------------
 
 _AUTO_IMPORT_WRITE_LOCK = threading.Lock()
@@ -4312,8 +4304,8 @@ def _auto_import_path():
 
 
 def load_auto_import():
-    """Load the auto-import job store. Never raises -- a missing or corrupt
-    file returns the safe default so GET /api/auto-import can never 500."""
+    """Load the auto-import job store. Never raises. A missing or corrupt
+    file returns the safe default, so GET /api/auto-import can never 500."""
     path = _auto_import_path()
     try:
         with open(path, 'r') as f:
@@ -4381,13 +4373,13 @@ def _validate_asset_match_mode(mode):
 
 
 def _validate_catalog_bundle_identifier(raw):
-    """Normalize the optional catalogBundleIdentifier (plan 090): the catalog
-    entry an imported IPA is published into when it should differ from the
-    IPA's own CFBundleIdentifier -- how the operator keeps patched builds
-    that share an upstream bundle id as distinct catalog apps (the Telegram
-    bot's `/add <bundleIdentifier> <version>` does the same, and check_ipa
-    only warns about the mismatch for that reason). Returns None when unset;
-    raises ValueError on a malformed value."""
+    """Normalize the optional catalogBundleIdentifier (plan 090). It names
+    the catalog entry an imported IPA is published into when that should
+    differ from the IPA's own CFBundleIdentifier. This is how the operator
+    keeps patched builds that share an upstream bundle id as distinct
+    catalog apps. The Telegram bot's `/add <bundleIdentifier> <version>`
+    does the same, which is why check_ipa only warns about the mismatch.
+    Returns None when unset; raises ValueError on a malformed value."""
     if raw is None:
         return None
     if not isinstance(raw, str):
@@ -4402,13 +4394,13 @@ def _validate_catalog_bundle_identifier(raw):
 
 def _validate_asset_pattern(field_name, pattern, mode):
     """Validate one assetGlob/assetExcludeGlob value at save time, never at
-    run time inside the scheduler. In regex mode: reject patterns over
-    release_ingest.ASSET_PATTERN_MAX_LENGTH characters (a deliberate, cheap
-    guard against catastrophic backtracking -- Python's `re` has no match
-    timeout, so a pathological pattern would block the scheduler thread;
-    these routes are admin-only via @requires_auth, so this is defence in
-    depth rather than a boundary against untrusted input) and surface a bad
-    pattern as ValueError, never a raw re.error."""
+    run time inside the scheduler. In regex mode, reject patterns over
+    release_ingest.ASSET_PATTERN_MAX_LENGTH characters, and report a bad
+    pattern as ValueError, never a raw re.error. The length cap is a cheap
+    guard against catastrophic backtracking. Python's `re` has no match
+    timeout, so a pathological pattern would block the scheduler thread.
+    These routes are admin-only via @requires_auth, so this is defence in
+    depth rather than a boundary against untrusted input."""
     if mode != 'regex' or not pattern:
         return
     if len(pattern) > release_ingest.ASSET_PATTERN_MAX_LENGTH:
@@ -4423,8 +4415,8 @@ def _validate_asset_pattern(field_name, pattern, mode):
 
 
 def _validate_auto_import_job(raw):
-    """Normalize + validate one job dict from the API. Raises ValueError
-    with a user-facing message on any problem; rules mirror the engine's
+    """Normalize and validate one job dict from the API. Raises ValueError
+    with a user-facing message on any problem. The rules match the engine's
     own manifest validation (see release_source_ingest.parse_manifest_dict)."""
     if not isinstance(raw, dict):
         raise ValueError("Job must be an object")
@@ -4447,15 +4439,15 @@ def _validate_auto_import_job(raw):
     package = (raw.get('package') or '').strip() or None
     if package is not None and not ANDROID_PACKAGE_RE.match(package):
         raise ValueError(f"package {package!r} is not a valid Android package name")
-    # Neither identity field is required: both are auto-detected from the
+    # Neither identity field is required, because both are detected from the
     # artifact. The iOS path reads bundleIdentifier out of the IPA's
-    # Info.plist (_run_auto_import_ios_candidate) and the Android path lets
+    # Info.plist (_run_auto_import_ios_candidate), and the Android path lets
     # android_repo.add_apk re-derive the package from the APK's manifest.
-    # When set, they act as assertions -- publish is refused if the artifact
-    # disagrees -- which is why they stay optional rather than required.
-    # catalogBundleIdentifier is different: not an assertion but the catalog
-    # entry to publish the IPA into, so bundleIdentifier still checks the
-    # IPA's own id while the version lands under a distinct one.
+    # When set, they are assertions, and publish is refused if the artifact
+    # disagrees. That is why they stay optional. catalogBundleIdentifier is
+    # not an assertion but the catalog entry to publish the IPA into, so
+    # bundleIdentifier still checks the IPA's own id while the version lands
+    # under a different one.
     catalog_bundle_id = _validate_catalog_bundle_identifier(raw.get('catalogBundleIdentifier'))
 
     asset_glob = (raw.get('assetGlob') or '*.ipa').strip()
@@ -4504,10 +4496,10 @@ def _validate_auto_import_job(raw):
 
 def _run_auto_import_ios_candidate(job_obj, job, base_url, session_req, tokens, candidate, run_started):
     """Download, validate, and publish one selected iOS candidate. Never
-    raises -- always returns a per-platform result dict and appends its own
-    import-history record. Unchanged in behaviour from the pre-084
-    single-candidate code path (selection now happens once, in the caller,
-    for every platform the job has an identity for)."""
+    raises. It always returns a per-platform result dict and appends its own
+    import-history record. It behaves like the pre-084 single-candidate code
+    path (selection now happens once, in the caller, for every platform the
+    job has an identity for)."""
     tmp_path = None
     inspection = None
     digest = None
@@ -4532,8 +4524,8 @@ def _run_auto_import_ios_candidate(job_obj, job, base_url, session_req, tokens, 
         if job_obj.bundle_identifier and bundle_id != job_obj.bundle_identifier:
             raise ValueError(f"IPA bundle id {bundle_id} does not match the job's bundleIdentifier "
                              f"({job_obj.bundle_identifier}); not published")
-        # Plan 090: publish into the job's catalog entry when it names one.
-        # bundle_id stays the IPA's own id -- the one checked above.
+        # Publish into the job's catalog entry when it names one (plan 090).
+        # bundle_id stays the IPA's own id, the one checked above.
         catalog_id = job.get('catalogBundleIdentifier') or bundle_id
         detected_name = inspection.name
         preflight = {
@@ -4594,9 +4586,9 @@ def _run_auto_import_ios_candidate(job_obj, job, base_url, session_req, tokens, 
                         ok, message = source_manager.add_app_manual(
                             new_app, ipa_file=fs, icon_file=icon_fs, base_url=base_url)
                     else:
-                        # Fallback: GitHub owner avatar, same as import-release.
-                        # GitLab avatars need an extra API call, so GitLab
-                        # auto-imports simply go iconless here.
+                        # Fall back to the GitHub owner avatar, as import-release
+                        # does. GitLab avatars need an extra API call, so GitLab
+                        # auto-imports go without an icon here.
                         owner = _repo_owner(job_obj.project) if job_obj.provider == "github" else ""
                         if owner:
                             ok, message = _add_app_with_avatar_icon(new_app, fs, owner, base_url)
@@ -4644,15 +4636,14 @@ def _run_auto_import_ios_candidate(job_obj, job, base_url, session_req, tokens, 
 
 
 def _run_auto_import_android_candidate(job_obj, job, session_req, tokens, candidate, run_started):
-    """Download, validate, and publish one selected Android candidate, via
-    the same in-process android_repo.add_apk pair /api/android/add-apk uses
-    -- never a second HTTP hop through that route. Never raises -- always
+    """Download, validate, and publish one selected Android candidate through
+    the same in-process android_repo.add_apk pair /api/android/add-apk uses,
+    never a second HTTP hop through that route. Never raises. It always
     returns a per-platform result dict and appends its own import-history
-    record. Treats add_apk reporting this versionCode as already present as
-    an idempotent skip, not a failure, and never notifies twice (add_apk's
-    own metadata seeding runs, but this function -- not the route -- is the
-    only place that calls `notify`, matching one artifact = one
-    notification)."""
+    record. add_apk reporting this versionCode as already present is an
+    idempotent skip, not a failure. It never notifies twice. add_apk's own
+    metadata seeding runs, but this function, not the route, is the only
+    place that calls `notify`, so one artifact gives one notification."""
     tmp_path = None
     inspection = None
     digest = None
@@ -4679,9 +4670,9 @@ def _run_auto_import_android_candidate(job_obj, job, session_req, tokens, candid
         }
         stage = "publish"
         # android_repo.add_apk re-derives identity from the file itself (it
-        # cannot accept a pre-computed ApkInspection); the extra pyaxmlparser
+        # cannot accept a pre-computed ApkInspection). The extra pyaxmlparser
         # pass is the cost of reusing the exact route helper rather than
-        # re-implementing the move-into-place + idempotency logic here.
+        # re-implementing the move-into-place and idempotency logic here.
         added, info = android_repo.add_apk(tmp_path, expected_package=job_obj.package)
         if not added:
             result = {
@@ -4690,10 +4681,10 @@ def _run_auto_import_android_candidate(job_obj, job, session_req, tokens, candid
                 "preflight": preflight,
             }
         else:
-            # Metadata (Name/Summary/...) is not part of a watcher job today
-            # -- android_repo.add_apk already seeds a default Name for a
-            # brand-new package, matching /api/android/add-apk's own
-            # `if fields: write_metadata(...)` (empty fields here -> no call).
+            # Metadata (Name/Summary/...) is not part of a watcher job today.
+            # android_repo.add_apk already seeds a default Name for a new
+            # package, matching /api/android/add-apk's own
+            # `if fields: write_metadata(...)`, which empty fields skip.
             notify("android_add_apk",
                    f"Auto-imported Android APK {info['package']} {info['version_name']} "
                    f"from {job_obj.provider}:{job_obj.project}")
@@ -4731,19 +4722,19 @@ def _run_auto_import_android_candidate(job_obj, job, session_req, tokens, candid
 
 
 def _summarize_auto_import_platforms(platforms):
-    """`platforms`: {"ios": result, "android": result} for whichever
-    platforms select_candidate found a match for -- each already run and
-    already appended its own import-history record. Returns the dict stored
-    as the job's lastResult.
+    """`platforms` is {"ios": result, "android": result} for whichever
+    platforms select_candidate found a match for. Each has already run and
+    appended its own import-history record. Returns the dict stored as the
+    job's lastResult.
 
-    Always carries the full per-platform breakdown under "platforms" so a
-    publish on one platform can never be masked by a skip/error on the
-    other. When the job only has one platform's identity configured --
-    every job stored before this plan, plus any new job that stays
-    single-platform -- the legacy top-level status/version/message/
-    preflight keys are also set, mirroring the pre-084 shape exactly (extra
-    keys, never removed ones, so existing callers reading result["status"]
-    / result["version"] are unaffected)."""
+    It always carries the full per-platform breakdown under "platforms", so
+    a skip or error on one platform can never hide a publish on the other.
+    When exactly one platform matched, the legacy top-level
+    status/version/message/preflight keys are also set, in the
+    pre-084 shape. That covers every job stored before this plan and any new
+    job that stays single-platform. Keys are only added, never removed, so
+    existing callers reading result["status"] / result["version"] are
+    unaffected."""
     if not platforms:
         return {"status": "error", "message": "No matching release asset found", "platforms": {}}
     if len(platforms) == 1:
@@ -4772,15 +4763,15 @@ def _summarize_auto_import_platforms(platforms):
 
 def _run_auto_import_job(job, base_url, session_req, tokens):
     """Run one auto-import job end to end for every platform it has an
-    identity for (select -> download -> extract -> publish), reusing the
-    exact release_ingest + source_manager/android_repo calls the
-    /api/import-release route above uses. Never raises -- always returns a
-    result dict (see `_summarize_auto_import_platforms`), and persists it
+    identity for (select, download, extract, publish), reusing the same
+    release_ingest and source_manager/android_repo calls the
+    /api/import-release route above uses. Never raises. It always returns a
+    result dict (see `_summarize_auto_import_platforms`) and persists it
     onto the stored job's lastRunAt/lastResult.
 
     plan 083's `select_candidate` returns at most one candidate per
-    platform; each is downloaded, validated, and published independently
-    (`_run_auto_import_ios_candidate` / `_run_auto_import_android_candidate`)
+    platform. Each is downloaded, validated, and published on its own
+    (`_run_auto_import_ios_candidate` / `_run_auto_import_android_candidate`),
     so one platform's failure or skip never blocks or hides the other."""
     run_started = time.monotonic()
     job_obj = release_ingest.Job(
@@ -4829,8 +4820,8 @@ def _run_auto_import_job(job, base_url, session_req, tokens):
 
 
 def _persist_auto_import_job_result(job, result):
-    """Persist lastRunAt/lastResult onto the stored job. Best-effort --
-    never raises, matching `_run_auto_import_job`'s own contract."""
+    """Persist lastRunAt/lastResult onto the stored job. Best effort. Never
+    raises, matching `_run_auto_import_job`'s own contract."""
     try:
         def stamp_job(data):
             now = datetime.now(timezone.utc).isoformat()
@@ -4908,12 +4899,12 @@ def _auto_import_scheduler_cycle():
 
 
 def _auto_import_scheduler_loop(stop_event):
-    """Daemon loop: each cycle, run enabled jobs if intervalHours has
-    elapsed since lastRunAt (or lastRunAt is unset), then wait up to a short
-    poll interval so config changes (POST /api/auto-import/config) are
-    picked up promptly -- that route also sets _auto_import_wake_event to
-    wake this loop early. Started ONLY from `__main__` at the bottom of this
-    file -- see _start_auto_import_scheduler."""
+    """Daemon loop. Each cycle runs enabled jobs if intervalHours has
+    elapsed since lastRunAt (or lastRunAt is unset), then waits up to a
+    short poll interval so config changes (POST /api/auto-import/config)
+    take effect soon. That route also sets _auto_import_wake_event to wake
+    this loop early. Started ONLY from `__main__` at the bottom of this
+    file; see _start_auto_import_scheduler."""
     while not stop_event.is_set():
         interval_hours = 6
         try:
@@ -4928,8 +4919,8 @@ def _auto_import_scheduler_loop(stop_event):
 
 def _start_auto_import_scheduler():
     """Start the auto-import scheduler daemon thread. Call ONLY from
-    `__main__` -- never at module import time, or the test suite (which
-    imports this module) would spawn a background thread on every test run."""
+    `__main__`, never at module import time. The test suite imports this
+    module and would otherwise spawn a background thread on every test run."""
     stop_event = threading.Event()
     thread = threading.Thread(
         target=_auto_import_scheduler_loop, args=(stop_event,),
@@ -4942,7 +4933,7 @@ def _start_auto_import_scheduler():
 def _stream_download_with_progress(session_req, candidate, job, tmp_path, tokens):
     """Run release_ingest.stream_download in a worker thread while yielding
     live progress, so a generator-based SSE route can `for kind, a, b in
-    ...: yield event(...)` without duplicating the queue/thread plumbing per
+    ...: yield event(...)` without duplicating the queue/thread code per
     platform. Yields ("downloading", downloaded, total) while in flight,
     then exactly one of ("ok", downloaded, sha256_hex) or ("err", message,
     None) and stops."""
@@ -5045,7 +5036,7 @@ def inspect_import_release():
         releases = release_ingest.inspect_release_assets(
             job, requests.Session(), tokens, timeout=30, limit=5
         )
-        # Label each asset's inferred platform for the UI -- inspect_release_assets
+        # Label each asset's inferred platform for the UI. inspect_release_assets
         # itself doesn't (plan 083 scope), so tag it here with the engine's own
         # extension-inference helper rather than re-implementing it.
         for release in releases:
@@ -5089,10 +5080,10 @@ def import_release():
 
     def handle_ios(job, candidate, session_req, tokens, catalog_in=None):
         """Download, validate, and publish one selected iOS candidate as SSE
-        events. Unchanged in behaviour from the pre-084 single-candidate
-        code path; every event carries a new "platform" field but no
-        existing field is renamed, matching what templates/index.html's
-        preflight/done handlers already read. Appends its own
+        events. It behaves like the pre-084 single-candidate code path.
+        Every event carries a new "platform" field, but no existing field
+        is renamed, so templates/index.html's preflight/done handlers still
+        find the fields they read. Appends its own
         import-history record. `catalog_in` (plan 090) names the catalog
         entry to publish into instead of the IPA's own bundle id; the
         preflight event still reports the IPA's id."""
@@ -5149,9 +5140,9 @@ def import_release():
             existing = source_manager.get_app(catalog_id)
             if existing and any(isinstance(v, dict) and v.get("version") == version
                                 for v in existing.get("versions", [])):
-                # Same rule as auto-import: nothing is stored, so no "Imported"
-                # notification and no 'published' record -- provenance would
-                # otherwise credit this download for the binary already served.
+                # Same rule as auto-import. Nothing is stored, so there is no
+                # "Imported" notification and no 'published' record; otherwise
+                # provenance would credit this download for the binary already served.
                 history_status = "skipped"
                 history_message = f"Version {version} already present"
                 yield event(stage="done", platform="ios", success=True, skipped=True,
@@ -5198,8 +5189,8 @@ def import_release():
                         ok, message = source_manager.add_app_manual(
                             new_app, ipa_file=fs, icon_file=icon_fs, base_url=base_url)
                     else:
-                        # Fallback: GitHub owner avatar. GitLab avatars need an
-                        # extra API call, so GitLab imports simply go iconless here.
+                        # Fall back to the GitHub owner avatar. GitLab avatars need
+                        # an extra API call, so GitLab imports go without an icon here.
                         owner = _repo_owner(project) if provider == "github" else ""
                         if owner:
                             ok, message = _add_app_with_avatar_icon(new_app, fs, owner, base_url)
@@ -5255,14 +5246,14 @@ def import_release():
 
     def handle_android(job, candidate, session_req, tokens):
         """Download, validate, and publish one selected Android candidate as
-        SSE events tagged platform="android", reusing the bundleIdentifier/
-        version field names (holding package/versionName) so no event field
-        the frontend already reads is renamed -- see handle_ios's docstring.
-        Publishes through the exact android_repo.add_apk/write_metadata pair
-        /api/android/add-apk uses -- never a second HTTP hop through that
-        route -- and treats add_apk reporting this versionCode as already
-        present as an idempotent skip, not a failure. Appends its own
-        import-history record."""
+        SSE events tagged platform="android". It reuses the bundleIdentifier/
+        version field names (holding package/versionName), so no event field
+        the frontend already reads is renamed; see handle_ios's docstring.
+        Publishes through the same android_repo.add_apk/write_metadata pair
+        /api/android/add-apk uses, never a second HTTP hop through that
+        route. add_apk reporting this versionCode as already present is an
+        idempotent skip, not a failure. Appends its own import-history
+        record."""
         tmp_path = None
         inspection = None
         digest = None
@@ -5559,7 +5550,7 @@ def update_version():
         if not version:
             return jsonify({"success": False, "error": "Version is required"}), 400
         
-        # Allow updating just the URL without requiring file upload
+        # Allow updating only the URL without requiring file upload
         if not ipa_file and not data.get('downloadURL') and not download_from_url:
             return jsonify({"success": False, "error": "Download URL is required"}), 400
         
@@ -5936,17 +5927,17 @@ def _catalog_structural_diff(current, candidate):
 
 
 def _scan_catalog_health(source_data=None, base_url=None):
-    """Read-only scan of the live catalog + storage for known problem
+    """Read-only scan of the live catalog and storage for known problem
     classes (plan 038): duplicate versions, zero/missing sizes, empty or
     non-public downloadURLs, missing icons, missing IPAs, and (local
-    backend only) IPA files that exist but aren't actually valid ZIPs --
-    the gzip-HTML corruption class.
+    backend only) IPA files that exist but aren't valid ZIPs, the
+    gzip-HTML corruption class.
 
     Never mutates anything. Tolerates a malformed catalog shape (missing
     'apps', a non-dict app/version, a non-string bundleIdentifier) the
     same way normalize_source() does on the /source.json path, by
-    skipping the offending element instead of raising -- this backs a
-    GET route that must never 500.
+    skipping the offending element instead of raising, because this backs
+    a GET route that must never 500.
 
     Returns a list of {"bundleIdentifier", "version", "kind", "detail",
     "severity"} dicts. "version" is None for app-level issues (and for
@@ -6030,13 +6021,13 @@ def _scan_catalog_health(source_data=None, base_url=None):
                 else:
                     seen_versions.add(version_label)
 
-            # zero-size: missing, 0, or not an int (bool excluded explicitly --
-            # it is technically an int subtype but never a legitimate size).
+            # zero-size: missing, 0, or not an int. bool is excluded explicitly
+            # because it is an int subtype but never a real size.
             size = version_entry.get('size')
             if isinstance(size, bool) or not isinstance(size, int) or size == 0:
                 add(bundle_id, version_label, "zero-size", f"size is {size!r}", "error")
 
-            # empty-or-nonpublic-downloadURL + missing-ipa
+            # empty-or-nonpublic-downloadURL and missing-ipa
             download_url = version_entry.get('downloadURL')
             if not (isinstance(download_url, str) and download_url.strip()):
                 add(bundle_id, version_label, "empty-or-nonpublic-downloadURL",
@@ -6056,8 +6047,8 @@ def _scan_catalog_health(source_data=None, base_url=None):
                 except Exception:
                     pass
 
-            # not-a-zip (local backend only -- checking a Garage object's
-            # content would mean downloading it, which this scan never does)
+            # not-a-zip, local backend only. Checking a Garage object's
+            # content would mean downloading it, which this scan never does.
             if is_local_backend and version_label:
                 try:
                     path = source_manager.get_ipa_path(bundle_id, version_label)
@@ -6078,10 +6069,10 @@ def _scan_catalog_health(source_data=None, base_url=None):
 @app.route('/api/health')
 @requires_auth
 def catalog_health():
-    """Read-only diagnostics: scan the live catalog + storage for known
-    problem classes and report them. Never mutates anything, never 500s
-    (plan 038) -- a scan failure degrades to an empty report rather than
-    a broken response, since this exists to surface problems, not add one.
+    """Read-only diagnostics. Scan the live catalog and storage for known
+    problem classes and report them. Never mutates anything and never 500s
+    (plan 038). A scan failure returns an empty report rather than a broken
+    response, because this route exists to surface problems, not add one.
     """
     try:
         issues = _scan_catalog_health()
@@ -6237,15 +6228,16 @@ def restore_catalog_backup():
 
 def _reconcile_icons(apply=False):
     """Scan ICON_FOLDER for on-disk icons and upload any missing from the
-    active backend (plan 040). Mirrors scripts/migrate_icons_to_garage.py's
-    logic in-app so an operator without a repo checkout can repair icons
-    that were never migrated after an icon backend switch.
+    active backend (plan 040). It runs scripts/migrate_icons_to_garage.py's
+    logic inside the app, so an operator without a repo checkout can repair
+    icons that were never migrated after an icon backend switch.
 
-    Dry-run by default (apply=False): reports what would be uploaded without
-    writing anything. apply=True uploads only icons missing from the active
-    backend. Never deletes or modifies local icon files.
+    Dry run by default (apply=False). It reports what would be uploaded
+    without writing anything. apply=True uploads only icons missing from
+    the active backend. Never deletes or modifies local icon files.
 
-    For the local backend this is a no-op: on-disk icons ARE what's served.
+    For the local backend this is a no-op, because on-disk icons ARE what's
+    served.
     """
     if ICON_STORAGE_BACKEND != "garage":
         return {
@@ -6341,7 +6333,7 @@ def _reconcile_icons(apply=False):
     }
     if checked == 0 and "note" not in result:
         result["note"] = ("No local icon files found to reconcile. Icons missing from "
-                          "Garage that have no local copy must be re-uploaded via Edit App.")
+                          "Garage that have no local copy must be re-uploaded from the Edit app dialog.")
     return result
 
 
@@ -6376,10 +6368,9 @@ def storage_selftest():
     """Write-read-delete round-trip against the active storage backend
     for both icon_storage and ipa_storage (plan 050). Distinguishes a 403
     ("forbidden") from a real 404/missing object, which exists()'s bool
-    contract cannot do -- see the class docstrings on each storage
-    backend's selftest() for the discrimination logic. Only ever touches
-    a dedicated probe key, which is always deleted; never mutates a real
-    catalog object.
+    contract cannot do; each storage backend's selftest() docstring says
+    how. Only touches a dedicated probe key, which is always deleted, and
+    never mutates a real catalog object.
     """
     try:
         return jsonify({"icon": icon_storage.selftest(), "ipa": ipa_storage.selftest()})
@@ -6398,13 +6389,13 @@ def diagnostics():
 # ---------------------------------------------------------------------------
 # Certificate inspection (plans/086 section 8e).
 #
-# Validate-and-display only: the operator uploads a .p12 + .mobileprovision
-# pair and gets back what it is, when it expires (twice -- the certificate and
-# the profile expire independently), which devices it covers, and whether the
-# two files actually belong together. Nothing is signed, nothing is written,
-# and the passphrase is never persisted or logged. Signing server-side was
-# rejected in plans/086 section 7; this route answers the question that was
-# actually being asked, which is whether a certificate is usable.
+# Validate and display only. The operator uploads a .p12 and .mobileprovision
+# pair and gets back what it is, when it expires, which devices it covers, and
+# whether the two files belong together. It reports two expiry dates, because
+# the certificate and the profile expire independently. Nothing is signed or
+# written, and the passphrase is never persisted or logged. plans/086 section
+# 7 rejected server-side signing; this route answers the question that was
+# being asked, which is whether a certificate is usable.
 # ---------------------------------------------------------------------------
 
 @app.route('/api/certificate/inspect', methods=['POST'])
@@ -6445,9 +6436,10 @@ def inspect_certificate():
 # Plan 073: Android / F-Droid repository routes.
 #
 # /fdroid/repo/<path> and /fdroid/qr are PUBLIC by contract, like the four
-# iOS routes (/source.json, /ipas/..., /icons/..., /qr) -- the F-Droid
-# client sends no credentials. Everything under /api/android/* is
-# session-gated, same convention as the rest of the admin API.
+# iOS routes (/source.json, /ipas/..., /icons/..., /qr), because the F-Droid
+# client sends no credentials. /api/android/status and /api/android/apps
+# accept a session or an API token. The rest of /api/android/* is
+# session-gated, like the rest of the admin API.
 # ---------------------------------------------------------------------------
 
 FDROID_REPO_MIME_TYPES = {
@@ -6483,9 +6475,9 @@ def _android_metadata_fields_from(source):
 def _download_to_temp(url, suffix):
     """Stream a URL to a temp file under UPLOAD_FOLDER, honoring
     MAX_CONTENT_LENGTH. Returns the temp file path; raises ValueError on
-    any failure (the temp file is removed first). Mirrors
-    SourceManager.download_ipa_from_url's streaming logic, kept separate
-    since Android downloads are not IPAs and do not go through
+    any failure (the temp file is removed first). It copies
+    SourceManager.download_ipa_from_url's streaming logic but stays
+    separate, because Android downloads are not IPAs and do not go through
     ipa_storage."""
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
     fd, filepath = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix=suffix)
@@ -6593,11 +6585,12 @@ def revoke_api_token():
 
 
 # ---------------------------------------------------------------------------
-# Device backups (plan 088): settings an app on the operator's own phone keeps
-# here. Layout: device-backups/<app>/<device>/<UTC stamp>[.NNN].zip, each with
-# a .sha256 beside it, and device.json for the device's label. The archive is
-# the app's business; the server only checks that it is a zip that unpacks
-# within bounds, so a phone restoring it can't be handed a path that escapes.
+# Device backups (plan 088) are settings that an app on the operator's own phone
+# keeps here. The layout is device-backups/<app>/<device>/<UTC stamp>[.NNN].zip,
+# each with a .sha256 beside it, plus device.json for the device's label. The
+# archive's contents are up to the app. The server only checks that it is a zip
+# that unpacks within bounds, so a phone restoring it can't be handed a path
+# that escapes.
 # ---------------------------------------------------------------------------
 
 _BACKUP_APP_RE = re.compile(r'^[A-Za-z0-9_-][A-Za-z0-9._-]{0,254}$')
@@ -6799,7 +6792,7 @@ def list_device_backups(app_id, device_id):
 def upload_device_backup(app_id, device_id):
     """Multipart `file` (a zip) and an optional `label`. The same bytes as the
     newest snapshot are not stored again (a daily backup of unchanged settings
-    is a no-op); beyond DEVICE_BACKUP_KEEP the oldest go."""
+    is a no-op). Beyond DEVICE_BACKUP_KEEP, the oldest are deleted."""
     if not _token_may_touch(app_id):
         return _backup_scope_refusal(app_id)
     temp_path = None
@@ -6991,9 +6984,9 @@ def _ios_fields(details):
 
 def _already_present_ios(result, inspection, name):
     """The version is published already, so nothing is stored. Its binary
-    still states the permissions it needs: declare any the app lacks, so a
-    source published before Feather read entitlements is fixed by sending
-    the same IPA again."""
+    still states the permissions it needs, so declare any the app lacks.
+    Sending the same IPA again then fixes a source published before
+    Feather read entitlements."""
     bundle_id, version = result["id"], result["version"]
     ok, added = source_manager.declare_permissions(bundle_id, inspection)
     if not ok:
@@ -7054,11 +7047,11 @@ def _publish_ios(tmp_path, opts, base_url):
             ok, message = source_manager.add_app_manual(new_app, ipa_file=fs, base_url=base_url)
             result["created"] = ok
     if ok and ALREADY_PRESENT in message:
-        # A concurrent retry stored it first: same answer as the early check.
+        # A concurrent retry stored it first; give the same answer as the early check.
         return _already_present_ios({**result, "created": False}, inspection, None)
     if not ok:
-        # Save/load failures are the server's (disk, Garage); say so, so a
-        # client retries instead of treating it as a bad upload.
+        # Save/load failures are the server's (disk, Garage). Saying so makes
+        # a client retry instead of treating it as a bad upload.
         server_side = message.startswith(("Failed to save", "Failed to load", "Failed to download"))
         return jsonify({**result, "success": False, "error": message}), 503 if server_side else 400
     if existing and details:
@@ -7163,7 +7156,7 @@ def publish():
         elif url:
             if g.get("api_token") is not None:
                 # A server-side fetch on a token's behalf would let any token
-                # holder -- including an app-scoped one -- reach hosts only the
+                # holder, including an app-scoped one, reach hosts only the
                 # server can see (LAN, localhost, metadata endpoints) and read
                 # back what answered. Tokens upload; the MCP server downloads
                 # `url` on the agent's machine and uploads it.
@@ -7184,7 +7177,7 @@ def publish():
     except ValueError as e:
         return jsonify({"success": False, "error": str(e)}), 400
     except HTTPException:
-        raise                    # e.g. 413 RequestEntityTooLarge -> its own status
+        raise                    # e.g. 413 RequestEntityTooLarge keeps its own status
     except Exception as e:
         logging.error(f"Error publishing via API: {e}")
         return jsonify({"success": False, "error": "Publish failed"}), 500
@@ -7266,7 +7259,7 @@ def update_app_details():
     except ValueError as e:
         return jsonify({"success": False, "error": str(e)}), 400
     except HTTPException:
-        raise                    # e.g. 413 RequestEntityTooLarge -> its own status
+        raise                    # e.g. 413 RequestEntityTooLarge keeps its own status
     except Exception as e:
         logging.error(f"Error updating app details via API: {e}")
         return jsonify({"success": False, "error": "Update failed"}), 500
@@ -7275,8 +7268,8 @@ def update_app_details():
 @app.route('/fdroid/repo/<path:filename>')
 def fdroid_repo_file(filename):
     """Serve the F-Droid repo (index, jars, APKs, icons) that the
-    fdroid-index sidecar builds. Must stay public: the F-Droid client
-    sends no credentials. send_from_directory rejects path traversal on
+    fdroid-index sidecar builds. It must stay public, because the F-Droid
+    client sends no credentials. send_from_directory rejects path traversal on
     its own (safe_join), so a crafted "../..." filename 404s here too."""
     try:
         if (apk_storage is not None and ANDROID_APK_FILENAME_RE.match(filename) and "/" not in filename
@@ -7502,12 +7495,12 @@ def android_request_update():
         return jsonify({"success": False, "error": "Failed to request Android index update"}), 400
 
 
-# Operator pages: files the operator puts in DATA_DIR/site are served at the
-# same path, for what has to sit at a fixed URL on this host -- an Android
-# app's /.well-known/assetlinks.json, or a small static page such as a share
-# page at /w/. Nothing ships there. They're looked up only once no route
-# matches (see not_found), so a file there can never shadow the catalogue,
-# the repo or the API, and a route's own 404 stays a 404.
+# Operator pages. Files the operator puts in DATA_DIR/site are served at the
+# same path, for what has to sit at a fixed URL on this host, such as an
+# Android app's /.well-known/assetlinks.json or a small static share page at
+# /w/. Nothing ships there. They're looked up only once no route matches
+# (see not_found), so a file there can never shadow the catalogue, the repo
+# or the API, and a route's own 404 stays a 404.
 SITE_DIR = os.path.join(DATA_DIR, "site")
 
 # The pages would share the admin UI's origin. A sandbox gives them an opaque
@@ -7522,8 +7515,9 @@ _SITE_CSP = (
 
 
 def _in_site(path):
-    """path, resolved, is inside SITE_DIR: a symlink there can't serve what's
-    beside it in data/ (the catalogue, the F-Droid keystore) or elsewhere."""
+    """path, resolved, is inside SITE_DIR, so a symlink there can't serve
+    what's beside it in data/ (the catalogue, the F-Droid keystore) or
+    elsewhere."""
     site = os.path.realpath(SITE_DIR)
     return os.path.realpath(path).startswith(site + os.sep)
 
@@ -7535,7 +7529,7 @@ def _site_page(url_path):
     and directories aren't served (a checkout's .git/), but .well-known is."""
     relative = url_path.lstrip("/")
     parts = [part for part in relative.split("/") if part]
-    # realpath raises on a NUL; such a path is just not there.
+    # realpath raises on a NUL; such a path does not exist.
     if not parts or "\x00" in relative or any(part.startswith(".") for part in (parts[1:] if parts[0] == ".well-known" else parts)):
         return None
     path = safe_join(SITE_DIR, relative)
@@ -7564,7 +7558,7 @@ def too_large(error):
 
 @app.errorhandler(404)
 def not_found(error):
-    # No route matched at all (not a route's own 404): an operator page, if there's one.
+    # No route matched (not a route's own 404); try an operator page.
     if request.url_rule is None and request.method in ("GET", "HEAD"):
         page = _site_page(request.path)
         if page is not None:
@@ -7579,11 +7573,10 @@ if __name__ == '__main__':
     logging.info("Starting AltStore Source Manager (Waitress)...")
     _start_auto_import_scheduler()
     _start_health_monitor()
-    # Single process, many threads: SourceManager's in-process lock and the
+    # One process, many threads. SourceManager's in-process lock and the
     # auto-import scheduler thread both assume exactly one process. Do NOT
     # scale this out to multiple Waitress/gunicorn/uWSGI worker processes
-    # without first externalizing the lock and ensuring only one process
-    # owns the scheduler.
+    # until the lock is external and only one process owns the scheduler.
     from waitress import serve
     serve(app, host='0.0.0.0', port=PORT, threads=int(_env("WAITRESS_THREADS", "8")),
           # Waitress's own default (1 GiB) silently undercut MAX_CONTENT_LENGTH

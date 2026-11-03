@@ -1,14 +1,14 @@
 #!/bin/sh
 # Plan 073: fdroid-index sidecar loop. Runs as root inside the official
 # fdroidserver image (its /home/vagrant is 0700, so no other uid can run
-# `fdroid`). Owns config.yml + keystore.p12; feather (uid FEATHER_UID,
-# default 999) owns repo/ and metadata/ and only ever reads the index.
+# `fdroid`). This loop owns config.yml and keystore.p12. feather (uid
+# FEATHER_UID, default 999) owns repo/ and metadata/ and only reads the index.
 set -eu
 : "${FDROID_KEYSTORE_PASSWORD:?FDROID_KEYSTORE_PASSWORD is required (the repo signing key password)}"
 export FDROID_KEYSTORE_PASSWORD
 INTERVAL="${FDROID_UPDATE_INTERVAL:-15}"
-# A hung `fdroid update` would otherwise freeze the loop forever: the marker
-# is never consumed again and the index silently stops changing.
+# Without a timeout, a hung `fdroid update` freezes the loop forever. The
+# marker is never consumed again and the index silently stops changing.
 UPDATE_TIMEOUT="${FDROID_UPDATE_TIMEOUT:-1800}"
 FEATHER_UID="${FEATHER_UID:-999}"
 [ "${FDROID_REPO_URL:-}" = "/fdroid/repo" ] && unset FDROID_REPO_URL
@@ -51,7 +51,7 @@ compute_fingerprint() {
 compute_fingerprint || exit 1
 
 render_config() {
-  # repo-config.json is written by feather: {"name","description","repo_url"}
+  # feather writes repo-config.json: {"name","description","repo_url"}
   python3 - <<'PY'
 import json, os
 cfg = {}
@@ -64,7 +64,7 @@ if not isinstance(cfg, dict):
 def q(s):
     # A JSON string is a valid YAML 1.2 double-quoted scalar. Single-quoted
     # scalars broke on a description line starting with '---' or '...'
-    # (document markers) and on control characters: every rebuild failed.
+    # (document markers) and on control characters, which failed every rebuild.
     return json.dumps(str(s), ensure_ascii=False)
 lines = [
   'repo_url: ' + q(cfg.get('repo_url') or os.environ.get('FDROID_REPO_URL') or 'http://localhost:7000/fdroid/repo'),

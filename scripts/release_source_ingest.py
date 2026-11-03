@@ -1,26 +1,30 @@
-"""One-shot GitHub/GitLab release importer, launched by host crontab (Plan 029).
+"""One-shot GitHub/GitLab release importer, run from the host crontab (Plan 029).
 
-Reads a small JSON manifest of "jobs" (one GitHub or GitLab repository each),
-discovers the single configured IPA asset from the latest eligible release,
-downloads and validates it to a temporary file, reads the *real* bundle
-identifier and version out of the app's top-level `Info.plist`, and
-publishes it through feather's existing authenticated HTTP API
-(`/api/login`, `/api/add-version`, `/api/add-app`) -- exactly like
-`scripts/telegram_bot_ingest.py` does. This script never imports `app.py`,
-never calls the dormant `SourceManager.add_app_from_github`, and never
-writes `data/source.json`, `data/ipas/`, `data/icons/`, or any Garage
-object directly. Feather remains the only writer of the catalog.
+It reads a small JSON manifest of "jobs", one GitHub or GitLab repository
+each. For each job it finds at most one matching IPA and one matching APK in
+the newest eligible release with a match, and downloads each to a temporary
+file. It validates each file and reads the real identity and version from
+the IPA's top-level `Info.plist` or the APK's `AndroidManifest.xml`. It logs
+in with `/api/login` and publishes through feather's existing authenticated
+HTTP API, the same way `scripts/telegram_bot_ingest.py` does. An IPA goes to
+`/api/add-version` or `/api/add-app`, and an APK goes to
+`/api/android/add-apk`. It also records provenance through
+`/api/import-history/record`. This script never imports `app.py` and never
+calls the dormant `SourceManager.add_app_from_github`. It never writes
+`data/source.json`, `data/ipas/`, `data/icons/`, or any Garage object
+directly. Feather stays the only writer of the catalog.
 
-Dry-run is the default: with no `--apply`, this may only query provider
-release metadata and feather's public `/api/app/<id>` endpoint. It never
-downloads an asset, logs in, publishes, takes the apply lock, or writes the
-state file. `--apply` enables all of that, guarded by a non-blocking
-`fcntl.flock()` so two crontab runs can never race each other or feather's
-in-process `SourceManager._lock`.
+Dry-run is the default. Without `--apply`, this may only query provider
+release metadata and feather's public `/api/app/<id>` and
+`/fdroid/repo/index-v1.json` endpoints. It never downloads an asset, logs
+in, publishes, takes the apply lock, or writes the state file. `--apply`
+enables all of that. A non-blocking `fcntl.flock()` guards it, so two
+crontab runs can never race each other or feather's in-process
+`SourceManager._lock`.
 
-No network call happens at import time -- only `main()` (and the functions
-it calls) ever touch the network, so this module can be imported and unit
-tested (see tests/test_release_source_ingest.py) with zero network access.
+No network call happens at import time. Only `main()` and the functions it
+calls touch the network, so tests/test_release_source_ingest.py can import
+and unit test this module with no network access.
 
 See plans/029-cron-release-imports.md for the full behavioral contract.
 """
@@ -53,7 +57,7 @@ except ImportError:  # direct execution from scripts/
 
 try:
     import fcntl
-except ImportError:  # pragma: no cover - this script only ever runs on Linux
+except ImportError:  # pragma: no cover, this script runs only on Linux
     fcntl = None
 
 logging.basicConfig(
@@ -92,19 +96,19 @@ GITLAB_API_BASE = "https://gitlab.com/api/v4"
 GITLAB_AUTH_HOST = (urlparse(GITLAB_API_BASE).hostname or "").lower()
 GITHUB_API_VERSION = "2026-03-10"
 
-# Ceiling, not a delay -- a fast transfer returns immediately. Overridable
-# via RELEASE_IMPORT_TIMEOUT.
+# A ceiling, not a delay. A fast transfer returns immediately.
+# RELEASE_IMPORT_TIMEOUT overrides it.
 DEFAULT_TIMEOUT = 900
-# 2 GiB. Overridable via RELEASE_IMPORT_MAX_BYTES.
+# 2 GiB. RELEASE_IMPORT_MAX_BYTES overrides it.
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024
 MAX_REDIRECTS = 5
 
-# Deliberate, cheap guard against catastrophic backtracking: Python's `re`
-# has no match timeout, so a pathological regex asset pattern would block
-# the scheduler thread indefinitely. This input is admin-only (every route
-# that accepts it is @requires_auth / a locally-edited manifest file), so
-# this is defence in depth rather than a boundary against untrusted input --
-# not a substitute for a real regex-safety analysis.
+# A cheap guard against catastrophic backtracking. Python's `re` has no
+# match timeout, so a pathological regex asset pattern would hang the
+# scheduler thread. Only admins supply this input (every route that accepts
+# it is @requires_auth, or it comes from a locally edited manifest file), so
+# this is defence in depth, not a boundary against untrusted input. It does
+# not replace a real regex-safety analysis.
 ASSET_PATTERN_MAX_LENGTH = 200
 
 _APP_INFO_PLIST = re.compile(r"^Payload/[^/]+\.app/Info\.plist$")
@@ -119,11 +123,12 @@ _APP_INFO_PLIST = re.compile(r"^Payload/[^/]+\.app/Info\.plist$")
 class Job:
     """One validated manifest entry.
 
-    `bundle_identifier` (iOS) and `package` (Android) are each optional, but
-    parse_manifest_dict requires at least one -- a job publishes whichever
-    platforms it has an identity for. Both fields default to None so that
-    Job can still be constructed with only one of them; `asset_glob` stays
-    ahead of them in field order because it never has a dataclass default.
+    `bundle_identifier` (iOS) and `package` (Android) are each optional, and
+    parse_manifest_dict requires neither. A job publishes whichever
+    platforms its matched assets cover, and a set identity is only an
+    assertion. Both fields default to None so a Job can be built with only
+    one of them. `asset_glob` stays ahead of them in field order because it
+    has no dataclass default.
     """
 
     id: str
@@ -143,7 +148,7 @@ class Job:
 
 @dataclass(frozen=True)
 class ReleaseCandidate:
-    """One normalized, selected release+asset -- no token-bearing headers."""
+    """One normalized, selected release and asset, with no token-bearing headers."""
 
     provider: str
     project: str
@@ -156,7 +161,7 @@ class ReleaseCandidate:
     download_url: str
     auth_host: str
     release_body: str = ""
-    platform: str = "ios"  # "ios" | "android", inferred from the asset extension
+    platform: str = "ios"  # "ios" or "android", inferred from the asset extension
 
 
 @dataclass
@@ -178,9 +183,10 @@ class Summary:
 
 
 # ---------------------------------------------------------------------------
-# Secret redaction -- applied to every job-level log line. The manifest
-# never carries a secret, but a run's tokens/password are set here once so
-# no log call can accidentally leak one. See _redact's telegram-bot analog.
+# Secret redaction, applied to every job-level log line. The manifest
+# never carries a secret, but each run registers its tokens and password
+# here once, so no log call can leak one. The telegram bot has the same
+# _redact.
 # ---------------------------------------------------------------------------
 
 _ACTIVE_SECRETS = []
@@ -203,7 +209,7 @@ def _log_job_error(msg):
 
 
 # ---------------------------------------------------------------------------
-# Manifest / config loading
+# Manifest and config loading
 # ---------------------------------------------------------------------------
 
 _GITHUB_PROJECT_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -218,8 +224,8 @@ def _require_nonempty_str(raw, key, job_id):
 
 
 def _validate_asset_match_mode(job_id, mode):
-    """Accept only the exact strings 'glob' and 'regex'. Raises ConfigError
-    naming both valid values otherwise."""
+    """Accept only the exact strings 'glob' and 'regex'. Otherwise raise
+    ConfigError naming both valid values."""
     if mode not in ("glob", "regex"):
         raise ConfigError(
             f"job {job_id}: 'assetMatchMode' must be 'glob' or 'regex', got {mode!r}"
@@ -228,11 +234,11 @@ def _validate_asset_match_mode(job_id, mode):
 
 
 def _validate_asset_pattern(job_id, field_name, pattern, mode):
-    """Validate one assetGlob/assetExcludeGlob value at save (manifest-load)
-    time, never at run time inside the scheduler. In regex mode: reject
-    patterns over ASSET_PATTERN_MAX_LENGTH (cheap guard against
-    catastrophic backtracking -- see the constant's comment) and surface a
-    bad pattern as ConfigError, never a raw re.error."""
+    """Validate one assetGlob or assetExcludeGlob value when the manifest
+    loads (at save time), never at run time inside the scheduler. In regex
+    mode, reject patterns longer than ASSET_PATTERN_MAX_LENGTH, a cheap
+    guard against catastrophic backtracking (see the constant's comment).
+    Report a bad pattern as ConfigError, never as a raw re.error."""
     if mode != "regex" or pattern is None:
         return
     if len(pattern) > ASSET_PATTERN_MAX_LENGTH:
@@ -266,7 +272,7 @@ def _validate_download_host(job_id, host):
     try:
         ipaddress.ip_address(host)
     except ValueError:
-        pass  # not an IP literal -- good, that's required
+        pass  # not an IP literal, as required
     else:
         raise ConfigError(
             f"job {job_id}: allowedDownloadHosts entry {host!r} must be a hostname, "
@@ -328,9 +334,10 @@ def parse_manifest_dict(data):
         if package is not None and not ANDROID_PACKAGE_RE.match(package):
             raise ConfigError(f"job {job_id}: 'package' {package!r} is not a valid Android package name")
 
-        # Both are optional: the bundle identifier / package is read from
-        # the downloaded artifact, and a configured value is only an
-        # assertion (the same rule as the admin UI and auto-import paths).
+        # Both are optional. The importer reads the bundle identifier or
+        # package from the downloaded artifact, and a configured value is
+        # only an assertion, the same rule the admin UI and auto-import
+        # paths follow.
 
         asset_glob = _require_nonempty_str(raw, "assetGlob", job_id)
         asset_exclude_glob = raw.get("assetExcludeGlob")
@@ -424,8 +431,9 @@ def _int_env(env, name, default):
 
 
 # ---------------------------------------------------------------------------
-# Provider adapters -- GitHub and GitLab only. Fixed API origins; no
-# configurable base URL in v1 (self-hosted GitLab/GitHub is out of scope).
+# Provider adapters for GitHub and GitLab only. The API origins are fixed,
+# with no configurable base URL in v1 (self-hosted GitLab/GitHub is out of
+# scope).
 # ---------------------------------------------------------------------------
 
 
@@ -469,13 +477,13 @@ def _asset_match_state(job, name):
     """Return provider-neutral include/exclude selector state for one asset.
 
     Two modes, selected by `job.asset_match_mode`:
-    - "glob" (default): fnmatch against the whole (lower-cased) name --
-      unchanged from before regex mode existed.
-    - "regex": re.fullmatch against the *original* name with
-      re.IGNORECASE, so character classes behave predictably instead of
-      being matched against a pre-lowercased string. fullmatch (not
-      search) mirrors fnmatch's whole-name semantics -- search would
-      silently change what existing-style patterns mean.
+    - "glob" (default): fnmatch against the whole lower-cased name, as
+      before regex mode existed.
+    - "regex": re.fullmatch against the original name with re.IGNORECASE,
+      so character classes behave predictably instead of matching a
+      pre-lowercased string. fullmatch, not search, mirrors fnmatch's
+      whole-name semantics. Using search would silently change what
+      existing-style patterns mean.
     """
     name = name or ""
     if job.asset_match_mode == "regex":
@@ -495,10 +503,10 @@ def _asset_match_state(job, name):
 
 
 def _platform_for_asset(name):
-    """ios | android | None, inferred from the asset filename extension.
+    """Return "ios", "android" or None, inferred from the asset filename extension.
 
-    The single point where a new artifact type would be added -- keep it
-    the only place that knows about file extensions.
+    A new artifact type would be added here. Keep this the only place that
+    knows about file extensions.
     """
     normalized = (name or "").lower()
     if normalized.endswith(".ipa"):
@@ -508,8 +516,8 @@ def _platform_for_asset(name):
     return None
 
 
-# The inverse of _platform_for_asset -- the extension a downloaded
-# candidate's temp file gets, keyed by the same platform names.
+# The inverse of _platform_for_asset. It maps each platform name to the
+# extension a downloaded candidate's temp file gets.
 _DOWNLOAD_EXTENSION_BY_PLATFORM = {"ios": "ipa", "android": "apk"}
 
 
@@ -518,17 +526,17 @@ def _download_tmp_path(tmp_dir, platform):
 
 
 def _group_matches_by_platform(job, matches, name_of):
-    """Group matched assets/links by platform, dropping any whose extension is
-    neither .ipa nor .apk (so a `*` glob and checksum files coexist without
-    failing selection).
+    """Group matched assets or links by platform. Drop any whose extension
+    is neither .ipa nor .apk, so a `*` glob and checksum files coexist
+    without failing selection.
 
-    Selection is by pattern alone. It deliberately does NOT filter on whether
-    the job configured an identity for the platform: both `bundle_identifier`
-    and `package` are optional and auto-detected from the artifact, so
-    filtering here made a blank field silently match nothing and surface as
-    "no eligible release had ... asset matching", pointing the operator at
-    their glob instead of at the real cause. The identity, when set, is an
-    assertion applied after inspection -- see `validate_and_extract_metadata`
+    Selection is by pattern alone. It does not filter on whether the job
+    configured an identity for the platform. Both `bundle_identifier` and
+    `package` are optional and auto-detected from the artifact. Filtering
+    here made a blank field silently match nothing and show up as "no
+    eligible release had ... asset matching", which pointed the operator at
+    their glob instead of the real cause. When set, the identity is an
+    assertion checked after inspection. See `_process_ios_candidate`
     for iOS and `inspect_apk_metadata` for Android."""
     by_platform = {"ios": [], "android": []}
     for item in matches:
@@ -549,8 +557,8 @@ def _github_eligible_releases(job, releases):
 
 
 def github_select_candidate(job, releases):
-    """Return a list of candidates -- at most one per platform -- for the
-    first eligible release that yields any match. Empty list if none do."""
+    """Return a list of candidates, at most one per platform, for the first
+    eligible release with any match, or an empty list if none matches."""
     for release in _github_eligible_releases(job, releases):
         assets = release.get("assets") or []
         matches = [a for a in assets if _asset_match_state(job, a.get("name"))["matched"]]
@@ -634,8 +642,8 @@ def _gitlab_eligible_releases(releases, now=None):
 
 
 def gitlab_select_candidate(job, releases, now=None):
-    """Return a list of candidates -- at most one per platform -- for the
-    first eligible release that yields any match. Empty list if none do."""
+    """Return a list of candidates, at most one per platform, for the first
+    eligible release with any match, or an empty list if none matches."""
     for release in _gitlab_eligible_releases(releases, now=now):
         links = (release.get("assets") or {}).get("links") or []
         matches = [link for link in links if _asset_match_state(job, link.get("name"))["matched"]]
@@ -736,9 +744,9 @@ def inspect_release_assets(job, session, tokens, timeout=30, limit=5):
 
 
 def select_candidate(job, session, tokens, timeout=30):
-    """Return a list of candidates -- at most one per platform -- selected
-    from the first eligible release with any match. Raises ProviderError
-    when no eligible release yields any match at all."""
+    """Return a list of candidates, at most one per platform, from the first
+    eligible release with any match. Raise ProviderError when no eligible
+    release matches at all."""
     if job.provider == "github":
         releases = github_list_releases(
             session, job.project, tokens.get("github"), timeout=timeout, job_id=job.id
@@ -749,7 +757,7 @@ def select_candidate(job, session, tokens, timeout=30):
             session, job.project, tokens.get("gitlab"), timeout=timeout, job_id=job.id
         )
         candidates = gitlab_select_candidate(job, releases)
-    else:  # pragma: no cover - parse_manifest_dict already rejects this
+    else:  # pragma: no cover, parse_manifest_dict already rejects this
         raise ConfigError(f"job {job.id}: unknown provider {job.provider!r}")
 
     if not candidates:
@@ -781,10 +789,10 @@ def stream_download(
 ):
     """Stream `candidate`'s asset to `dest_path`, enforcing every trust rule.
 
-    Explicit redirect handling (never `allow_redirects=True`): validates
-    HTTPS + an allowed hostname at *every* hop, and strips the provider
-    Authorization/PRIVATE-TOKEN header the instant a redirect crosses to a
-    different host. Returns (actual_size, sha256_hex).
+    It follows redirects itself, never with `allow_redirects=True`. It
+    checks that every hop is HTTPS to an allowed hostname, and drops the
+    provider Authorization or PRIVATE-TOKEN header as soon as a redirect
+    crosses to a different host. Returns (actual_size, sha256_hex).
     """
     headers = {}
     if candidate.provider == "github":
@@ -801,7 +809,7 @@ def stream_download(
     current_url = candidate.download_url
     # Provider credentials go only to the provider's own host (auth_host),
     # and never again once a redirect has left the first host. A GitLab
-    # release link may point at any allowedDownloadHosts host; sending
+    # release link may point at any allowedDownloadHosts host. Sending
     # PRIVATE-TOKEN there handed the operator's PAT to a third party.
     auth_host = (getattr(candidate, "auth_host", "") or "").lower()
     first_host = (urlparse(current_url).hostname or "").lower()
@@ -918,9 +926,9 @@ def inspect_ipa_metadata(path, filename, job, candidate=None):
 def inspect_apk_metadata(path, filename, job, candidate=None):
     """Run shared APK preflight and enforce the configured package match.
 
-    Symmetrical with `inspect_ipa_metadata`, but Android has no separate
-    extract/validate split -- there is only one identity field (`package`)
-    to check, so this single function does both jobs `extract_ipa_metadata`
+    This mirrors `inspect_ipa_metadata`, but Android has no separate extract
+    and validate steps. There is only one identity field (`package`) to
+    check, so this one function does the work that `extract_ipa_metadata`
     and `validate_and_extract_metadata` do together for iOS.
     """
     release_ref = ""
@@ -944,23 +952,24 @@ def inspect_apk_metadata(path, filename, job, candidate=None):
 
 
 def extract_ipa_metadata(path, filename, job, candidate=None):
-    """The six hard checks (contract Step 3), then (bundle_id, version, name).
+    """Run the six hard checks (contract Step 3), then return (bundle_id, version, name).
 
-    The regex is deliberately exact: an IPA contains an Info.plist for every
-    bundled framework/extension, and a loose match would return one of
-    those instead of the app's own identifier and version.
+    `inspect_ipa` matches only the app's top-level Info.plist on purpose.
+    An IPA contains an Info.plist for every bundled framework and extension,
+    and a loose match would return one of those instead of the app's own
+    identifier and version.
 
-    Does NOT compare the extracted bundle identifier against any configured
-    `job.bundle_identifier` -- that comparison lives in
-    `validate_and_extract_metadata` so callers that want to auto-detect the
-    bundle id (e.g. the UI import route) can call this directly.
+    This does not compare the extracted bundle identifier with a configured
+    `job.bundle_identifier`. That comparison lives in
+    `validate_and_extract_metadata`, its only caller. app.py's import routes,
+    which auto-detect the bundle id, call `inspect_ipa_metadata` directly.
     """
     inspection = inspect_ipa_metadata(path, filename, job, candidate)
     return inspection.bundle_identifier, inspection.version, inspection.name
 
 
 def validate_and_extract_metadata(path, filename, job, candidate=None):
-    """`extract_ipa_metadata` plus the configured-bundle-id match check."""
+    """`extract_ipa_metadata`, plus the check that the bundle id matches the configured one."""
     bundle_id, version, name = extract_ipa_metadata(path, filename, job, candidate)
 
     release_ref = ""
@@ -977,9 +986,9 @@ def validate_and_extract_metadata(path, filename, job, candidate=None):
 
 
 # ---------------------------------------------------------------------------
-# Feather HTTP client -- patterned on scripts/telegram_bot_ingest.py's
-# FeatherClient. Never touches data/source.json, data/ipas/, data/icons/,
-# or Garage directly.
+# Feather HTTP client, based on the FeatherClient in
+# scripts/telegram_bot_ingest.py. It never touches data/source.json,
+# data/ipas/, data/icons/, or Garage directly.
 # ---------------------------------------------------------------------------
 
 
@@ -996,7 +1005,7 @@ class FeatherClient:
         self._inspection = inspection
 
     def get_app(self, bundle_id):
-        """Public read. Returns None only for 404; any other failure raises."""
+        """Public read. Returns None only for a 404 and raises on any other failure."""
         resp = self.session.get(f"{self.base_url}/api/app/{bundle_id}", timeout=30)
         if resp.status_code == 404:
             return None
@@ -1022,8 +1031,9 @@ class FeatherClient:
         self._logged_in = True
 
     def android_index_has(self, package, version_code):
-        """True if the public F-Droid index lists package@version_code; None
-        when the index cannot be read (no Android repo, feather down)."""
+        """True if the public F-Droid index lists package@version_code, or
+        None when the index cannot be read (no Android repo, or feather is
+        down)."""
         try:
             resp = self.session.get(f"{self.base_url}/fdroid/repo/index-v1.json", timeout=30)
             if resp.status_code != 200:
@@ -1095,11 +1105,11 @@ class FeatherClient:
         )
 
     def add_apk(self, path, package=None):
-        """Publish an APK. `/api/android/add-apk` is already idempotent: a
-        re-post of a version that exists returns HTTP 200 with
-        `{"success": true, "added": false, ...}` rather than an error --
-        so return `added` too and let the caller distinguish "published"
-        from "already present" without a second dedupe check."""
+        """Publish an APK. `/api/android/add-apk` is already idempotent. A
+        re-post of an existing version returns HTTP 200 with
+        `{"success": true, "added": false, ...}`, not an error. So this
+        returns `added` too, and the caller can tell "published" from
+        "already present" without a second dedupe check."""
         self._ensure_login()
         with open(path, "rb") as fh:
             files = {"apkFile": (os.path.basename(path), fh)}
@@ -1155,16 +1165,17 @@ def _catalog_has_version(catalog_app, version):
 
 
 # ---------------------------------------------------------------------------
-# State: non-secret ledger of the last verified publish per job. An
-# optimization, never the authority -- the catalog is always re-confirmed.
+# State is a non-secret ledger of the last verified publish per job. It is
+# an optimization, never the authority. The importer always re-confirms the
+# catalog.
 # ---------------------------------------------------------------------------
 
 
-# schemaVersion 2 (083): a job's state entry became per-platform-nested
-# ({"ios": {...}, "android": {...}}) instead of one flat record. 1 is still
-# accepted on read -- a deployment already has a schemaVersion:1 state file
-# on disk, and its flat records are always interpreted as the iOS record
-# (see _platform_state_record / _advance_state).
+# schemaVersion 2 (plan 083) nests a job's state entry by platform
+# ({"ios": {...}, "android": {...}}) instead of one flat record. Reads still
+# accept 1, because existing deployments have a schemaVersion:1 state file
+# on disk. Its flat records always mean the iOS record (see
+# _platform_state_record and _advance_state).
 _STATE_SCHEMA_VERSIONS = (1, 2)
 
 
@@ -1204,17 +1215,18 @@ def _utcnow_iso():
 
 
 def _platform_state_record(state, job_id, platform):
-    """Read the last-verified-publish record for one job+platform, tolerating
-    the pre-083 flat per-job shape (which only ever recorded an iOS publish).
+    """Read the last-verified-publish record for one job and platform. Also
+    accept the pre-083 flat per-job shape, which only ever recorded an iOS
+    publish.
 
-    Read-only: never mutates `state`, so it is safe to call before the
-    dry-run gate (process_job must write nothing -- not even a shape
-    migration -- when `apply` is false).
+    It never mutates `state`, so it is safe to call before the dry-run gate.
+    When `apply` is false, process_job must write nothing, not even a shape
+    migration.
     """
     entry = state.get("jobs", {}).get(job_id)
     if not isinstance(entry, dict):
         return None
-    if "releaseId" in entry:  # pre-083 flat shape -- implicitly the iOS record
+    if "releaseId" in entry:  # pre-083 flat shape, always the iOS record
         return entry if platform == "ios" else None
     return entry.get(platform)
 
@@ -1222,11 +1234,11 @@ def _platform_state_record(state, job_id, platform):
 def _advance_state(state, job, platform, candidate, version, sha256_hex, **identity):
     """Record one platform's last verified publish for `job`.
 
-    A job's entry is keyed by platform ({"ios": {...}, "android": {...}})
-    so an iOS publish can never mask a pending Android one, or vice versa.
-    A pre-083 flat entry (identifiable by its top-level "releaseId") is
-    migrated into `{"ios": <that record>}` rather than discarded, since it
-    always described an iOS publish.
+    A job's entry is keyed by platform ({"ios": {...}, "android": {...}}),
+    so an iOS publish can never mask a pending Android one, or the reverse.
+    A pre-083 flat entry has a top-level "releaseId". This moves it into
+    `{"ios": <that record>}` instead of discarding it, since it always
+    described an iOS publish.
     """
     jobs = state.setdefault("jobs", {})
     entry = jobs.get(job.id)
@@ -1250,10 +1262,10 @@ def _advance_state(state, job, platform, candidate, version, sha256_hex, **ident
 
 
 def acquire_apply_lock(state_path):
-    """Non-blocking exclusive fcntl.flock() on a sibling lock file.
+    """Take a non-blocking exclusive fcntl.flock() on a sibling lock file.
 
     Returns the open, locked file handle, or None if another apply run
-    already holds it. The caller must flock(LOCK_UN) + close() when done.
+    already holds it. The caller must flock(LOCK_UN) and close() when done.
     """
     lock_path = state_path + ".lock"
     directory = os.path.dirname(lock_path)
@@ -1275,10 +1287,11 @@ def acquire_apply_lock(state_path):
 
 def _process_ios_candidate(job, candidate, session, tokens, feather, state, apply,
                             timeout, max_bytes, summary, tmp_dir):
-    """iOS candidate path -- unchanged behavior from pre-083 process_job.
+    """Process an iOS candidate, with the same behavior as the pre-083
+    process_job.
 
-    Returns True on success (including a clean skip/would-publish), False
-    on failure (summary.failed is also incremented in that case).
+    Returns True on success, including a clean skip or would-publish.
+    Returns False on failure, and also increments summary.failed.
     """
     recorded = _platform_state_record(state, job.id, "ios")
     already_recorded = bool(
@@ -1288,7 +1301,7 @@ def _process_ios_candidate(job, candidate, session, tokens, feather, state, appl
     )
 
     # Without a configured bundleIdentifier, fall back to the one detected
-    # on the previous run; with neither, the IPA must be downloaded first.
+    # on the previous run. With neither, the IPA must be downloaded first.
     known_bid = job.bundle_identifier or (recorded or {}).get("bundleIdentifier")
     catalog_app = None
     if known_bid:
@@ -1435,22 +1448,23 @@ def _process_ios_candidate(job, candidate, session, tokens, feather, state, appl
 
 def _process_android_candidate(job, candidate, session, tokens, feather, state, apply,
                                 timeout, max_bytes, summary, tmp_dir):
-    """Android candidate path.
+    """Process an Android candidate.
 
-    Never calls feather.get_app or _catalog_has_version -- those read the
-    iOS catalog and mean nothing for an APK. Dedupe is delegated entirely
-    to /api/android/add-apk's own idempotency (`added: false` on a re-post
-    of a version that already exists), so there is no local pre-check
-    equivalent to iOS's `already_recorded` short-circuit.
+    It never calls feather.get_app or _catalog_has_version, because those
+    read the iOS catalog and mean nothing for an APK. It skips before
+    downloading when the recorded release and asset match and
+    `android_index_has` confirms the version. Otherwise dedupe relies on
+    /api/android/add-apk's own idempotency (`added: false` on a re-post of
+    an existing version).
 
-    Returns True on success (including a clean would-publish, or a publish
-    the endpoint reports as already present), False on failure
-    (summary.failed is also incremented in that case).
+    Returns True on success, including a clean would-publish or a publish
+    the endpoint reports as already present. Returns False on failure, and
+    also increments summary.failed.
     """
-    # Same release asset as last run and still in the signed index: nothing
-    # to do, and no reason to re-download a possibly 100+ MB APK. If the
-    # APK was deleted from the repo since, the index check fails and it is
-    # imported again.
+    # If the release asset is the same as last run and still in the signed
+    # index, there is nothing to do and no reason to re-download an APK that
+    # may be over 100 MB. If the APK was deleted from the repo since, the
+    # index check fails and the importer imports it again.
     recorded = _platform_state_record(state, job.id, "android")
     if (
         recorded
@@ -1522,8 +1536,9 @@ def _process_android_candidate(job, candidate, session, tokens, feather, state, 
         "stage": "publish", "provider": candidate.provider,
         "project": candidate.project, "releaseId": candidate.release_id,
         "releaseTag": candidate.release_tag, "assetId": candidate.asset_id,
-        # Field names the server's import history keeps (it drops unknown
-        # keys); the in-app Android paths record the package the same way.
+        # The server's import history keeps only these field names and
+        # drops unknown keys. The in-app Android paths record the package
+        # the same way.
         "assetName": candidate.asset_name, "bundleIdentifier": inspection.package,
         "version": inspection.version_name, "buildVersion": str(inspection.version_code),
         "platform": "android", "sha256": sha256_hex,
@@ -1534,14 +1549,14 @@ def _process_android_candidate(job, candidate, session, tokens, feather, state, 
 def process_job(job, session, tokens, feather, state, apply, timeout, max_bytes, summary):
     """Handle one job end to end, isolating its failures from other jobs.
 
-    Selects at most one candidate per platform (see `select_candidate`) and
-    processes each independently via `_process_ios_candidate` /
-    `_process_android_candidate`, so a failure on one platform never blocks
-    the other's publish within the same job/release.
+    It selects at most one candidate per platform (see `select_candidate`)
+    and processes each one separately with `_process_ios_candidate` or
+    `_process_android_candidate`. A failure on one platform never blocks the
+    other platform's publish in the same job and release.
 
-    Returns True only if every candidate succeeded (including a clean
-    skip/would-publish); False if any failed (summary.failed is also
-    incremented, once per failing candidate, in that case).
+    Returns True only if every candidate succeeded, including a clean skip
+    or would-publish. Returns False if any failed, and then summary.failed
+    has gone up once per failing candidate.
     """
     summary.checked += 1
 
@@ -1569,8 +1584,8 @@ def process_job(job, session, tokens, feather, state, apply, timeout, max_bytes,
             except Exception as e:
                 # A network error mid-download, Feather restarting mid-upload,
                 # a non-JSON response or a malformed archive used to escape
-                # here and end the whole run: later jobs (and this job's other
-                # platform) were never processed, and no summary was printed.
+                # here and end the whole run. Later jobs and this job's other
+                # platform never ran, and no summary was printed.
                 logger.error("job %s: %s candidate failed: %s: %s", job.id, candidate.platform,
                              type(e).__name__, _redact(str(e)))
                 summary.failed += 1
@@ -1672,8 +1687,8 @@ def main(argv=None):
         state = load_state(state_path)
 
         if args.apply:
-            # Fail fast and once: a wrong password or unreachable feather
-            # used to surface per job, after downloads, and each retry
+            # Fail fast and once. A wrong password or unreachable feather
+            # used to show up per job, after downloads, and each retry
             # counted against the login throttle.
             try:
                 feather.login()

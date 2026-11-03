@@ -1,18 +1,19 @@
-"""Inspection of an Apple code-signing pair: a PKCS#12 identity + a provisioning profile.
+"""Inspection of an Apple code-signing pair: a PKCS#12 identity and a provisioning profile.
 
-Validate-and-display only (see plans/086, section 8e): this module answers
-"is this certificate pair usable, and on which devices" and signs nothing. It
-never writes, never keeps the passphrase, and never touches the network.
+This module only validates and displays (see plans/086, section 8e). It
+answers "is this certificate pair usable, and on which devices" and signs
+nothing. It never writes, never keeps the passphrase, and never touches the
+network.
 
-Two halves, with deliberately different dependency weights:
+The two halves need different dependencies:
 
 * The profile is a property list wrapped in a CMS SignedData whose payload is
-  carried in the clear (RFC 5652 section 5.2), so the plist is extracted with the
-  standard library alone -- no key, no signature verification.
-* The p12 is RFC 7292, and its interesting half is encrypted, so it needs
-  `cryptography`. That is the one dependency this feature adds.
+  carried in the clear (RFC 5652 section 5.2), so the standard library alone
+  extracts the plist, with no key and no signature verification.
+* The p12 is RFC 7292, and the part this module reads is encrypted, so it
+  needs `cryptography`. That is the one dependency this feature adds.
 
-The pair check is the headline: a leaf certificate that does not appear in the
+The pair check matters most. A leaf certificate that does not appear in the
 profile's `DeveloperCertificates` cannot legitimately sign against that profile
 (TN3125, "The who").
 """
@@ -27,7 +28,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, pkcs12
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 # A p12 is a few kilobytes and a profile a few tens of kilobytes; anything far
-# past that is not one of the two things we were handed.
+# larger is neither.
 MAX_P12_BYTES = 512 * 1024
 MAX_PROFILE_BYTES = 1024 * 1024
 
@@ -45,9 +46,9 @@ class CertificateInspectionError(RuntimeError):
     """A p12 or profile that cannot be inspected, with a machine-readable reason.
 
     `reason` is one of NOT_A_PKCS12, WRONG_PASSPHRASE, NO_PRIVATE_KEY,
-    NOT_A_PROFILE, TOO_LARGE. A wrong passphrase is deliberately distinct from
-    an unparseable file: reporting a typo as a corrupt certificate is the first
-    thing an operator would hit otherwise.
+    NOT_A_PROFILE, TOO_LARGE. A wrong passphrase is reported apart from an
+    unparseable file. Otherwise the first thing an operator hits is a typo
+    reported as a corrupt certificate.
     """
 
     def __init__(self, reason, message):
@@ -122,8 +123,8 @@ def _extract_profile_plist(data):
     """Pull the plist payload out of a `.mobileprovision`.
 
     The CMS wrapper carries the plist as cleartext `eContent`, so this is a
-    slice, not a decryption. Bounded by the closing tag rather than taking the
-    tail of the file, so a profile with trailing CMS structure still parses.
+    slice, not a decryption. The slice ends at the closing tag, not at the end
+    of the file, so a profile with trailing CMS structure still parses.
     """
     start = data.find(_PLIST_START)
     if start == -1:
@@ -206,9 +207,10 @@ def _as_utc(value):
 def _load_identity(data, passphrase):
     """Open a p12, telling a wrong passphrase apart from an unusable file.
 
-    Both failures are `ValueError` from pyca, distinguishable only by message:
-    a DER-level failure says "Could not deserialize PKCS12 data", anything
-    after that (wrong passphrase included) says "Invalid password or PKCS12 data".
+    Both failures are `ValueError` from pyca, and only the message tells them
+    apart. A DER-level failure says "Could not deserialize PKCS12 data", and
+    anything after that (wrong passphrase included) says "Invalid password or
+    PKCS12 data".
     """
     attempts = [passphrase.encode() if passphrase else None]
     if not passphrase:
@@ -317,7 +319,7 @@ def _warnings(certificate, profile, match):
 
 
 def inspect_pair(p12_data, profile_data, passphrase=None, now=None):
-    """Inspect a p12 + profile pair. Nothing is stored, nothing is signed."""
+    """Inspect a p12 and profile pair. It stores nothing and signs nothing."""
     now = now or datetime.now(timezone.utc)
     profile, developer_certificates, der_profile = inspect_profile(profile_data, now=now)
     certificate, leaf_der, _ = inspect_p12(p12_data, passphrase, now=now)
