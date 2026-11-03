@@ -231,6 +231,12 @@ job is refused as ambiguous rather than publishing the wrong binary. See
 `plans/029-cron-release-imports.md`, `plans/083-engine-apk-support.md` and
 `plans/085-regex-asset-matching.md`.
 
+An imported IPA is filed under the bundle ID inside it. To keep a patched build
+separate from its upstream app, set `catalogBundleIdentifier` on the job (admin
+UI: *Publish Under Catalog ID*); `bundleIdentifier` still checks the IPA's own
+ID. That field exists on the watcher and "Import from Repo" only, not in the
+cron manifest. See `plans/090-catalog-bundle-override.md`.
+
 This leaves the release itself as the audit trail, which the direct upload path
 does not have.
 

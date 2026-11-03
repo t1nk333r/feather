@@ -913,6 +913,11 @@
                     <input aria-label="Bundle Identifier" type="text" name="bundleIdentifier" placeholder="leave blank to auto-detect from the IPA">
                 </div>
                 <div class="form-group">
+                    <label>Publish Under Catalog ID (optional, iOS):</label>
+                    <input aria-label="Publish Under Catalog ID" type="text" name="catalogBundleIdentifier" placeholder="leave blank to publish under the IPA's own bundle ID">
+                    <small style="display: block; margin-top: 5px; color: var(--label-secondary); font-size: 0.85em;">Files the IPA under this catalog entry instead of the bundle ID inside it, so a patched build stays separate from its upstream app. Bundle Identifier above still checks the IPA's own ID.</small>
+                </div>
+                <div class="form-group">
                     <label>Android Package:</label>
                     <input aria-label="Android Package" type="text" name="package" placeholder="leave blank to auto-detect from the APK">
                 </div>
@@ -1829,6 +1834,7 @@
                 provider: f.provider.value,
                 project: f.project.value.trim(),
                 bundleIdentifier: f.bundleIdentifier.value.trim(),
+                catalogBundleIdentifier: f.catalogBundleIdentifier.value.trim(),
                 package: f.package.value.trim(),
                 assetGlob: f.assetGlob.value.trim() || '*.ipa',
                 assetExcludeGlob: f.assetExcludeGlob.value.trim(),
@@ -2006,6 +2012,7 @@
                     provider: f.provider.value,
                     project: project,
                     bundleIdentifier: f.bundleIdentifier.value.trim(),
+                    catalogBundleIdentifier: f.catalogBundleIdentifier.value.trim(),
                     package: f.package.value.trim(),
                     assetGlob: f.assetGlob.value.trim() || '*.ipa',
                     assetExcludeGlob: f.assetExcludeGlob.value.trim(),
@@ -3436,7 +3443,7 @@
                     <div class="app-card">
                         <div class="app-header">
                             <div class="app-info">
-                                <h3>${escapeHtml(job.bundleIdentifier || job.package || job.id)}</h3>
+                                <h3>${escapeHtml(job.catalogBundleIdentifier || job.bundleIdentifier || job.package || job.id)}</h3>
                                 <p><strong>Job ID:</strong> ${escapeHtml(job.id)}</p>
                                 <p><strong>Provider:</strong> ${escapeHtml(job.provider)} &middot; <strong>Repo:</strong> ${escapeHtml(job.project)}</p>
                                 <div class="version-info">
@@ -3545,6 +3552,7 @@
             f.provider.value = job.provider;
             f.project.value = job.project;
             f.bundleIdentifier.value = job.bundleIdentifier || '';
+            f.catalogBundleIdentifier.value = job.catalogBundleIdentifier || '';
             f.package.value = job.package || '';
             f.assetGlob.value = job.assetGlob || '*.ipa';
             f.assetExcludeGlob.value = job.assetExcludeGlob || '';
