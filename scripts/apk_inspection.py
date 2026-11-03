@@ -11,7 +11,7 @@ ANDROID_PACKAGE_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*
 
 # pyaxmlparser inflates AndroidManifest.xml and resources.arsc fully in
 # memory; a 1 MB APK with a bomb in resources.arsc otherwise costs ~2 GB.
-# The caps are checked against the real inflated size (_member_sizes).
+# _member_sizes checks the caps against the real inflated size.
 # The manifest is tiny in practice; resources.arsc is only read for the
 # app label, so an oversized one is skipped rather than rejected.
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
@@ -24,8 +24,8 @@ _SIZE_CAPS = {"AndroidManifest.xml": MAX_MANIFEST_BYTES, "resources.arsc": MAX_R
 def _inflated_size(fh, info, cap):
     """Bytes the member really inflates to, counted up to cap + 1.
 
-    zipfile itself stops at the declared size, so it cannot be used to
-    measure this; the raw stream is inflated here with a bounded output."""
+    zipfile itself stops at the declared size, so it cannot measure this.
+    This inflates the raw stream instead, with a bounded output."""
     fh.seek(info.header_offset)
     local = fh.read(30)
     if len(local) != 30 or local[:4] != b"PK\x03\x04":
@@ -56,7 +56,7 @@ def _member_sizes(path):
     """Real inflated sizes of the members pyaxmlparser reads whole, or None
     when the zip is unreadable (let pyaxmlparser produce its usual error).
 
-    The declared size in the central directory is attacker-written: a 1 MB
+    The declared size in the central directory is attacker-written. A 1 MB
     APK declaring a 1000-byte manifest inflated to 2.1 GB inside pyaxmlparser.
     A size above a cap means "too large", whatever the header claims."""
     sizes = {}
@@ -101,7 +101,7 @@ def _is_debuggable(apk):
 def inspect_apk(path, label="APK"):
     """Read identity and version out of an APK's binary AndroidManifest.
 
-    Raises only ApkInspectionError: pyaxmlparser can also raise
+    Raises only ApkInspectionError. pyaxmlparser can also raise
     AssertionError, struct.error or its own BrokenAPKError on a truncated
     resources.arsc or signing block, which callers treated as crashes."""
     try:
@@ -121,7 +121,7 @@ def _inspect_apk(path, label="APK"):
     *string*; it is converted here so callers never compare "10" < "9".
     """
     safe_label = str(label or "APK").replace("\n", " ").replace("\r", " ")[:200]
-    from pyaxmlparser import APK  # imported lazily: keeps import fast for tests
+    from pyaxmlparser import APK  # imported lazily to keep import fast for tests
     sizes = _member_sizes(path)
     if sizes is not None and sizes.get("AndroidManifest.xml", 0) > MAX_MANIFEST_BYTES:
         raise ApkInspectionError(f"{safe_label}: AndroidManifest.xml is implausibly large")
@@ -143,7 +143,7 @@ def _inspect_apk(path, label="APK"):
         )
     if version_code <= 0:
         raise ApkInspectionError(f"{safe_label}: APK declares versionCode {version_code}; must be > 0")
-    # `fdroid update` never publishes an unsigned APK: it logs "Skipping ...
+    # `fdroid update` never publishes an unsigned APK. It logs "Skipping ...
     # with invalid signature" and still exits 0, so accepting one here would
     # report "Added" for a version that can never reach the index.
     if not apk.is_signed():
@@ -199,7 +199,8 @@ def _open_raster(archive, name):
 
 
 def _best_by_basename(names, basenames):
-    """Highest-density raster whose file name (sans extension) is in basenames."""
+    """Rasters whose file name (without extension) is in basenames,
+    highest density first."""
     hits = [n for n in names
             if n.startswith("res/") and n.lower().endswith(_RASTER_EXTS)
             and n.rsplit("/", 1)[-1].rsplit(".", 1)[0] in basenames
@@ -210,12 +211,12 @@ def _best_by_basename(names, basenames):
 def extract_apk_icon(path):
     """Best-effort launcher icon as PNG bytes (at most 512x512), or None.
 
-    Order: the manifest's icon resource resolved through resources.arsc at
-    <= xxxhdpi -- which skips the anydpi adaptive-icon XML and lands on the
-    legacy raster most APKs still ship (Flutter/React Native always do,
-    native apps whenever minSdk < 26); then launcher-named rasters; then a
-    raster adaptive foreground composited over its background. Vector-only
-    icons are not rendered. Never raises."""
+    Tries, in order, the manifest's icon resource resolved through
+    resources.arsc at <= xxxhdpi, then launcher-named rasters, then a raster
+    adaptive foreground composited over its background. Resolving at
+    <= xxxhdpi skips the anydpi adaptive-icon XML and lands on the legacy
+    raster most APKs still ship (Flutter/React Native always do, native apps
+    whenever minSdk < 26). Vector-only icons are not rendered. Never raises."""
     import io
     try:
         with zipfile.ZipFile(path) as archive:

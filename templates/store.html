@@ -2,19 +2,19 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <title>Store Preview</title>
+    <title>Store preview</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Read-only preview of this source's iOS and Android catalog, as subscribers see it.">
     <link rel="icon" type="image/svg+xml" href="/static/icon.svg" media="(prefers-color-scheme: light)">
     <link rel="icon" type="image/svg+xml" href="/static/icon-dark.svg" media="(prefers-color-scheme: dark)">
     <link rel="alternate icon" href="/static/favicon.png">
     <!--
-      Public, read-only storefront. It reads ONLY what phones already read:
-      /source.json (AltStore/Feather) and /fdroid/repo/index-v1.json (F-Droid),
-      plus the public /qr and /fdroid/qr images, and no authenticated endpoint.
+      Public, read-only storefront. It reads only what phones already read:
+      /source.json (AltStore/Feather), /fdroid/repo/index-v1.json (F-Droid)
+      and the public /qr and /fdroid/qr images. It calls no authenticated endpoint.
       Catalog text is untrusted (APK labels come from uploaded binaries), so
-      every string is inserted with textContent and every URL goes through
-      safeUrl(), which only allows http(s).
+      the script inserts every string with textContent and passes every URL
+      through safeUrl(), which allows only http(s).
     -->
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -153,7 +153,7 @@
 <div class="wrap">
     <header>
     <div class="preview-banner">
-        <span>Store preview: the same catalog subscribers get from <span class="mono">/source.json</span> and the F-Droid index.</span>
+        <span>This preview shows the same catalog that subscribers get from <span class="mono">/source.json</span> and the F-Droid index.</span>
         <a href="/">Admin</a>
     </div>
 
@@ -321,7 +321,7 @@
         const name = str(src.name) || (state.android && state.android.repo && str(state.android.repo.name)) || 'Store';
         $('sourceName').textContent = name;
         $('sourceSubtitle').textContent = str(src.subtitle || src.description);
-        document.title = `${name} · Store Preview`;
+        document.title = `${name} · Store preview`;
         const icon = safeUrl(src.iconURL);
         if (icon) {
             $('sourceIcon').addEventListener('error', () => { $('sourceIcon').src = '/static/icon.svg'; }, { once: true });
@@ -330,7 +330,7 @@
         if (/^#?[0-9a-f]{6}$/i.test(str(src.tintColor))) {
             const tint = '#' + str(src.tintColor).replace('#', '');
             // Light mode puts white text on the tint and uses it for links on
-            // a near-white page: darken (same hue) until that reads at 4.5:1.
+            // a near-white page, so darken it (same hue) until it reads at 4.5:1.
             document.documentElement.style.setProperty('--tint-light', readableOnWhite(tint));
             document.documentElement.style.setProperty('--tint-dark', tint);
         }
@@ -344,7 +344,7 @@
             el('a', { class: 'btn', href: altstoreUrl, text: 'Open in AltStore' }),
             el('button', { class: 'btn', type: 'button', text: 'Copy source URL', on: { click: (e) => copy(sourceUrl, e.currentTarget) } }),
             el('button', { class: 'btn', type: 'button', text: 'iOS QR', on: { click: () => showQr('Scan with the iPhone camera to add this source to Feather.', '/qr') } }),
-            state.android ? el('button', { class: 'btn', type: 'button', text: 'Android QR', on: { click: () => showQr('Scan with the F-Droid app (or the phone camera) to add this repository.', '/fdroid/qr') } }) : null,
+            state.android ? el('button', { class: 'btn', type: 'button', text: 'Android QR', on: { click: () => showQr('Scan with the F-Droid app or the phone camera to add this repository.', '/fdroid/qr') } }) : null,
         );
     }
     function copy(text, btn) {
@@ -426,8 +426,8 @@
                     el('tbody', null, rows)))
                 : el('p', { class: 'muted', text: 'No published versions.' }),
             el('p', { class: 'muted', text: a.platform === 'ios'
-                ? 'Downloading an IPA here does not install it; subscribers install through Feather or AltStore.'
-                : 'F-Droid verifies each APK against the repository signature; a direct download skips that check.' }));
+                ? 'Downloading an IPA here does not install it. Install through Feather or AltStore instead.'
+                : 'F-Droid verifies each APK against the repository signature. A direct download skips that check.' }));
         dlg.showModal();
     }
 
@@ -459,9 +459,9 @@
     }
     Promise.allSettled([getJson('/source.json'), getJson('/fdroid/repo/index-v1.json')]).then(([ios, android]) => {
         if (ios.status === 'fulfilled') state.ios = ios.value;
-        else state.iosError = 'The iOS source could not be loaded.';
+        else state.iosError = 'The iOS source did not load.';
         if (android.status === 'fulfilled') state.android = android.value;
-        else state.androidError = null;   // no Android repo configured: hide the tab
+        else state.androidError = null;   // no Android repo configured, so hide the tab
         if (!state.ios && state.android) {
             state.platform = 'android';
             $('tab-ios').setAttribute('aria-selected', 'false');

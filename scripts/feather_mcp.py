@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Feather MCP server: lets an AI agent publish IPAs/APKs to a Feather
+"""Feather MCP server. It lets an AI agent publish IPAs and APKs to a Feather
 instance and read its catalogue.
 
-Stdio transport, newline-delimited JSON-RPC 2.0, standard library only, so
-it runs anywhere Python 3.9+ does -- no pip install on the agent's machine.
+It speaks newline-delimited JSON-RPC 2.0 over stdio and uses only the
+standard library, so it runs anywhere Python 3.9+ does, with no pip install
+on the agent's machine.
 
     FEATHER_URL=https://feather.example.com \\
     FEATHER_TOKEN=ftr_... \\
     python3 scripts/feather_mcp.py
 
-Create the token in the Feather admin page (Source tab -> API tokens). A
-token can publish and read; it cannot delete apps or manage tokens.
+Create the token in the Feather admin page, under API tokens on the Source
+tab. A token can publish and read; it cannot delete apps or manage tokens.
 
 Claude Code:
     claude mcp add feather --env FEATHER_URL=https://feather.example.com \\
@@ -39,12 +40,12 @@ TOOLS = [
         "name": "publish_app",
         "description": (
             "Publish an iOS .ipa or Android .apk to Feather. Give either a local file `path` "
-            "or a public `url` Feather should download. Platform, bundle ID / package and "
-            "version are read from the file. New apps are created unless create_if_missing "
-            "is false; the app details (name, summary, description, licence, links, "
-            "categories) apply only when the app is created -- use update_app afterwards. "
+            "or a public `url`, which this client downloads and uploads. Platform, bundle ID or package, and "
+            "version come from the file. New apps are created unless create_if_missing "
+            "is false. The app details (name, summary, description, licence, links, "
+            "categories) apply only when the app is created; use update_app afterwards. "
             "whats_new is this version's release notes. Publishing a version that already "
-            "exists stores nothing (added=false); for an iOS app it still declares any "
+            "exists stores nothing (added=false), but for an iOS app it still declares any "
             "entitlement or privacy key the app lacks (permissionsAdded). Check `warnings` "
             "in the result."
         ),
@@ -54,7 +55,7 @@ TOOLS = [
                 "path": {"type": "string", "description": "Local path to an .ipa or .apk"},
                 "url": {"type": "string", "description": "http(s) URL of an .ipa or .apk"},
                 "name": {"type": "string", "description": "Display name (max 50)"},
-                "developer_name": {"type": "string", "description": "Developer / author (max 100)"},
+                "developer_name": {"type": "string", "description": "Developer or author (max 100)"},
                 "summary": {"type": "string", "description": "One-line summary (max 80); iOS subtitle"},
                 "description": {"type": "string", "description": "Full description (max 4000)"},
                 "license": {"type": "string", "description": "SPDX licence, e.g. GPL-3.0-only (Android only)"},
@@ -78,9 +79,9 @@ TOOLS = [
                 "platform": {"type": "string", "enum": ["ios", "android"],
                              "description": "Required when the same id exists on both platforms"},
                 "whats_new": {"type": "string", "description": "Release notes for `version`"},
-                "version": {"type": "string", "description": "Version the notes belong to (iOS version / Android versionCode)"},
+                "version": {"type": "string", "description": "Version the notes belong to (iOS version or Android versionCode)"},
                 "name": {"type": "string", "description": "Display name (max 50)"},
-                "developer_name": {"type": "string", "description": "Developer / author (max 100)"},
+                "developer_name": {"type": "string", "description": "Developer or author (max 100)"},
                 "summary": {"type": "string", "description": "One-line summary (max 80); iOS subtitle"},
                 "description": {"type": "string", "description": "Full description (max 4000)"},
                 "license": {"type": "string", "description": "SPDX licence, e.g. GPL-3.0-only (Android only)"},
@@ -114,7 +115,7 @@ TOOLS = [
     },
     {
         "name": "repo_status",
-        "description": ("Server build (server_version = git commit) and Android F-Droid repo status: subscribe URL, "
+        "description": ("Server build (server_version is its git commit) and Android F-Droid repo status: subscribe URL, "
                         "fingerprint, last index build and rejected APKs."),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -413,8 +414,8 @@ def handle(msg):
 
 
 def main():
-    # Bytes in, decoded as UTF-8 (the MCP stdio encoding): text-mode stdin
-    # uses the locale code page, which on Windows garbled non-ASCII
+    # Read bytes and decode them as UTF-8 (the MCP stdio encoding). Text-mode
+    # stdin uses the locale code page, which on Windows garbled non-ASCII
     # arguments. Responses are ASCII JSON, so stdout needs no special care.
     for raw in sys.stdin.buffer:
         try:

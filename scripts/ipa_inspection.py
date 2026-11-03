@@ -12,20 +12,21 @@ _APP_INFO_PLIST = re.compile(r"^Payload/[^/]+\.app/Info\.plist$")
 # App extensions. AltStore and SideStore check their entitlements and privacy
 # keys against the source along with the app's own.
 _EXTENSION_INFO_PLIST = re.compile(r"^Payload/[^/]+\.app/(?:PlugIns|Extensions)/[^/]+\.appex/Info\.plist$")
-# Real Info.plists are a few KB. Checked before inflating, and again on the
-# bytes actually read (the central directory's size is attacker-controlled):
-# a 1.5 MB IPA whose plist inflates to 1.5 GB otherwise costs ~3 GB of RAM.
+# Real Info.plists are a few KB. The size is checked before inflating and
+# again on the bytes actually read, because the central directory's size is
+# attacker-controlled. Otherwise a 1.5 MB IPA whose plist inflates to 1.5 GB
+# costs ~3 GB of RAM.
 MAX_INFO_PLIST_BYTES = 4 * 1024 * 1024
 # Inspection runs under the catalogue lock, on bytes a publisher controls, so
-# its work is budgeted per inspection, deterministically (a deadline would
-# silently drop permissions on a busy host), app first:
+# each inspection gets a fixed budget, spent on the app first. A deadline
+# would silently drop permissions on a busy host. Two costs set the budget:
 # - Reaching an executable's code signature inflates everything before it,
 #   and the archive reader re-inflates from the start on any backward seek.
-#   So reads only move forward (bar re-reading the 8-byte head of a thin
-#   binary), one executable costs at most its declared size (the reader
+#   So reads only move forward, except to re-read the 8-byte head of a thin
+#   binary. One executable costs at most its declared size (the reader
 #   never returns more), and all the executables one inspection reads must
 #   fit MAX_INFLATED_EXECUTABLE_BYTES. Only stored and deflated executables
-#   are read: deflate inflates at 0.4-1.5 GiB/s, bzip2 and lzma at a few
+#   are read. Deflate inflates at 0.4-1.5 GiB/s, bzip2 and lzma at a few
 #   dozen MiB/s at worst. MangaSync 0.3.5's 30 MiB deflated executable reads
 #   in 0.07 s.
 # - Parsing XML costs about 0.1 s per MiB, so each entitlements blob is
@@ -43,9 +44,9 @@ MAX_SIGNATURE_SLOTS = 64
 MAX_EXTENSIONS = 64
 # What is kept ends up in the public source.json, polled by every device.
 # Entitlement and privacy keys are short identifiers (Apple defines a few
-# dozen privacy keys); a key over the length cap is dropped, only the first
-# keys in sorted order are kept (trimmed as they accumulate, so a binary full
-# of keys cannot fill memory), and privacy text is cut to MAX_PRIVACY_TEXT
+# dozen privacy keys). A key over the length cap is dropped. Only the first
+# keys in sorted order are kept, trimmed as they accumulate so a binary full
+# of keys cannot fill memory. Privacy text is cut to MAX_PRIVACY_TEXT
 # characters.
 MAX_KEY_LENGTH = 256
 MAX_ENTITLEMENT_KEYS = 256
@@ -244,8 +245,8 @@ def _executable_entitlements(archive, info, budget):
                 if table_end <= offset and 0 < slice_size and offset + slice_size <= size:
                     slices.append((offset, offset + slice_size))
         keys, read_to = set(), 0
-        # In file order, and a slice overlapping the one before it is skipped,
-        # so every slice is read in one forward pass.
+        # Slices go in file order, and one that overlaps the slice before it
+        # is skipped, so a single forward pass reads them all.
         for start, end in sorted(slices):
             if start < read_to:
                 continue
@@ -259,10 +260,10 @@ def _executable_entitlements(archive, info, budget):
 
 def _bundle_permissions(archive, names, app_plist_name, app_plist):
     """Entitlement keys of the app's and its extensions' executables, and the
-    privacy keys of the extensions' Info.plists. Best effort: any part that
-    cannot be read, or does not fit the caps, contributes nothing and never
-    fails the inspection, so an IPA that was accepted before is accepted
-    unchanged."""
+    privacy keys of the extensions' Info.plists. This is best effort. Any part
+    that cannot be read, or does not fit the caps, contributes nothing and
+    never fails the inspection, so an IPA that was accepted before is still
+    accepted."""
     # Only each plist's executable name and privacy keys are kept, and the
     # privacy keys are trimmed as they accumulate, like the entitlement keys.
     bundles = [(app_plist_name, app_plist.get("CFBundleExecutable"))]
@@ -335,10 +336,10 @@ def inspect_ipa(path, label="IPA"):
     except InspectionError:
         raise
     except Exception as e:
-        # Not only OSError/BadZipFile: an unsupported method (Deflate64),
-        # corrupt deflate data (zlib.error) or an encrypted member
-        # (RuntimeError) escaped as a crash in callers that expect only
-        # InspectionError.
+        # Broader than OSError/BadZipFile, because an unsupported method
+        # (Deflate64), corrupt deflate data (zlib.error) or an encrypted
+        # member (RuntimeError) escaped as a crash in callers that expect
+        # only InspectionError.
         raise InspectionError(f"{safe_label}: IPA archive could not be read ({type(e).__name__})")
 
     if not isinstance(plist, dict):
