@@ -1217,6 +1217,91 @@ def _is_http_url(value):
 ALREADY_PRESENT = "already exists; nothing to add"
 
 
+# Version retention (plan 091): an opt-in, per-app "keep the newest version
+# plus N before it". It lives in its own file rather than in source.json
+# because source.json is public and no sideloading client has a use for it.
+# A missing or unreadable file means no app has a policy, so nothing is
+# ever pruned by accident.
+RETENTION_MAX_PREVIOUS = 100
+RETENTION_PLATFORMS = ("ios", "android")
+_RETENTION_WRITE_LOCK = threading.Lock()
+
+
+def _retention_path():
+    return os.path.join(DATA_DIR, "retention.json")
+
+
+def _valid_keep_previous(value):
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= RETENTION_MAX_PREVIOUS
+
+
+def load_retention():
+    """{"ios": {bundle_id: n}, "android": {package: n}}; never raises."""
+    data = {platform: {} for platform in RETENTION_PLATFORMS}
+    try:
+        with open(_retention_path(), 'r') as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        return data
+    except Exception as e:
+        logging.error(f"Error loading retention store: {str(e)}")
+        return data
+    if isinstance(raw, dict):
+        for platform in RETENTION_PLATFORMS:
+            entries = raw.get(platform)
+            if isinstance(entries, dict):
+                data[platform] = {k: v for k, v in entries.items()
+                                  if isinstance(k, str) and _valid_keep_previous(v)}
+    return data
+
+
+def retention_keep_previous(platform, app_id):
+    """How many versions before the newest one app keeps, or None for all."""
+    return load_retention()[platform].get(app_id)
+
+
+def set_retention(platform, app_id, keep_previous):
+    """Store one app's policy; None clears it. Raises if the write fails."""
+    with _RETENTION_WRITE_LOCK:
+        data = load_retention()
+        if keep_previous is None:
+            if app_id not in data[platform]:
+                return data
+            del data[platform][app_id]
+        else:
+            data[platform][app_id] = keep_previous
+        path = _retention_path()
+        directory = os.path.dirname(path) or "."
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".retention-", suffix=".json.tmp")
+        try:
+            with os.fdopen(fd, 'w') as f:
+                json.dump(data, f, indent=2, sort_keys=True)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
+    return data
+
+
+def _forget_retention(platform, app_id):
+    """A deleted app drops its policy: re-adding it later must not silently
+    inherit a pruning rule nobody remembers setting."""
+    try:
+        set_retention(platform, app_id, None)
+    except Exception as e:
+        logging.warning(f"Could not clear the retention policy of {app_id}: {e}")
+
+
+def _pruned_note(labels):
+    if not labels:
+        return None
+    return f"Retention removed {len(labels)} older version{'s' if len(labels) != 1 else ''}: {', '.join(labels)}"
+
+
 class SourceManager:
     """Manages the AltSource data and file operations"""
     
@@ -1971,6 +2056,7 @@ class SourceManager:
                         for version in app_to_delete.get('versions', []):
                             self.delete_ipa_file(bundle_identifier, version.get('version', ''))
                     self.delete_icon_file(bundle_identifier)
+                    _forget_retention("ios", bundle_identifier)
                 return success, "App deleted successfully" if success else "Failed to save source after deletion"
             else:
                 return False, "App not found"
@@ -2112,6 +2198,7 @@ class SourceManager:
     def _add_version_locked(self, bundle_identifier, version_data, ipa_file, download_from_url, base_url):
             self.ipa_warning = None
             self.ipa_inspection = None
+            self.pruned_versions = []
             source_data = self.load_source()
             if not source_data:
                 return False, "Failed to load source data"
@@ -2183,17 +2270,67 @@ class SourceManager:
             if version_data.get('localizedDescription'):
                 new_version['localizedDescription'] = version_data['localizedDescription']
         
-            _insert_version(app['versions'], new_version)
+            position = _insert_version(app['versions'], new_version)
             app['addedDate'] = dates['feather_date']
             auto_icon_url, _ = self._store_extracted_icon(bundle_identifier, base_url)
             if auto_icon_url:
                 app['iconURL'] = auto_icon_url
             _declare_permissions(app, self.ipa_inspection)
-        
+            # Only an update prunes: a backport landing below the newest
+            # version is not one, and must not delete anything.
+            dropped = []
+            if position == 0:
+                dropped = self._cut_versions(app, retention_keep_previous("ios", bundle_identifier))
+
             success = self.save_source(source_data)
             if not success:
                 return False, "Failed to add version"
-            return True, " ".join(filter(None, ["Version added successfully", getattr(self, 'ipa_warning', None)]))
+            self.pruned_versions = self._delete_pruned_ipas(bundle_identifier, dropped)
+            return True, " ".join(filter(None, ["Version added successfully", getattr(self, 'ipa_warning', None),
+                                                _pruned_note(self.pruned_versions)]))
+
+    @staticmethod
+    def _cut_versions(app, keep_previous):
+        """Remove the versions past the newest + keep_previous from `app` in
+        memory (versions[0] is the newest) and return them. The caller saves
+        the source first and deletes their IPAs only after, so a failed save
+        loses no binary."""
+        versions = app.get('versions') or []
+        if keep_previous is None or len(versions) <= keep_previous + 1:
+            return []
+        dropped = versions[keep_previous + 1:]
+        del versions[keep_previous + 1:]
+        return dropped
+
+    def _delete_pruned_ipas(self, bundle_identifier, dropped):
+        labels = []
+        for entry in dropped:
+            version = entry.get('version') if isinstance(entry, dict) else None
+            if isinstance(version, str) and version:
+                self.delete_ipa_file(bundle_identifier, version)
+                labels.append(version)
+        if labels:
+            logging.info("Retention removed %s versions %s", bundle_identifier, ", ".join(labels))
+            notify("prune_versions", f"Retention removed {bundle_identifier} {', '.join(labels)}")
+        return labels
+
+    def prune_versions(self, bundle_identifier, keep_previous):
+        """Apply a retention policy now rather than on the next update.
+        Returns (success, message, removed version strings)."""
+        with self._lock:
+            source_data = self.load_source()
+            if not source_data:
+                return False, "Failed to load source data", []
+            app = next((a for a in source_data['apps'] if a.get('bundleIdentifier') == bundle_identifier), None)
+            if app is None:
+                return False, "App not found", []
+            dropped = self._cut_versions(app, keep_previous)
+            if not dropped:
+                return True, "Nothing to remove", []
+            if not self.save_source(source_data):
+                return False, "Failed to save source after pruning", []
+            labels = self._delete_pruned_ipas(bundle_identifier, dropped)
+            return True, _pruned_note(labels), labels
     
     def set_version_notes(self, bundle_identifier, version, text):
         """Set one published version's release notes (AltStore shows a
@@ -2905,9 +3042,93 @@ class AndroidRepoManager:
                 self.refresh_icon(package, dest)
             except Exception as e:
                 logging.warning("could not extract icon for %s: %s", package, e)
+        info = {**info, "pruned": self._prune_after_add(package, info)}
         self._sync_repo_config_url()
         self.request_update()
         return True, info
+
+    def _releases(self, package, known=None):
+        """This package's APKs on disk as releases, newest first:
+        [(versionName, [versionCode, ...]), ...]. A release is every APK that
+        shares a versionName, so the per-ABI APKs of one version count once;
+        releases rank by their highest versionCode, F-Droid's own notion of
+        newer. versionName comes from `known` (an APK just inspected), then
+        the published index, then the APK itself. An APK whose versionName
+        cannot be read is left out: never counted, never pruned."""
+        names = {}
+        index = self.load_index() or {}
+        for entry in (index.get('packages') or {}).get(package) or []:
+            if isinstance(entry, dict) and isinstance(entry.get('versionCode'), int) \
+                    and isinstance(entry.get('versionName'), str):
+                names[entry['versionCode']] = entry['versionName']
+        names.update(known or {})
+        groups = {}
+        if os.path.isdir(FDROID_REPO_DIR):
+            for fn in os.listdir(FDROID_REPO_DIR):
+                match = ANDROID_APK_FILENAME_RE.match(fn)
+                if not match or match.group(1) != package:
+                    continue
+                code = int(match.group(2))
+                name = names.get(code)
+                if name is None:
+                    try:
+                        name = _inspect_apk(os.path.join(FDROID_REPO_DIR, fn)).get("version_name")
+                    except Exception as e:
+                        logging.warning("retention: cannot read the versionName of %s: %s", fn, e)
+                if isinstance(name, str) and name:
+                    groups.setdefault(name, []).append(code)
+        releases = [(name, sorted(codes, reverse=True)) for name, codes in groups.items()]
+        return sorted(releases, key=lambda release: release[1][0], reverse=True)
+
+    def _remove_releases(self, package, releases):
+        removed = []
+        with self._lock:
+            for name, codes in releases:
+                for code in codes:
+                    try:
+                        os.remove(self.apk_path(package, code))
+                    except FileNotFoundError:
+                        continue
+                    removed.append({"versionCode": code, "versionName": name})
+        if apk_storage is not None:
+            for item in removed:
+                apk_storage.delete(self.apk_filename(package, item["versionCode"]))
+        if removed:
+            labels = sorted({f"{item['versionName']}" for item in removed})
+            logging.info("Retention removed %s versions %s", package, ", ".join(labels))
+            notify("prune_versions", f"Retention removed {package} {', '.join(labels)}")
+        return removed
+
+    def _prune_after_add(self, package, info):
+        """Apply the package's retention policy once an added APK makes its
+        release the newest. Adding an older build (a backport, or one ABI of
+        a release whose others are still to come) prunes nothing. A failure
+        here is logged, never raised: the APK is already published."""
+        keep_previous = retention_keep_previous("android", package)
+        if keep_previous is None:
+            return []
+        try:
+            name = info.get("version_name")
+            releases = self._releases(package, {int(info["version_code"]): name} if name else None)
+            if not releases or releases[0][0] != name:
+                return []
+            return self._remove_releases(package, releases[keep_previous + 1:])
+        except Exception as e:
+            logging.error(f"Retention pruning failed for {package}: {str(e)}")
+            return []
+
+    def prune_versions(self, package, keep_previous):
+        """Apply a retention policy now rather than on the next update.
+        Returns the removed APKs as [{"versionCode", "versionName"}, ...]."""
+        if not ANDROID_PACKAGE_RE.match(package or ""):
+            raise ValueError(f"Invalid package name: {package!r}")
+        removed = self._remove_releases(package, self._releases(package)[keep_previous + 1:])
+        if removed:
+            self.request_update()
+        return removed
+
+    def has_app(self, package):
+        return os.path.exists(self.metadata_path(package)) or self._newest_apk(package) is not None
 
     def delete_version(self, package, version_code):
         if not ANDROID_PACKAGE_RE.match(package or ""):
@@ -2950,6 +3171,7 @@ class AndroidRepoManager:
             meta_dir = os.path.join(FDROID_METADATA_DIR, package)
             if os.path.isdir(meta_dir):
                 shutil.rmtree(meta_dir, ignore_errors=True)
+        _forget_retention("android", package)
         self.request_update()
         return removed_something
 
@@ -5378,6 +5600,96 @@ def delete_version():
         logging.error(f"Error deleting version: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 400
 
+
+def _retention_target(data):
+    """(platform, app id) of an existing app, from a retention request.
+    Raises ValueError for a malformed request, LookupError for no such app."""
+    platform = data.get('platform')
+    if platform not in RETENTION_PLATFORMS:
+        raise ValueError("platform must be 'ios' or 'android'")
+    app_id = data.get('id')
+    if not isinstance(app_id, str) or not app_id.strip():
+        raise ValueError("id is required")
+    app_id = app_id.strip()
+    if platform == "ios":
+        if source_manager.get_app(app_id) is None:
+            raise LookupError(f"{app_id} is not in the catalog")
+    else:
+        if not ANDROID_PACKAGE_RE.match(app_id):
+            raise ValueError(f"Invalid package name: {app_id!r}")
+        if not android_repo.has_app(app_id):
+            raise LookupError(f"{app_id} is not in the repo")
+    return platform, app_id
+
+
+@app.route('/api/retention', methods=['GET'])
+@requires_auth
+def get_retention():
+    return jsonify({"success": True, "retention": load_retention(), "maxPrevious": RETENTION_MAX_PREVIOUS})
+
+
+# Retention deletes binaries, so setting and applying it are admin-session
+# only. A token's publish can still trigger a policy an admin set; that
+# deletion is the admin's decision, made here.
+@app.route('/api/retention', methods=['POST'])
+@requires_auth
+def set_app_retention():
+    try:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            raise ValueError("Expected a JSON object")
+        platform, app_id = _retention_target(data)
+        keep = data.get('keepPreviousVersions')
+        if keep == "":
+            keep = None
+        if keep is not None and not _valid_keep_previous(keep):
+            raise ValueError(f"keepPreviousVersions must be a whole number from 0 to {RETENTION_MAX_PREVIOUS}, "
+                             "or null to keep every version")
+        set_retention(platform, app_id, keep)
+        message = (f"{app_id} keeps every version" if keep is None else
+                   f"{app_id} keeps its newest version and {keep} before it; older ones are removed on the next update")
+        return jsonify({"success": True, "platform": platform, "id": app_id,
+                        "keepPreviousVersions": keep, "message": message})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except LookupError as e:
+        return jsonify({"success": False, "error": str(e)}), 404
+    except Exception as e:
+        logging.error(f"Error saving retention policy: {str(e)}")
+        return jsonify({"success": False, "error": "Failed to save the retention policy"}), 500
+
+
+@app.route('/api/retention/apply', methods=['POST'])
+@requires_auth
+def apply_app_retention():
+    """Prune one app to its policy now instead of on its next update."""
+    try:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            raise ValueError("Expected a JSON object")
+        platform, app_id = _retention_target(data)
+        keep = retention_keep_previous(platform, app_id)
+        if keep is None:
+            raise ValueError(f"{app_id} has no retention policy; set keepPreviousVersions first")
+        if platform == "ios":
+            ok, message, removed = source_manager.prune_versions(app_id, keep)
+            if not ok:
+                return jsonify({"success": False, "error": message}), 500
+            pruned = [{"version": v} for v in removed]
+        else:
+            pruned = android_repo.prune_versions(app_id, keep)
+            labels = sorted({item["versionName"] for item in pruned})
+            message = _pruned_note(labels) or "Nothing to remove"
+        return jsonify({"success": True, "platform": platform, "id": app_id,
+                        "pruned": pruned, "message": message or "Nothing to remove"})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except LookupError as e:
+        return jsonify({"success": False, "error": str(e)}), 404
+    except Exception as e:
+        logging.error(f"Error applying retention policy: {str(e)}")
+        return jsonify({"success": False, "error": "Failed to apply the retention policy"}), 500
+
 @app.route('/api/update-source', methods=['POST'])
 @requires_auth
 def update_source():
@@ -6757,8 +7069,10 @@ def _publish_ios(tmp_path, opts, base_url):
     entry = next((v for v in app_info.get("versions", []) if v.get("version") == version), {})
     notify("add_version" if existing else "add_app",
            f"Published via API: {app_info.get('name', bundle_id)} ({bundle_id}) {version}\n{base_url}/source.json")
+    pruned = [{"version": v} for v in (getattr(source_manager, "pruned_versions", None) or [])] if existing else []
     return jsonify({**result, "success": True, "added": True, "name": app_info.get("name"),
-                    "downloadURL": entry.get("downloadURL"), "size": entry.get("size"), "message": message}), 200
+                    "downloadURL": entry.get("downloadURL"), "size": entry.get("size"), "pruned": pruned,
+                    "message": message}), 200
 
 
 def _publish_android(tmp_path, opts, base_url):
@@ -6788,7 +7102,7 @@ def _publish_android(tmp_path, opts, base_url):
         # Written before the APK lands so the rebuild that publishes the
         # version already sees its notes.
         android_repo.write_changelog(package, info["version_code"], opts["whatsNew"])
-    added, _ = android_repo.add_apk(tmp_path, expected_package=package)
+    added, stored = android_repo.add_apk(tmp_path, expected_package=package)
     url = f"{base_url}/fdroid/repo/{android_repo.apk_filename(package, info['version_code'])}"
     if not added:
         return jsonify({**result, "success": True, "added": False, "downloadURL": url,
@@ -6801,6 +7115,7 @@ def _publish_android(tmp_path, opts, base_url):
     notify("android_add_apk", f"Published via API: {package} {info['version_name']}")
     return jsonify({**result, "success": True, "added": True, "created": not known, "downloadURL": url,
                     "pending": True, "name": details.get("name") or info.get("app_name"),
+                    "pruned": stored.get("pruned", []),
                     "message": f"Added {package} versionCode {info['version_code']}; "
                                "the F-Droid index rebuilds on the sidecar's next pass"}), 200
 

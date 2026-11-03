@@ -1246,6 +1246,15 @@
                         <label for="editBundleIdentifier">Bundle Identifier (read-only):</label>
                         <input type="text" id="editBundleIdentifier" readonly style="background: var(--surface-2);">
                     </div>
+                    <div class="form-group">
+                        <label for="editKeepPrevious">Keep Previous Versions:</label>
+                        <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                            <input type="number" id="editKeepPrevious" min="0" max="100" step="1" placeholder="all" style="width: 8em;">
+                            <button type="button" class="btn" onclick="saveRetention('ios', document.getElementById('editBundleId').value, document.getElementById('editKeepPrevious'), this)">Save</button>
+                            <button type="button" class="btn btn-danger" onclick="applyRetention('ios', document.getElementById('editBundleId').value, this)">Prune Now</button>
+                        </div>
+                        <small style="display: block; margin-top: 5px; color: var(--label-secondary); font-size: 0.85em;">When an update arrives, keep it plus this many versions before it and delete the older ones with their IPA files. Leave blank to keep every version.</small>
+                    </div>
 
                     <div class="version-list">
                         <h3 style="margin-bottom: 15px;">Versions</h3>
@@ -2628,6 +2637,8 @@
                 
                 // Display versions
                 displayVersions(app.versions || []);
+                const retention = await fetchRetention();
+                document.getElementById('editKeepPrevious').value = retention.ios[app.bundleIdentifier] ?? '';
                 
                 // Show modal
                 document.getElementById('editAppModal').style.display = 'block';
@@ -3149,7 +3160,7 @@
         async function loadAndroidApps() {
             const el = document.getElementById('androidAppsList');
             try {
-                const response = await fetch('/api/android/apps');
+                const [response, retention] = await Promise.all([fetch('/api/android/apps'), fetchRetention()]);
                 const apps = await response.json();
 
                 if (!apps || apps.length === 0) {
@@ -3171,6 +3182,17 @@
                         `;
                     }).join('');
 
+                    const keep = retention.android[app.package];
+                    const retentionHtml = `
+                        <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 0; border-top: 1px solid var(--separator);">
+                            <span>Keep previous versions:</span>
+                            <input type="number" aria-label="Keep previous versions of ${escapeHtml(app.package)}" min="0" max="100" step="1" placeholder="all" value="${keep ?? ''}" style="width: 7em;">
+                            <button class="btn" style="padding: 6px 12px; font-size: 0.85em;" data-arg="${escapeHtml(app.package)}" onclick="saveRetention('android', this.dataset.arg, this.previousElementSibling, this)">Save</button>
+                            <button class="btn btn-danger" style="padding: 6px 12px; font-size: 0.85em;" data-arg="${escapeHtml(app.package)}" onclick="applyRetention('android', this.dataset.arg, this)">Prune Now</button>
+                            <small style="color: var(--label-secondary);">On each update, keep it plus this many versions before it (all APKs of a version count once); blank keeps all.</small>
+                        </div>
+                    `;
+
                     const mixedSignersWarning = app.mixed_signers
                         ? `<p style="color: var(--danger); margin-top: 6px;"><strong>Warning:</strong> published versions have different signing certificates -- the F-Droid client will refuse this update.</p>`
                         : '';
@@ -3191,12 +3213,76 @@
                                     <button class="btn btn-danger" data-arg="${escapeHtml(app.package)}" onclick="deleteAndroidApp(this.dataset.arg)">Delete App</button>
                                 </div>
                             </div>
+                            ${retentionHtml}
                             ${versionsHtml}
                         </div>
                     `;
                 }).join('');
             } catch (error) {
                 el.innerHTML = `<p style="color: var(--danger); text-align: center; padding: 20px;">Failed to load Android apps: ${escapeHtml(error.message)}</p>`;
+            }
+        }
+
+        async function fetchRetention() {
+            try {
+                const response = await fetch('/api/retention');
+                const result = await response.json();
+                if (result.success) return result.retention;
+            } catch (error) {
+                console.error('Error loading retention policies:', error);
+            }
+            return { ios: {}, android: {} };
+        }
+
+        async function saveRetention(platform, id, input, button) {
+            const raw = input.value.trim();
+            const keep = raw === '' ? null : Number(raw);
+            if (keep !== null && !(Number.isInteger(keep) && keep >= 0 && keep <= 100)) {
+                showToast('Keep previous versions must be a whole number from 0 to 100, or blank to keep all', 'error');
+                return;
+            }
+            if (button) setButtonLoading(button, true);
+            try {
+                const response = await fetch('/api/retention', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ platform, id, keepPreviousVersions: keep })
+                });
+                const result = await response.json();
+                showToast(result.success ? result.message : (result.error || 'Failed to save the retention policy'),
+                          result.success ? 'success' : 'error');
+            } catch (error) {
+                showToast('Error saving the retention policy: ' + error.message, 'error');
+            } finally {
+                if (button) setButtonLoading(button, false);
+            }
+        }
+
+        async function applyRetention(platform, id, button) {
+            if (!confirm(`Apply the saved retention policy to ${id} now? Versions older than it keeps are deleted with their files and cannot be restored.`)) return;
+            if (button) setButtonLoading(button, true);
+            try {
+                const response = await fetch('/api/retention/apply', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ platform, id })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    showToast(result.message, 'success');
+                    if (platform === 'ios') {
+                        await editApp(id);
+                        loadApps();
+                    } else {
+                        loadAndroidApps();
+                    }
+                } else {
+                    showToast(result.error || 'Failed to apply the retention policy', 'error');
+                }
+            } catch (error) {
+                showToast('Error applying the retention policy: ' + error.message, 'error');
+            } finally {
+                if (button) setButtonLoading(button, false);
             }
         }
 
