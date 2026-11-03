@@ -39,6 +39,7 @@ Everything runs with Docker Compose. Android, Telegram and the cron importer are
 | Android metadata + icons | `data/fdroid/metadata/<package>.yml`, `metadata/<package>/en-US/icon.png` | inside the signed index | stays local |
 | F-Droid signing key | `data/fdroid/keystore.p12` | — | stays local — **back it up** |
 | Importer config/state | `data/release-import/` | — | stays local |
+| Version retention policies | `data/retention.json` | — | stays local |
 | Operator pages | `data/site/<path>` (you put them there) | `/<path>`, when no route has it | stays local |
 
 ---
@@ -210,7 +211,7 @@ IPA, APK and icon uploads use bounded-memory multipart streaming, so large
 artifacts do not require a file-sized allocation in the worker. The pending
 entry remains available when publication fails.
 
-Notifications post catalog events to a chat. On by default: `add_app`, `add_version`, `delete_app`, `android_add_apk`. Opt-in via `TELEGRAM_NOTIFY_EVENTS`: `delete_version`, `health_transition`.
+Notifications post catalog events to a chat. On by default: `add_app`, `add_version`, `delete_app`, `android_add_apk`. Opt-in via `TELEGRAM_NOTIFY_EVENTS`: `delete_version`, `prune_versions` (a retention policy removed older versions), `health_transition`.
 
 ---
 
@@ -218,6 +219,7 @@ Notifications post catalog events to a chat. On by default: `add_app`, `add_vers
 
 - **Health** — scans the iOS catalog for missing IPAs and icons, corrupt IPA files, zero sizes, duplicate versions and non-public download URLs; keeps 30 snapshots and can alert on healthy ↔ degraded changes.
 - **Catalog recovery** — the last 20 `source.json` snapshots with preview and typed-confirmation restore. They sit next to the catalog in `data/`, so they are not off-site backups and don't include the binaries.
+- **Version retention** — per app, *Keep Previous Versions* (in the iOS app's Edit dialog and on each Android app's card) keeps the newest version plus that many before it: whenever an update arrives, older versions are deleted with their IPA or APK files. All APKs sharing a versionName count as one version, so an app's per-ABI APKs go together. A backport below the newest version prunes nothing; *Prune Now* applies the saved policy without waiting for an update. Off unless set.
 - **Featured apps and news** — up to five featured apps and AltStore-format news items.
 - **Certificate check** — upload a `.p12` + `.mobileprovision` to see whether they pair, when each expires and which devices they cover. Nothing is signed or stored.
 - **Storage tools** — storage self-test, icon reconcile, and recent server errors (secrets redacted).

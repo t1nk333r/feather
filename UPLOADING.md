@@ -45,7 +45,7 @@ Response (`200`):
 {"success": true, "platform": "android", "id": "org.example.davkeep", "version": "1.4",
  "build": 42, "added": true, "created": false, "name": "DAVKeep", "pending": true,
  "downloadURL": "https://apps.example.com/fdroid/repo/org.example.davkeep_42.apk",
- "warnings": [], "message": "Added org.example.davkeep versionCode 42; …"}
+ "pruned": [], "warnings": [], "message": "Added org.example.davkeep versionCode 42; …"}
 ```
 
 **Read `warnings`.** They report what was accepted but not ideal: a
@@ -55,6 +55,15 @@ for an app that already exists (ignored), and Android-only fields sent for
 iOS.
 
 `added: false` means that exact version was already published (a safe retry).
+
+**`pruned` lists what the app's retention policy deleted** because this
+upload is its newest version: `[{"version": "1.2"}]` for iOS,
+`[{"versionCode": 41, "versionName": "1.3"}]` for Android. It is `[]` unless
+an admin gave the app a policy (*Keep Previous Versions* in the admin UI, or
+`POST /api/retention` with a session; tokens cannot set one). An upload that
+is not the newest (a backport) never prunes. On Android every APK sharing a
+versionName counts as one version, so per-ABI APKs are kept or removed
+together.
 
 **iOS permissions come from the binary.** Every stored IPA adds the
 entitlement keys its app and extension executables are signed with, and the
