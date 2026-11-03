@@ -853,3 +853,139 @@ def test_stored_job_with_no_asset_match_mode_behaves_as_glob(authed_client):
     assert job_obj.asset_match_mode == "glob"
     state = release_ingest._asset_match_state(job_obj, "App(1).ipa")
     assert state["matched"] is True
+
+
+# ---------------------------------------------------------------------------
+# Plan 090: catalogBundleIdentifier -- publish an IPA into a catalog entry
+# whose bundle id differs from the IPA's own.
+# ---------------------------------------------------------------------------
+
+
+def catalog_override_job(job_id="patched", **overrides):
+    """GitHub job asserting the IPA's upstream id while filing it under the
+    seeded com.example.app entry -- the NeoFreeBird shape (IPA declares
+    com.atebits.Tweetie2, catalog keeps com.atebits.Tweetie2.nfb). The seeded
+    entry exists, so neither path reaches the GitHub-avatar icon fallback."""
+    job = dict(VALID_GITHUB_JOB, id=job_id, project="owner/repo",
+               bundleIdentifier="com.upstream.app",
+               catalogBundleIdentifier="com.example.app")
+    job.update(overrides)
+    return job
+
+
+def run_job_with_ipa(client, job_id, ipa_bytes, **candidate_overrides):
+    release_ingest = client.app_module.release_ingest
+    candidate = make_candidate(release_ingest, provider="github", project="owner/repo",
+                               declared_size=len(ipa_bytes), **candidate_overrides)
+    mp = pytest.MonkeyPatch()
+    mp.setattr(release_ingest, "select_candidate", make_fake_select_candidate(candidate))
+    mp.setattr(release_ingest, "stream_download", make_fake_stream_download(ipa_bytes))
+    try:
+        resp = client.post("/api/auto-import/run", json={"id": job_id})
+    finally:
+        mp.undo()
+    assert resp.status_code == 200
+    return resp.get_json()["results"][job_id]
+
+
+def test_catalog_bundle_identifier_round_trips_through_save_and_read(authed_client):
+    """Same silent-drop guard as assetMatchMode: the field must be in
+    _validate_auto_import_job's returned dict or it never persists."""
+    resp = authed_client.post("/api/auto-import/job", json=catalog_override_job())
+    assert resp.status_code == 200, resp.get_json()
+    stored = authed_client.get("/api/auto-import").get_json()["jobs"][0]
+    assert stored["catalogBundleIdentifier"] == "com.example.app"
+    assert stored["bundleIdentifier"] == "com.upstream.app"
+
+
+def test_catalog_bundle_identifier_defaults_to_none(authed_client):
+    for value in (None, "", "   "):
+        job = dict(VALID_GITHUB_JOB, catalogBundleIdentifier=value)
+        resp = authed_client.post("/api/auto-import/job", json=job)
+        assert resp.status_code == 200, resp.get_json()
+        stored = authed_client.get("/api/auto-import").get_json()["jobs"][0]
+        assert stored["catalogBundleIdentifier"] is None
+
+
+@pytest.mark.parametrize("value", [
+    "noseparator", "../escape.app", "com.example.app/../x", "com.example app",
+    ".com.example", "com..example", "com.example_app", "a." + "b" * 300, 42,
+])
+def test_malformed_catalog_bundle_identifier_refused_at_save(authed_client, value):
+    resp = authed_client.post("/api/auto-import/job",
+                              json=catalog_override_job(catalogBundleIdentifier=value))
+    assert resp.status_code == 400
+    assert "catalogBundleIdentifier" in resp.get_json()["error"]
+    assert authed_client.get("/api/auto-import").get_json()["jobs"] == []
+
+
+def test_catalog_override_publishes_into_named_entry(authed_client):
+    app_module = authed_client.app_module
+    assert authed_client.post("/api/auto-import/job", json=catalog_override_job()).status_code == 200
+
+    result = run_job_with_ipa(
+        authed_client, "patched", build_ipa_bytes(bundle_id="com.upstream.app", version="2.0.0"))
+
+    assert result["status"] == "published", result
+    # Preflight reports the IPA's own id and where it was filed.
+    assert result["preflight"]["bundleIdentifier"] == "com.upstream.app"
+    assert result["preflight"]["catalogBundleIdentifier"] == "com.example.app"
+
+    versions = [v["version"] for v in app_module.source_manager.get_app("com.example.app")["versions"]]
+    assert versions[0] == "2.0.0" and "1.0.0" in versions
+    assert app_module.source_manager.get_app("com.upstream.app") is None
+
+    # Provenance is looked up by catalog id; the record keeps the IPA's id too.
+    resp = authed_client.get("/api/import-provenance/com.example.app/2.0.0")
+    assert resp.status_code == 200
+    record = resp.get_json()
+    assert record["jobId"] == "patched"
+    assert record["artifactBundleIdentifier"] == "com.upstream.app"
+
+
+def test_catalog_override_rerun_of_same_version_is_skip(authed_client):
+    app_module = authed_client.app_module
+    assert authed_client.post("/api/auto-import/job", json=catalog_override_job()).status_code == 200
+    ipa_bytes = build_ipa_bytes(bundle_id="com.upstream.app", version="2.0.0")
+
+    assert run_job_with_ipa(authed_client, "patched", ipa_bytes)["status"] == "published"
+    assert run_job_with_ipa(authed_client, "patched", ipa_bytes)["status"] == "skipped"
+    versions = [v["version"] for v in app_module.source_manager.get_app("com.example.app")["versions"]]
+    assert versions.count("2.0.0") == 1
+
+
+def test_catalog_override_still_enforces_the_bundle_identifier_assertion(authed_client):
+    """The override chooses the destination; it must never relax the check
+    that the IPA is the app the job expects."""
+    app_module = authed_client.app_module
+    assert authed_client.post("/api/auto-import/job", json=catalog_override_job()).status_code == 200
+
+    result = run_job_with_ipa(
+        authed_client, "patched", build_ipa_bytes(bundle_id="com.someone.else", version="2.0.0"))
+
+    assert result["status"] == "error"
+    assert len(app_module.source_manager.get_app("com.example.app")["versions"]) == 1
+
+
+def test_catalog_override_creates_missing_entry_under_catalog_id(authed_client):
+    app_module = authed_client.app_module
+    job = dict(valid_gitlab_create_job("glpatched"), bundleIdentifier="com.newapp.example",
+               catalogBundleIdentifier="com.newapp.example.patched")
+    assert authed_client.post("/api/auto-import/job", json=job).status_code == 200
+
+    release_ingest = app_module.release_ingest
+    ipa_bytes = build_ipa_bytes(bundle_id="com.newapp.example", version="1.0.0")
+    mp = pytest.MonkeyPatch()
+    mp.setattr(release_ingest, "select_candidate",
+               make_fake_select_candidate(make_candidate(release_ingest, declared_size=len(ipa_bytes))))
+    mp.setattr(release_ingest, "stream_download", make_fake_stream_download(ipa_bytes))
+    try:
+        resp = authed_client.post("/api/auto-import/run", json={"id": "glpatched"})
+    finally:
+        mp.undo()
+
+    assert resp.get_json()["results"]["glpatched"]["status"] == "published"
+    created = app_module.source_manager.get_app("com.newapp.example.patched")
+    assert created is not None and created["name"] == "New App"
+    assert [v["version"] for v in created["versions"]] == ["1.0.0"]
+    assert app_module.source_manager.get_app("com.newapp.example") is None

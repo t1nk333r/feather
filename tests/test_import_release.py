@@ -1287,3 +1287,69 @@ def test_import_publishes_apk_to_android_repo(authed_client, monkeypatch, tmp_pa
     # The artifact actually reached android_repo -- not just an SSE flag.
     apk_path = tmp_path / "fdroid" / "repo" / "com.example.android_3.apk"
     assert apk_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Plan 090: catalogBundleIdentifier on the one-off import path.
+# ---------------------------------------------------------------------------
+
+
+def test_import_catalog_override_publishes_into_named_entry(authed_client):
+    app_module = authed_client.app_module
+    release_ingest = app_module.release_ingest
+
+    ipa_bytes = build_ipa_bytes(bundle_id="com.upstream.app", version="2.0.0")
+    candidate = make_candidate(release_ingest, declared_size=len(ipa_bytes))
+
+    status, events = post_and_collect(
+        authed_client,
+        {
+            "provider": "github",
+            "project": "owner/repo",
+            "bundleIdentifier": "com.upstream.app",
+            "catalogBundleIdentifier": "com.example.app",
+            "createIfMissing": False,
+        },
+        {
+            "select_candidate": make_fake_select_candidate(candidate),
+            "stream_download": make_fake_stream_download(ipa_bytes),
+        },
+    )
+
+    assert status == 200
+    preflight = next(e for e in events if e["stage"] == "preflight")
+    assert preflight["bundleIdentifier"] == "com.upstream.app"
+    assert preflight["catalogBundleIdentifier"] == "com.example.app"
+    last = events[-1]
+    assert last["stage"] == "done", events
+    assert last["bundleIdentifier"] == "com.example.app"
+
+    versions = [v["version"] for v in app_module.source_manager.get_app("com.example.app")["versions"]]
+    assert "2.0.0" in versions and "1.0.0" in versions
+    assert app_module.source_manager.get_app("com.upstream.app") is None
+
+    record = authed_client.get("/api/import-provenance/com.example.app/2.0.0").get_json()
+    assert record["artifactBundleIdentifier"] == "com.upstream.app"
+
+
+def test_import_malformed_catalog_override_is_reported_before_download(authed_client):
+    app_module = authed_client.app_module
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("selection must not run for an invalid catalog id")
+
+    status, events = post_and_collect(
+        authed_client,
+        {
+            "provider": "github",
+            "project": "owner/repo",
+            "catalogBundleIdentifier": "../escape",
+            "createIfMissing": False,
+        },
+        {"select_candidate": must_not_run, "stream_download": must_not_run},
+    )
+
+    assert status == 200
+    assert events[-1]["stage"] == "error"
+    assert "catalogBundleIdentifier" in events[-1]["error"]
+    assert len(app_module.source_manager.get_app("com.example.app")["versions"]) == 1

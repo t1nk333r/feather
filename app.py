@@ -122,6 +122,11 @@ FDROID_FINGERPRINT = os.path.join(FDROID_DIR, "fingerprint.txt")
 ALLOWED_APK_EXTENSIONS = {'apk'}
 # Android package names: Java identifiers separated by dots, at least two segments.
 ANDROID_PACKAGE_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$')
+# Catalog bundle identifiers (plan 090): reverse-DNS, at least two segments,
+# only the characters Apple allows in CFBundleIdentifier. They also name the
+# ipas/<id>/ and icons/<id>/ storage paths, so they must survive
+# secure_filename unchanged -- this pattern guarantees that.
+CATALOG_BUNDLE_ID_RE = re.compile(r'^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$')
 ANDROID_APK_FILENAME_RE = re.compile(r'^(.+)_(\d+)\.apk$')
 SOURCE_ARTWORK_URL = "https://f002.backblazeb2.com/file/S30000PUBLIC/MEDIA-PUBLIC/feather-tinker-1024.png"
 LEGACY_SOURCE_ARTWORK_URLS = {
@@ -3948,8 +3953,8 @@ _IMPORT_HISTORY_LOCK = threading.Lock()
 _IMPORT_HISTORY_MAX = 200
 _IMPORT_HISTORY_STRING_FIELDS = {
     "jobId", "provider", "project", "releaseId", "releaseTag", "assetId",
-    "assetName", "bundleIdentifier", "version", "buildVersion", "platform",
-    "sha256", "message",
+    "assetName", "bundleIdentifier", "artifactBundleIdentifier", "version",
+    "buildVersion", "platform", "sha256", "message",
 }
 
 
@@ -4056,6 +4061,17 @@ def _inspection_history_fields(inspection):
     }
 
 
+def _catalog_history_fields(catalog_id, inspection):
+    """Plan 090: provenance is looked up by catalog id, so the record of a
+    publish under an overridden catalog id carries that id as
+    bundleIdentifier and keeps the IPA's own id as artifactBundleIdentifier.
+    Spread after _inspection_history_fields so it wins."""
+    if inspection is None or not catalog_id or catalog_id == inspection.bundle_identifier:
+        return {}
+    return {"bundleIdentifier": catalog_id,
+            "artifactBundleIdentifier": inspection.bundle_identifier}
+
+
 # ---------------------------------------------------------------------------
 # Auto-import (Plan 048): an app-managed job store + in-process scheduler
 # that runs the same release-ingest engine as /api/import-release above, on
@@ -4142,6 +4158,26 @@ def _validate_asset_match_mode(mode):
     return mode
 
 
+def _validate_catalog_bundle_identifier(raw):
+    """Normalize the optional catalogBundleIdentifier (plan 090): the catalog
+    entry an imported IPA is published into when it should differ from the
+    IPA's own CFBundleIdentifier -- how the operator keeps patched builds
+    that share an upstream bundle id as distinct catalog apps (the Telegram
+    bot's `/add <bundleIdentifier> <version>` does the same, and check_ipa
+    only warns about the mismatch for that reason). Returns None when unset;
+    raises ValueError on a malformed value."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError("catalogBundleIdentifier must be a string")
+    value = raw.strip()
+    if not value:
+        return None
+    if len(value) > 255 or not CATALOG_BUNDLE_ID_RE.match(value):
+        raise ValueError(f"catalogBundleIdentifier {value!r} is not a valid bundle identifier")
+    return value
+
+
 def _validate_asset_pattern(field_name, pattern, mode):
     """Validate one assetGlob/assetExcludeGlob value at save time, never at
     run time inside the scheduler. In regex mode: reject patterns over
@@ -4195,6 +4231,10 @@ def _validate_auto_import_job(raw):
     # android_repo.add_apk re-derive the package from the APK's manifest.
     # When set, they act as assertions -- publish is refused if the artifact
     # disagrees -- which is why they stay optional rather than required.
+    # catalogBundleIdentifier is different: not an assertion but the catalog
+    # entry to publish the IPA into, so bundleIdentifier still checks the
+    # IPA's own id while the version lands under a distinct one.
+    catalog_bundle_id = _validate_catalog_bundle_identifier(raw.get('catalogBundleIdentifier'))
 
     asset_glob = (raw.get('assetGlob') or '*.ipa').strip()
     if not asset_glob:
@@ -4226,6 +4266,7 @@ def _validate_auto_import_job(raw):
         "provider": provider,
         "project": project,
         "bundleIdentifier": bundle_id,
+        "catalogBundleIdentifier": catalog_bundle_id,
         "package": package,
         "assetGlob": asset_glob,
         "assetExcludeGlob": asset_exclude_glob,
@@ -4250,6 +4291,7 @@ def _run_auto_import_ios_candidate(job_obj, job, base_url, session_req, tokens, 
     digest = None
     stage = "download"
     result = None
+    catalog_id = None
     try:
         fd, tmp_path = tempfile.mkstemp(dir=UPLOAD_FOLDER, suffix=".ipa")
         os.close(fd)
@@ -4268,6 +4310,9 @@ def _run_auto_import_ios_candidate(job_obj, job, base_url, session_req, tokens, 
         if job_obj.bundle_identifier and bundle_id != job_obj.bundle_identifier:
             raise ValueError(f"IPA bundle id {bundle_id} does not match the job's bundleIdentifier "
                              f"({job_obj.bundle_identifier}); not published")
+        # Plan 090: publish into the job's catalog entry when it names one.
+        # bundle_id stays the IPA's own id -- the one checked above.
+        catalog_id = job.get('catalogBundleIdentifier') or bundle_id
         detected_name = inspection.name
         preflight = {
             "platform": inspection.platform,
@@ -4279,8 +4324,10 @@ def _run_auto_import_ios_candidate(job_obj, job, base_url, session_req, tokens, 
             "deviceFamilies": list(inspection.device_families),
             "privacyKeys": sorted(inspection.privacy),
         }
+        if catalog_id != bundle_id:
+            preflight["catalogBundleIdentifier"] = catalog_id
 
-        existing = source_manager.get_app(bundle_id)
+        existing = source_manager.get_app(catalog_id)
         already_present = bool(existing) and any(
             isinstance(v, dict) and v.get('version') == version for v in existing.get('versions', [])
         )
@@ -4293,21 +4340,21 @@ def _run_auto_import_ios_candidate(job_obj, job, base_url, session_req, tokens, 
             fs = FileStorage(stream=open(tmp_path, "rb"), filename=f"{secure_filename(version)}.ipa")
             if existing:
                 ok, message = source_manager.add_version(
-                    bundle_id, {
+                    catalog_id, {
                         "version": version,
                         "buildVersion": inspection.build_version,
                         "minOSVersion": inspection.minimum_os_version,
                     }, ipa_file=fs, base_url=base_url)
                 if ok:
                     _apply_icon_to_existing(
-                        bundle_id, existing, tmp_path,
+                        catalog_id, existing, tmp_path,
                         provider=job_obj.provider, project=job_obj.project,
                         icon_url_in="", base_url=base_url,
                     )
             elif job_obj.create_if_missing:
-                new_name = job_obj.name or detected_name or bundle_id
+                new_name = job_obj.name or detected_name or catalog_id
                 new_developer = job_obj.developer_name or _repo_owner(job_obj.project) or "Unknown"
-                new_app = {"name": new_name, "bundleIdentifier": bundle_id,
+                new_app = {"name": new_name, "bundleIdentifier": catalog_id,
                            "developerName": new_developer, "version": version,
                            "buildVersion": inspection.build_version,
                            "minOSVersion": inspection.minimum_os_version}
@@ -4340,12 +4387,12 @@ def _run_auto_import_ios_candidate(job_obj, job, base_url, session_req, tokens, 
                         except OSError:
                             pass
             else:
-                message = (f"App {bundle_id} is not in the catalog. Tick 'create if missing' "
+                message = (f"App {catalog_id} is not in the catalog. Tick 'create if missing' "
                            "with a name + developer to add it.")
 
             if ok:
                 notify("add_version",
-                       f"Auto-imported {bundle_id} {version} from {job_obj.provider}:{job_obj.project}\n{base_url}/source.json")
+                       f"Auto-imported {catalog_id} {version} from {job_obj.provider}:{job_obj.project}\n{base_url}/source.json")
                 result = {"status": "published", "version": version, "preflight": preflight}
             else:
                 result = {"status": "error", "message": message}
@@ -4366,6 +4413,7 @@ def _run_auto_import_ios_candidate(job_obj, job, base_url, session_req, tokens, 
         "message": result.get("message") if result else None,
         **_candidate_history_fields(candidate),
         **_inspection_history_fields(inspection),
+        **_catalog_history_fields(catalog_id, inspection),
     }
     if digest:
         history["sha256"] = digest
@@ -4817,19 +4865,22 @@ def import_release():
     def event(**kw):
         return json.dumps(kw) + "\n"
 
-    def handle_ios(job, candidate, session_req, tokens):
+    def handle_ios(job, candidate, session_req, tokens, catalog_in=None):
         """Download, validate, and publish one selected iOS candidate as SSE
         events. Unchanged in behaviour from the pre-084 single-candidate
         code path; every event carries a new "platform" field but no
         existing field is renamed, matching what templates/index.html's
         preflight/done handlers already read. Appends its own
-        import-history record."""
+        import-history record. `catalog_in` (plan 090) names the catalog
+        entry to publish into instead of the IPA's own bundle id; the
+        preflight event still reports the IPA's id."""
         tmp_path = None
         inspection = None
         digest = None
         history_stage = "download"
         history_status = "error"
         history_message = None
+        catalog_id = None
         try:
             yield event(stage="resolved", platform="ios", asset=candidate.asset_name,
                         release=candidate.release_tag or candidate.release_id, size=candidate.declared_size)
@@ -4857,6 +4908,8 @@ def import_release():
                             error=f"IPA bundle id {bundle_id} does not match the id you entered ({bundle_id_in})")
                 history_message = "IPA bundle identifier did not match the configured value"
                 return
+            catalog_id = catalog_in or bundle_id
+            overridden = {"catalogBundleIdentifier": catalog_id} if catalog_id != bundle_id else {}
             yield event(
                 stage="preflight",
                 platform=inspection.platform,
@@ -4867,10 +4920,11 @@ def import_release():
                 minOSVersion=inspection.minimum_os_version,
                 deviceFamilies=list(inspection.device_families),
                 privacyKeys=sorted(inspection.privacy),
+                **overridden,
             )
             yield event(stage="publishing", platform="ios")
             history_stage = "publish"
-            existing = source_manager.get_app(bundle_id)
+            existing = source_manager.get_app(catalog_id)
             if existing and any(isinstance(v, dict) and v.get("version") == version
                                 for v in existing.get("versions", [])):
                 # Same rule as auto-import: nothing is stored, so no "Imported"
@@ -4879,26 +4933,26 @@ def import_release():
                 history_status = "skipped"
                 history_message = f"Version {version} already present"
                 yield event(stage="done", platform="ios", success=True, skipped=True,
-                            message=f"{bundle_id} {version} is already published; nothing to import",
-                            bundleIdentifier=bundle_id, version=version)
+                            message=f"{catalog_id} {version} is already published; nothing to import",
+                            bundleIdentifier=catalog_id, version=version)
                 return
             fs = FileStorage(stream=open(tmp_path, "rb"), filename=f"{secure_filename(version)}.ipa")
             if existing:
-                ok, message = source_manager.add_version(bundle_id, {
+                ok, message = source_manager.add_version(catalog_id, {
                     "version": version,
                     "buildVersion": inspection.build_version,
                     "minOSVersion": inspection.minimum_os_version,
                 }, ipa_file=fs, base_url=base_url)
                 if ok:
                     _apply_icon_to_existing(
-                        bundle_id, existing, tmp_path,
+                        catalog_id, existing, tmp_path,
                         provider=provider, project=project,
                         icon_url_in=icon_url_in, base_url=base_url,
                     )
             elif create_if_missing:
-                new_name = name_in or detected_name or bundle_id
+                new_name = name_in or detected_name or catalog_id
                 new_developer = developer_in or _repo_owner(project) or "Unknown"
-                new_app = {"name": new_name, "bundleIdentifier": bundle_id,
+                new_app = {"name": new_name, "bundleIdentifier": catalog_id,
                            "developerName": new_developer, "version": version,
                            "buildVersion": inspection.build_version,
                            "minOSVersion": inspection.minimum_os_version}
@@ -4937,16 +4991,16 @@ def import_release():
                             pass
             else:
                 yield event(stage="error", platform="ios",
-                            error=f"App {bundle_id} is not in the catalog. Tick 'create if missing' with a name + developer to add it.")
+                            error=f"App {catalog_id} is not in the catalog. Tick 'create if missing' with a name + developer to add it.")
                 return
             if ok and ALREADY_PRESENT in message:
                 history_status = "skipped"          # a concurrent import stored it first
                 yield event(stage="done", platform="ios", success=True, skipped=True, message=message,
-                            bundleIdentifier=bundle_id, version=version)
+                            bundleIdentifier=catalog_id, version=version)
             elif ok:
-                notify("add_version", f"Imported {bundle_id} {version} from {provider}:{project}\n{base_url}/source.json")
+                notify("add_version", f"Imported {catalog_id} {version} from {provider}:{project}\n{base_url}/source.json")
                 history_status = "published"
-                yield event(stage="done", platform="ios", success=True, message=message, bundleIdentifier=bundle_id, version=version)
+                yield event(stage="done", platform="ios", success=True, message=message, bundleIdentifier=catalog_id, version=version)
             else:
                 history_message = message
                 yield event(stage="error", platform="ios", error=message)
@@ -4971,6 +5025,7 @@ def import_release():
                 "message": history_message,
                 **_candidate_history_fields(candidate),
                 **_inspection_history_fields(inspection),
+                **_catalog_history_fields(catalog_id, inspection),
             }
             if digest:
                 history["sha256"] = digest
@@ -5070,6 +5125,7 @@ def import_release():
     def run():
         try:
             job = _release_job_from_payload(payload)
+            catalog_in = _validate_catalog_bundle_identifier(payload.get('catalogBundleIdentifier'))
             tokens = {"github": _env("GITHUB_TOKEN"), "gitlab": _env("GITLAB_TOKEN")}
             session_req = requests.Session()
             yield event(stage="resolving")
@@ -5094,7 +5150,7 @@ def import_release():
 
         for candidate in candidates or []:
             if candidate.platform == "ios":
-                yield from handle_ios(job, candidate, session_req, tokens)
+                yield from handle_ios(job, candidate, session_req, tokens, catalog_in)
             elif candidate.platform == "android":
                 yield from handle_android(job, candidate, session_req, tokens)
 
